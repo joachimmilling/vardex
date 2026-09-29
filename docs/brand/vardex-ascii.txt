@@ -1,0 +1,16 @@
+vardex — CLI mark (option A · Varde)
+The top stone prints in ANSI red (term-red); the rest in the default foreground.
+
+Unicode:
+
+   ▗▄▄▖
+   ▗▄▄▄▄▖
+▗▄▄▄▄▄▄▖
+▗▄▄▄▄▄▄▄▄▄▖  vardex
+
+7-bit ASCII:
+
+   (__)
+   (_____)
+ (______)
+(_________)  vardex

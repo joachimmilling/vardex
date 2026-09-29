@@ -1,4 +1,17 @@
-# Vardex
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-header-dark.svg">
+    <img alt="vardex — Answers you can follow back." src="docs/assets/readme-header-light.svg" width="100%">
+  </picture>
+</p>
+
+<p align="center">
+  <img alt="Status: early development" src="https://img.shields.io/badge/status-early%20development-353c42?labelColor=111315">
+  <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12-353c42?labelColor=111315">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-353c42?labelColor=111315"></a>
+</p>
+
+<p align="center"><a href="#status">Status</a> · <a href="#data">Data</a> · <a href="#license">License</a></p>
 
 **An open-source framework for the AI apps companies ask for: analysts, knowledge assistants,
 support desks, document processors, back-office agents and monitors, built from the same blocks.**
