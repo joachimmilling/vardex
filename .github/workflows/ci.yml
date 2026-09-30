@@ -1,0 +1,22 @@
+# Lint and test on every push and pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+      - name: Install the project
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check
+      - name: Check formatting
+        run: uv run ruff format --check
+      - name: Test
+        run: uv run pytest
