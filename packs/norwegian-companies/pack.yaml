@@ -1,0 +1,7 @@
+name: norwegian-companies
+version: 0.1.0
+description: >
+  Norwegian companies from the Brønnøysund registers, Statistics Norway
+  and annual reports from listed companies.
+languages: [en, nb]
+recipes: [analyst, monitor, back-office-agent]
