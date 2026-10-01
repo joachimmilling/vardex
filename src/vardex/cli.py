@@ -152,3 +152,30 @@ def validate(
         raise fail(str(err)) from err
     recipes = ", ".join(pack.recipes)
     typer.secho(f"OK  {pack.name} {pack.version}  recipes: {recipes}", fg=typer.colors.GREEN)
+
+
+@app.command()
+def packs(
+    folder: Annotated[
+        Path, typer.Argument(help="A folder of packs.", exists=True, file_okay=False)
+    ] = Path("packs"),
+) -> None:
+    """List every pack in a folder, with the error for each invalid one."""
+    subfolders = sorted(p for p in folder.iterdir() if p.is_dir() and not p.name.startswith("."))
+    if not subfolders:
+        typer.echo(f"No packs found in {folder}")
+        return
+    invalid = 0
+    for sub in subfolders:
+        try:
+            pack = load_pack(sub)
+        except PackError as err:
+            invalid += 1
+            typer.secho(f"ERROR  {sub.name}", fg=typer.colors.RED)
+            for line in str(err).splitlines():
+                typer.echo(f"       {line}")
+            continue
+        recipes = ", ".join(pack.recipes)
+        typer.secho(f"OK     {pack.name} {pack.version}  recipes: {recipes}", fg=typer.colors.GREEN)
+    if invalid:
+        raise typer.Exit(code=1)
