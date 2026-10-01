@@ -8,6 +8,8 @@ MILLION = Decimal(1_000_000)
 PRICES_CHECKED = "2026-09-29"
 PRICES_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
 STALE_AFTER_DAYS = 90
+# The Message Batches API halves every token price. Checked 2026-10-01.
+BATCH_DISCOUNT = Decimal("0.5")
 
 
 @dataclass(frozen=True)
@@ -49,20 +51,23 @@ def price_for(model: str) -> Price:
         raise UnknownModelError(f"No price for {model!r}. Add it to vardex/pricing.py.") from err
 
 
-def cost_usd(model: str, usage: Usage) -> Decimal:
-    """The cost of one call, in US dollars."""
+def cost_usd(model: str, usage: Usage, batch: bool = False) -> Decimal:
+    """The cost of one call, in US dollars. Batch calls get BATCH_DISCOUNT."""
     price = price_for(model)
-    return (
+    full = (
         usage.input_tokens * price.input
         + usage.output_tokens * price.output
         + usage.cache_write_tokens * price.cache_write
         + usage.cache_read_tokens * price.cache_read
     ) / MILLION
+    return full * (1 - BATCH_DISCOUNT) if batch else full
 
 
-def monthly_cost_usd(model: str, usage: Usage, requests_per_day: int, days: int = 30) -> Decimal:
+def monthly_cost_usd(
+    model: str, usage: Usage, requests_per_day: int, days: int = 30, batch: bool = False
+) -> Decimal:
     """The cost of a month of identical calls, in US dollars."""
-    return cost_usd(model, usage) * requests_per_day * days
+    return cost_usd(model, usage, batch) * requests_per_day * days
 
 
 def format_usd(amount: Decimal) -> str:
