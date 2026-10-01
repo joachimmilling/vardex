@@ -6,6 +6,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-01
+
 ### Added
 
 - `vardex packs` lists every pack in a folder (default `packs/`), with the error for each
