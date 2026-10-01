@@ -1,6 +1,7 @@
 """The model client: a question in; the answer, its tokens, time and cost out."""
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
@@ -33,6 +34,7 @@ class Answer:
     stop_reason: str | None
     seconds: float
     cost_usd: Decimal | None  # None when the model is not in the price table
+    first_text_seconds: float | None = None  # only measured when the answer is streamed
 
     @property
     def truncated(self) -> bool:
@@ -66,8 +68,12 @@ def ask(
     *,
     effort: Effort | None = None,
     max_tokens: int = 4096,
+    on_text: Callable[[str], None] | None = None,
 ) -> Answer:
-    """Send one question to the model and return its answer with tokens, time and cost."""
+    """Send one question to the model and return its answer with tokens, time and cost.
+
+    With on_text, the answer is streamed: on_text gets each piece of text as it is written.
+    """
     if client is None:
         client = make_client(settings)
 
@@ -81,7 +87,16 @@ def ask(
         request["output_config"] = {"effort": effort}
 
     started = time.perf_counter()
-    response = client.messages.create(**request)
+    first_text_seconds = None
+    if on_text is None:
+        response = client.messages.create(**request)
+    else:
+        with client.messages.stream(**request) as stream:
+            for text in stream.text_stream:
+                if first_text_seconds is None:
+                    first_text_seconds = time.perf_counter() - started
+                on_text(text)
+            response = stream.get_final_message()
     seconds = time.perf_counter() - started
 
     usage = read_usage(response.usage)
@@ -99,6 +114,7 @@ def ask(
         stop_reason=response.stop_reason,
         seconds=seconds,
         cost_usd=cost,
+        first_text_seconds=first_text_seconds,
     )
 
 

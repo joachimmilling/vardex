@@ -16,6 +16,13 @@ class FakeMessages:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
+        return self.message(kwargs)
+
+    def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        return FakeStream(["A nine-digit ", "number that identifies…"], self.message(kwargs))
+
+    def message(self, kwargs):
         return SimpleNamespace(
             model=kwargs["model"],
             content=[
@@ -35,6 +42,23 @@ class FakeMessages:
     def count_tokens(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(input_tokens=17)
+
+
+class FakeStream:
+    """Stands in for the stream that client.messages.stream(...) opens."""
+
+    def __init__(self, pieces, final_message):
+        self.text_stream = iter(pieces)
+        self.final_message = final_message
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self.final_message
 
 
 class FakeClient:
@@ -88,3 +112,20 @@ def test_count_tokens_uses_the_configured_model():
 def test_no_key_is_a_clear_error():
     with pytest.raises(MissingAPIKeyError):
         ask("q", Settings(anthropic_api_key=None, model="claude-sonnet-5-5"))
+
+
+def test_streaming_passes_each_piece_and_records_the_time_to_the_first():
+    client = FakeClient()
+    pieces = []
+
+    answer = ask("q", SETTINGS, client=client, on_text=pieces.append)
+
+    assert pieces == ["A nine-digit ", "number that identifies…"]
+    assert answer.text == "".join(pieces)
+    assert answer.usage.output_tokens == 300
+    assert 0 <= answer.first_text_seconds <= answer.seconds
+    assert client.messages.calls[0]["model"] == "claude-sonnet-5-5"
+
+
+def test_without_streaming_there_is_no_time_to_first_text():
+    assert ask("q", SETTINGS, client=FakeClient()).first_text_seconds is None

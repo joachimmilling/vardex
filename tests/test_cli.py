@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -115,7 +116,7 @@ def test_cost_refuses_more_cached_tokens_than_input_tokens():
 def test_ask_with_stats_and_another_model(monkeypatch):
     seen = {}
 
-    def fake_ask(question, settings, effort=None):
+    def fake_ask(question, settings, effort=None, on_text=None):
         seen["model"] = settings.model
         return Answer(
             text="Nine digits.",
@@ -146,7 +147,7 @@ def test_tokens_counts_a_file(monkeypatch, tmp_path):
     assert "24.00" in result.output  # 120 tokens / 5 words
 
 
-def fake_answer(question, settings, effort=None):
+def fake_answer(question, settings, effort=None, on_text=None):
     return Answer(
         text="Nine digits.",
         model="claude-sonnet-5-5",
@@ -206,3 +207,31 @@ def test_ask_with_stats_warns_when_prices_are_stale(monkeypatch):
     monkeypatch.setattr("vardex.cli.today", lambda: date(2027, 1, 1))
     assert "prices were last checked" in runner.invoke(app, ["ask", "--stats", "What?"]).stderr
     assert "prices were last checked" not in runner.invoke(app, ["ask", "What?"]).output
+
+
+def test_ask_with_stream_prints_pieces_as_they_come_and_the_first_text_time(monkeypatch):
+    def fake_stream(question, settings, effort=None, on_text=None):
+        for piece in ["Nine ", "digits."]:
+            on_text(piece)
+        return replace(fake_answer(question, settings), first_text_seconds=0.4)
+
+    monkeypatch.setattr("vardex.cli.ask_model", fake_stream)
+    result = runner.invoke(app, ["ask", "--stream", "--stats", "What?"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "Nine digits.\n"
+    assert "first text 0.4 s" in result.stderr
+
+
+def test_ask_without_stream_does_not_stream(monkeypatch):
+    seen = {}
+
+    def fake(question, settings, effort=None, on_text=None):
+        seen["on_text"] = on_text
+        return fake_answer(question, settings)
+
+    monkeypatch.setattr("vardex.cli.ask_model", fake)
+    result = runner.invoke(app, ["ask", "--stats", "What?"])
+    assert seen["on_text"] is None
+    assert result.stdout == "Nine digits.\n"
+    assert "first text" not in result.stderr
