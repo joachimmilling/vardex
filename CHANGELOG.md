@@ -14,6 +14,8 @@ All notable changes to Vardex are recorded here. The format follows
   `uv run pre-commit install`.
 - `vardex ask` appends one JSON line per call to `logs/calls.jsonl`: time, model, tokens,
   seconds and exact cost. If the log cannot be written, it warns and still prints the answer.
+- `vardex cost` and `vardex ask --stats` warn in yellow when the price table was last checked
+  more than 90 days ago, with the link to check the prices.
 
 ### Changed
 
