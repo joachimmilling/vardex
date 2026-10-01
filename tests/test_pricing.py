@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -8,6 +9,7 @@ from vardex.pricing import (
     cost_usd,
     format_usd,
     monthly_cost_usd,
+    stale_prices_warning,
 )
 
 
@@ -54,3 +56,14 @@ def test_money_is_exact():
 def test_format_usd():
     assert format_usd(Decimal("0.0310")) == "$0.0310"
     assert format_usd(Decimal("1650")) == "$1,650.00"
+
+
+def test_prices_checked_90_days_ago_are_not_stale():
+    assert stale_prices_warning(date(2026, 4, 1), checked="2026-01-01") is None
+
+
+def test_prices_checked_91_days_ago_are_stale_and_the_warning_says_where_to_check():
+    warning = stale_prices_warning(date(2026, 4, 2), checked="2026-01-01")
+    assert warning is not None
+    assert "91 days ago" in warning
+    assert "platform.claude.com/docs/en/about-claude/pricing" in warning

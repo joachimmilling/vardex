@@ -1,10 +1,13 @@
 """What model calls cost. Prices are in US dollars per million tokens."""
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 
 MILLION = Decimal(1_000_000)
-PRICES_CHECKED = "2026-09-29"  # platform.claude.com/docs/en/about-claude/pricing
+PRICES_CHECKED = "2026-09-29"
+PRICES_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
+STALE_AFTER_DAYS = 90
 
 
 @dataclass(frozen=True)
@@ -65,3 +68,14 @@ def monthly_cost_usd(model: str, usage: Usage, requests_per_day: int, days: int 
 def format_usd(amount: Decimal) -> str:
     """Dollars with cents, or with four decimals for amounts under one dollar."""
     return f"${amount:,.4f}" if amount < 1 else f"${amount:,.2f}"
+
+
+def stale_prices_warning(today: date, checked: str = PRICES_CHECKED) -> str | None:
+    """A warning if the price table was last checked more than STALE_AFTER_DAYS ago."""
+    age = (today - date.fromisoformat(checked)).days
+    if age <= STALE_AFTER_DAYS:
+        return None
+    return (
+        f"Warning: prices were last checked {age} days ago ({checked}). "
+        f"Check them at {PRICES_URL} and update vardex/pricing.py."
+    )

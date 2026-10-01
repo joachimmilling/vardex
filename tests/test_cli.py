@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from vardex.llm import Answer
 from vardex.pricing import Usage
 
 runner = CliRunner()
+COST_ARGS = ["cost", "--per-day", "1", "--input", "100", "--output", "10"]
 FIRST_PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
 
 
@@ -155,3 +157,25 @@ def test_ask_still_prints_the_answer_when_the_log_cannot_be_written(monkeypatch)
     assert result.exit_code == 0
     assert "Nine digits." in result.output
     assert "could not write the call log" in result.output
+
+
+def test_cost_warns_on_stderr_when_prices_are_stale(monkeypatch):
+    monkeypatch.setattr("vardex.cli.today", lambda: date(2027, 1, 1))
+    result = runner.invoke(app, COST_ARGS)
+    assert result.exit_code == 0
+    assert "prices were last checked" in result.stderr
+    assert "platform.claude.com/docs/en/about-claude/pricing" in result.stderr
+    assert "prices were last checked" not in result.stdout
+
+
+def test_cost_does_not_warn_when_prices_are_fresh(monkeypatch):
+    monkeypatch.setattr("vardex.cli.today", lambda: date(2026, 10, 1))
+    result = runner.invoke(app, COST_ARGS)
+    assert "prices were last checked" not in result.output
+
+
+def test_ask_with_stats_warns_when_prices_are_stale(monkeypatch):
+    monkeypatch.setattr("vardex.cli.ask_model", fake_answer)
+    monkeypatch.setattr("vardex.cli.today", lambda: date(2027, 1, 1))
+    assert "prices were last checked" in runner.invoke(app, ["ask", "--stats", "What?"]).stderr
+    assert "prices were last checked" not in runner.invoke(app, ["ask", "What?"]).output

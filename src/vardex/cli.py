@@ -1,6 +1,7 @@
 """The vardex command-line tool."""
 
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Annotated
 
@@ -20,6 +21,7 @@ from vardex.pricing import (
     cost_usd,
     format_usd,
     monthly_cost_usd,
+    stale_prices_warning,
 )
 
 app = typer.Typer(
@@ -34,6 +36,17 @@ def fail(message: str) -> typer.Exit:
     """Print an error in red and return the exit to raise."""
     typer.secho(message, fg=typer.colors.RED, err=True)
     return typer.Exit(code=1)
+
+
+def today() -> date:
+    """Today's date. Tests replace this to pin the date."""
+    return date.today()
+
+
+def warn_if_prices_are_stale() -> None:
+    """Print a yellow warning if the price table has not been checked for a while."""
+    if warning := stale_prices_warning(today()):
+        typer.secho(warning, fg="yellow", err=True)
 
 
 def describe(answer: Answer) -> str:
@@ -83,6 +96,7 @@ def ask(
         typer.secho("Warning: the answer was cut off at max_tokens.", fg="yellow", err=True)
     if stats:
         typer.secho(describe(answer), fg="bright_black", err=True)
+        warn_if_prices_are_stale()
 
 
 @app.command()
@@ -144,6 +158,7 @@ def cost(
         per_request = format_usd(cost_usd(model, usage))
         per_month = format_usd(monthly_cost_usd(model, usage, per_day, days))
         typer.echo(f"{model:<20}{per_request:>14}{per_month:>14}")
+    warn_if_prices_are_stale()
 
 
 @app.command()
