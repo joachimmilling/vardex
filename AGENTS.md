@@ -4,7 +4,7 @@ Vardex is an open-source framework for enterprise AI apps: an engine (src/vardex
 recipes, and domain packs (packs/). Each release is described in CHANGELOG.md.
 
 ## Commands
-- Install: `uv sync`
+- Install: `uv sync && uv run pre-commit install`
 - Test: `uv run pytest`
 - Lint and format: `uv run ruff check --fix && uv run ruff format`
 - Run the CLI: `uv run vardex --help`

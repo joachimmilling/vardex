@@ -22,6 +22,39 @@ def test_validate_rejects_a_folder_without_a_pack(tmp_path):
     assert result.exit_code == 1
 
 
+def test_packs_lists_valid_invalid_and_empty_folders(tmp_path):
+    (tmp_path / "good").mkdir()
+    (tmp_path / "good" / "pack.yaml").write_text(
+        "name: good\ndescription: A valid pack.\nrecipes: [analyst]\n"
+    )
+    (tmp_path / "bad").mkdir()
+    (tmp_path / "bad" / "pack.yaml").write_text("name: Bad Name\nrecipes: []\n")
+    (tmp_path / "empty").mkdir()
+
+    result = runner.invoke(app, ["packs", str(tmp_path)])
+
+    assert result.exit_code == 1
+    lines = result.output.splitlines()
+    assert any(line.startswith("OK") and "good 0.1.0" in line for line in lines)
+    assert any(line.startswith("ERROR") and "bad" in line for line in lines)
+    assert any(line.startswith("ERROR") and "empty" in line for line in lines)
+    assert "not a valid pack" in result.output
+    assert "No pack.yaml found" in result.output
+
+
+def test_packs_with_only_valid_packs_succeeds():
+    result = runner.invoke(app, ["packs", str(FIRST_PACK.parent)])
+    assert result.exit_code == 0
+    assert "norwegian-companies" in result.output
+    assert "ERROR" not in result.output
+
+
+def test_packs_in_an_empty_folder(tmp_path):
+    result = runner.invoke(app, ["packs", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "No packs found" in result.output
+
+
 def test_ask_without_a_key_fails_with_a_clear_message(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr("vardex.config.load_dotenv", lambda: None)  # ignore any local .env

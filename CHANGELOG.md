@@ -6,6 +6,18 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `vardex packs` lists every pack in a folder (default `packs/`), with the error for each
+  invalid one. It exits with 1 if any pack is invalid.
+- A pre-commit configuration that runs ruff lint and format on every commit. Install it with
+  `uv run pre-commit install`.
+
+### Changed
+
+- Invalid pack.yaml files are reported as one readable line per problem, such as
+  `languages → item 2: must be one of en, nb, nn (got False)`.
+
 ## [0.2.0] - YYYY-MM-DD
 
 ### Added

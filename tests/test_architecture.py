@@ -1,5 +1,6 @@
 """The engine must never depend on a specific pack."""
 
+import ast
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -13,3 +14,21 @@ def test_engine_knows_no_pack_by_name():
         text = file.read_text(encoding="utf-8")
         for name in pack_names:
             assert name not in text, f"{file.name} mentions the pack {name!r}"
+
+
+def imported_modules(tree: ast.AST) -> list[str]:
+    """Every absolute module name an import statement in the tree names."""
+    modules = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules += [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            modules.append(node.module)
+    return modules
+
+
+def test_engine_imports_no_pack():
+    for file in ENGINE.rglob("*.py"):
+        tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
+        for module in imported_modules(tree):
+            assert module.split(".")[0] != "packs", f"{file.name} imports {module!r}"
