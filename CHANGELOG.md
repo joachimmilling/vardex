@@ -18,6 +18,8 @@ All notable changes to Vardex are recorded here. The format follows
   more than 90 days ago, with the link to check the prices.
 - `vardex cost --batch` applies the 50% Message Batches API discount (checked 2026-10-01), and
   `vardex cost --model` shows only one model. A model without a price fails with a clear error.
+- `vardex ask --stream` prints the answer as it is written. With `--stats`, it also shows the
+  time to the first piece of text.
 
 ### Changed
 

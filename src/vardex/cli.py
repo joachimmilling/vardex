@@ -55,11 +55,11 @@ def describe(answer: Answer) -> str:
     out = f"{answer.usage.output_tokens:,} out"
     if answer.thinking_tokens:
         out += f" ({answer.thinking_tokens:,} thinking)"
+    seconds = f"{answer.seconds:.1f} s"
+    if answer.first_text_seconds is not None:
+        seconds += f" (first text {answer.first_text_seconds:.1f} s)"
     cost = format_usd(answer.cost_usd) if answer.cost_usd is not None else "cost unknown"
-    return (
-        f"{answer.model} · {answer.usage.input_tokens:,} in · {out}"
-        f" · {answer.seconds:.1f} s · {cost}"
-    )
+    return f"{answer.model} · {answer.usage.input_tokens:,} in · {out} · {seconds} · {cost}"
 
 
 @app.command()
@@ -76,19 +76,25 @@ def ask(
         Effort | None, typer.Option(help="How much work the model puts in. Not on Haiku 4.5.")
     ] = None,
     stats: Annotated[bool, typer.Option("--stats", help="Show tokens, time and cost.")] = False,
+    stream: Annotated[
+        bool, typer.Option("--stream", help="Print the answer as it is written.")
+    ] = False,
 ) -> None:
     """Send a question to the model and print the answer."""
     settings = load_settings()
     if model:
         settings = replace(settings, model=model)
+    on_text = (lambda text: typer.echo(text, nl=False)) if stream else None
     try:
-        answer = ask_model(question, settings, effort=effort)
+        answer = ask_model(question, settings, effort=effort, on_text=on_text)
     except MissingAPIKeyError as err:
         raise fail(str(err)) from err
     except anthropic.APIError as err:
+        if stream:
+            typer.echo()  # end a half-printed answer before the error
         raise fail(f"The API refused the request: {err.message}") from err
 
-    typer.echo(answer.text)
+    typer.echo("" if stream else answer.text)  # a streamed answer only needs its last newline
     try:
         log_call(answer)
     except OSError as err:  # the answer is already printed; a broken log must not hide it
