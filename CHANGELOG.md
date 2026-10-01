@@ -16,6 +16,8 @@ All notable changes to Vardex are recorded here. The format follows
   seconds and exact cost. If the log cannot be written, it warns and still prints the answer.
 - `vardex cost` and `vardex ask --stats` warn in yellow when the price table was last checked
   more than 90 days ago, with the link to check the prices.
+- `vardex cost --batch` applies the 50% Message Batches API discount (checked 2026-10-01), and
+  `vardex cost --model` shows only one model. A model without a price fails with a clear error.
 
 ### Changed
 

@@ -67,3 +67,11 @@ def test_prices_checked_91_days_ago_are_stale_and_the_warning_says_where_to_chec
     assert warning is not None
     assert "91 days ago" in warning
     assert "platform.claude.com/docs/en/about-claude/pricing" in warning
+
+
+def test_batch_calls_cost_half():
+    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000, cache_read_tokens=1_000_000)
+    full = cost_usd("claude-sonnet-5-5", usage)
+    assert cost_usd("claude-sonnet-5-5", usage, batch=True) == full / 2
+    monthly = monthly_cost_usd("claude-sonnet-5-5", usage, requests_per_day=10, batch=True)
+    assert monthly == full / 2 * 300

@@ -80,6 +80,33 @@ def test_cost_lists_every_model_with_the_monthly_total():
     assert "$46.50" in result.output  # Sonnet 5.5
 
 
+def test_cost_with_batch_halves_the_monthly_total():
+    args = ["cost", "--per-day", "50", "--input", "8000", "--output", "1500", "--batch"]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0
+    assert "$23.25" in result.output  # Sonnet 5.5, half of $46.50
+
+
+def test_cost_with_model_shows_only_that_model():
+    result = runner.invoke(app, [*COST_ARGS, "--model", "claude-sonnet-5-5"])
+    assert result.exit_code == 0
+    assert "claude-sonnet-5-5" in result.output
+    assert "claude-haiku-4-5" not in result.output
+
+
+def test_cost_with_model_and_batch():
+    args = ["cost", "--per-day", "50", "--input", "8000", "--output", "1500"]
+    result = runner.invoke(app, [*args, "--model", "claude-sonnet-5-5", "--batch"])
+    assert result.exit_code == 0
+    assert "$23.25" in result.output
+
+
+def test_cost_with_an_unpriced_model_fails_clearly():
+    result = runner.invoke(app, [*COST_ARGS, "--model", "gpt-imaginary"])
+    assert result.exit_code == 1
+    assert "No price for 'gpt-imaginary'" in result.stderr
+
+
 def test_cost_refuses_more_cached_tokens_than_input_tokens():
     args = ["cost", "--per-day", "1", "--input", "100", "--output", "10", "--cached", "200"]
     assert runner.invoke(app, args).exit_code == 1

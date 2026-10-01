@@ -21,6 +21,7 @@ from vardex.pricing import (
     cost_usd,
     format_usd,
     monthly_cost_usd,
+    price_for,
     stale_prices_warning,
 )
 
@@ -140,24 +141,36 @@ def cost(
         int, typer.Option(min=0, help="How many of the input tokens are read from the cache.")
     ] = 0,
     days: Annotated[int, typer.Option(min=1, help="Days per month.")] = 30,
+    batch: Annotated[
+        bool, typer.Option("--batch", help="Use Message Batches API prices (50% off).")
+    ] = False,
+    model: Annotated[str | None, typer.Option(help="Show only this model.")] = None,
 ) -> None:
     """Estimate the monthly cost of an LLM feature on every model in the price table."""
     if cached > input_tokens:
         raise fail("--cached cannot be larger than --input.")
+    if model:
+        try:
+            price_for(model)
+        except UnknownModelError as err:
+            raise fail(err.args[0]) from err
     usage = Usage(
         input_tokens=input_tokens - cached,
         output_tokens=output_tokens,
         cache_read_tokens=cached,
     )
+    models = [model] if model else sorted(PRICES, key=lambda m: cost_usd(m, usage))
     typer.echo(
         f"{per_day:,} requests a day for {days} days. Each request: "
         f"{input_tokens:,} input tokens ({cached:,} cached), {output_tokens:,} output tokens."
     )
+    if batch:
+        typer.echo("Message Batches API prices: 50% off.")
     typer.echo(f"\n{'model':<20}{'per request':>14}{'per month':>14}")
-    for model in sorted(PRICES, key=lambda m: cost_usd(m, usage)):
-        per_request = format_usd(cost_usd(model, usage))
-        per_month = format_usd(monthly_cost_usd(model, usage, per_day, days))
-        typer.echo(f"{model:<20}{per_request:>14}{per_month:>14}")
+    for name in models:
+        per_request = format_usd(cost_usd(name, usage, batch))
+        per_month = format_usd(monthly_cost_usd(name, usage, per_day, days, batch))
+        typer.echo(f"{name:<20}{per_request:>14}{per_month:>14}")
     warn_if_prices_are_stale()
 
 
