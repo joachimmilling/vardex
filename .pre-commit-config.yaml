@@ -1,0 +1,9 @@
+# Lint and format on every commit. Install once with: uv run pre-commit install
+# Keep rev in step with the ruff version in uv.lock, so local and CI results agree.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
