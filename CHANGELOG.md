@@ -28,7 +28,7 @@ All notable changes to Vardex are recorded here. The format follows
 - Invalid pack.yaml files are reported as one readable line per problem, such as
   `languages → item 2: must be one of en, nb, nn (got False)`.
 
-## [0.2.0] - YYYY-MM-DD
+## [0.2.0] - 2026-10-01
 
 ### Added
 
