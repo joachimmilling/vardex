@@ -18,6 +18,9 @@ data/interim/
 data/*.duckdb
 data/*.duckdb.wal
 
+# Call logs written by vardex ask
+logs/
+
 # Notebooks
 .ipynb_checkpoints/
 

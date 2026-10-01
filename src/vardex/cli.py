@@ -8,6 +8,7 @@ import anthropic
 import typer
 
 from vardex import __version__
+from vardex.calllog import log_call
 from vardex.config import load_settings
 from vardex.llm import Answer, Effort, MissingAPIKeyError, count_tokens
 from vardex.llm import ask as ask_model
@@ -74,6 +75,10 @@ def ask(
         raise fail(f"The API refused the request: {err.message}") from err
 
     typer.echo(answer.text)
+    try:
+        log_call(answer)
+    except OSError as err:  # the answer is already printed; a broken log must not hide it
+        typer.secho(f"Warning: could not write the call log: {err}", fg="yellow", err=True)
     if answer.truncated:
         typer.secho("Warning: the answer was cut off at max_tokens.", fg="yellow", err=True)
     if stats:

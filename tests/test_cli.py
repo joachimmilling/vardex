@@ -1,6 +1,8 @@
+import json
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from vardex.cli import app
@@ -9,6 +11,12 @@ from vardex.pricing import Usage
 
 runner = CliRunner()
 FIRST_PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
+
+
+@pytest.fixture(autouse=True)
+def in_tmp_path(tmp_path, monkeypatch):
+    """Run every command in an empty folder, so calls are never logged to the repository."""
+    monkeypatch.chdir(tmp_path)
 
 
 def test_validate_accepts_the_first_pack():
@@ -107,3 +115,43 @@ def test_tokens_counts_a_file(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert "120" in result.output
     assert "24.00" in result.output  # 120 tokens / 5 words
+
+
+def fake_answer(question, settings, effort=None):
+    return Answer(
+        text="Nine digits.",
+        model="claude-sonnet-5-5",
+        usage=Usage(input_tokens=40, output_tokens=300, cache_read_tokens=7),
+        thinking_tokens=None,
+        stop_reason="end_turn",
+        seconds=1.25,
+        cost_usd=Decimal("0.0030014"),
+    )
+
+
+def test_ask_appends_one_json_line_per_call(monkeypatch):
+    monkeypatch.setattr("vardex.cli.ask_model", fake_answer)
+    runner.invoke(app, ["ask", "What?"])
+    runner.invoke(app, ["ask", "What?"])
+
+    lines = Path("logs/calls.jsonl").read_text().splitlines()
+    assert len(lines) == 2
+    record = json.loads(lines[0])
+    assert record["model"] == "claude-sonnet-5-5"
+    assert record["input_tokens"] == 40
+    assert record["output_tokens"] == 300
+    assert record["cache_read_tokens"] == 7
+    assert record["seconds"] == 1.25
+    assert record["cost_usd"] == "0.0030014"  # a string, so the cost stays exact
+    assert record["time"].endswith("Z")
+
+
+def test_ask_still_prints_the_answer_when_the_log_cannot_be_written(monkeypatch):
+    monkeypatch.setattr("vardex.cli.ask_model", fake_answer)
+    Path("logs").write_text("a file where the log folder should be")
+
+    result = runner.invoke(app, ["ask", "What?"])
+
+    assert result.exit_code == 0
+    assert "Nine digits." in result.output
+    assert "could not write the call log" in result.output

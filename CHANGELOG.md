@@ -12,6 +12,8 @@ All notable changes to Vardex are recorded here. The format follows
   invalid one. It exits with 1 if any pack is invalid.
 - A pre-commit configuration that runs ruff lint and format on every commit. Install it with
   `uv run pre-commit install`.
+- `vardex ask` appends one JSON line per call to `logs/calls.jsonl`: time, model, tokens,
+  seconds and exact cost. If the log cannot be written, it warns and still prints the answer.
 
 ### Changed
 
