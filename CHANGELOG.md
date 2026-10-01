@@ -6,6 +6,23 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - YYYY-MM-DD
+
+### Added
+
+- `vardex ask --stats` shows the tokens, thinking tokens, time and cost of every answer.
+- `vardex ask --model` and `--effort`.
+- `vardex tokens` counts the tokens in a text file, and what sending it costs.
+- `vardex cost` estimates the monthly cost of a feature on every model.
+- A price table for the current Claude models, with exact decimal arithmetic.
+- Examples: temperature, similarity, repeating a question, and a sample report in English and
+  Norwegian.
+
+### Changed
+
+- `vardex.llm.ask` returns an `Answer` with usage, time and cost instead of a plain string.
+- Answers cut off by `max_tokens` now print a warning.
+
 ## [0.1.0] - 2026-09-30
 
 ### Added
