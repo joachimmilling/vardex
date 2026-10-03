@@ -46,7 +46,15 @@ approves and can undo.
 ## Status
 
 Vardex is in early development. Each minor release adds one layer; see [CHANGELOG.md](CHANGELOG.md)
-once the first release is out.
+once the first release is out. The map shows where each release fits: solid blocks are released,
+dashed ones are planned.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/vardex-map-dark.svg">
+    <img alt="Map of Vardex: packs plug into an engine of channels, capabilities, models, data and foundation, with evals, tracing and guardrails through every layer. Each block is marked with the release that adds it." src="docs/assets/vardex-map-light.svg" width="100%">
+  </picture>
+</p>
 
 | Version | Adds |
 |---|---|
