@@ -1,0 +1,19 @@
+Demo Bygg AS (eit oppdikta selskap, skrive for Vardex-døma)
+Årsrekneskap 2025
+
+RESULTATREKNESKAP
+Alle tal i heile tusen kroner
+
+                                       2025        2024
+Driftsinntekter                     214 908     236 410
+Varekostnad                         128 744     139 902
+Lønnskostnad                         61 230      63 115
+Avskrivingar                          4 102       3 880
+Andre driftskostnader                14 905      15 620
+Sum driftskostnader                 208 981     222 517
+
+Driftsresultat                        5 927      13 893
+
+Finansinntekter                         412         290
+Finanskostnader                       2 016       1 744
+Resultat før skatt                    4 323      12 439

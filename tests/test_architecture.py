@@ -32,3 +32,12 @@ def test_engine_imports_no_pack():
         tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
         for module in imported_modules(tree):
             assert module.split(".")[0] != "packs", f"{file.name} imports {module!r}"
+
+
+def test_only_the_anthropic_client_imports_anthropic():
+    for file in ENGINE.rglob("*.py"):
+        if file.name == "anthropic_client.py":
+            continue
+        tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
+        for module in imported_modules(tree):
+            assert module.split(".")[0] != "anthropic", f"{file.name} imports {module!r}"

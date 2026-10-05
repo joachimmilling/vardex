@@ -1,0 +1,16 @@
+Demo Eiendom AS (et oppdiktet selskap, skrevet for Vardex-eksemplene)
+Resultatregnskap 1. januar – 31. desember
+
+Beløp i NOK 1 000
+                                  Morselskap             Konsern
+                                 2025      2024      2025      2024
+Leieinntekter                  18 410    17 220   402 118   377 905
+Andre driftsinntekter           2 305     2 140    11 670    10 485
+Sum driftsinntekter            20 715    19 360   413 788   388 390
+
+Driftskostnader                (9 880)   (9 012) (118 334) (110 210)
+Avskrivninger                    (420)     (395)  (64 210)  (60 118)
+Driftsresultat                 10 415     9 953   231 244   218 062
+
+Netto finansposter              8 112     6 780   (88 615)  (81 340)
+Resultat før skattekostnad     18 527    16 733   142 629   136 722

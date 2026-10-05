@@ -12,6 +12,8 @@ DEFAULT_MODEL = "claude-sonnet-5-5"
 class Settings:
     anthropic_api_key: str | None
     model: str
+    timeout_seconds: float = 120.0  # per attempt; the SDK's own default is ten minutes
+    max_retries: int = 2  # extra attempts after a rate limit, an overload or a dropped connection
 
 
 def load_settings() -> Settings:

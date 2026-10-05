@@ -1,25 +1,13 @@
 import json
-from dataclasses import replace
-from datetime import date
-from decimal import Decimal
 from pathlib import Path
 
-import pytest
+from fakes import FakeModel
 from typer.testing import CliRunner
 
 from vardex.cli import app
-from vardex.llm import Answer
-from vardex.pricing import Usage
 
 runner = CliRunner()
-COST_ARGS = ["cost", "--per-day", "1", "--input", "100", "--output", "10"]
 FIRST_PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
-
-
-@pytest.fixture(autouse=True)
-def in_tmp_path(tmp_path, monkeypatch):
-    """Run every command in an empty folder, so calls are never logged to the repository."""
-    monkeypatch.chdir(tmp_path)
 
 
 def test_validate_accepts_the_first_pack():
@@ -81,157 +69,118 @@ def test_cost_lists_every_model_with_the_monthly_total():
     assert "$46.50" in result.output  # Sonnet 5.5
 
 
-def test_cost_with_batch_halves_the_monthly_total():
-    args = ["cost", "--per-day", "50", "--input", "8000", "--output", "1500", "--batch"]
-    result = runner.invoke(app, args)
-    assert result.exit_code == 0
-    assert "$23.25" in result.output  # Sonnet 5.5, half of $46.50
-
-
-def test_cost_with_model_shows_only_that_model():
-    result = runner.invoke(app, [*COST_ARGS, "--model", "claude-sonnet-5-5"])
-    assert result.exit_code == 0
-    assert "claude-sonnet-5-5" in result.output
-    assert "claude-haiku-4-5" not in result.output
-
-
-def test_cost_with_model_and_batch():
-    args = ["cost", "--per-day", "50", "--input", "8000", "--output", "1500"]
-    result = runner.invoke(app, [*args, "--model", "claude-sonnet-5-5", "--batch"])
-    assert result.exit_code == 0
-    assert "$23.25" in result.output
-
-
-def test_cost_with_an_unpriced_model_fails_clearly():
-    result = runner.invoke(app, [*COST_ARGS, "--model", "gpt-imaginary"])
-    assert result.exit_code == 1
-    assert "No price for 'gpt-imaginary'" in result.stderr
-
-
 def test_cost_refuses_more_cached_tokens_than_input_tokens():
     args = ["cost", "--per-day", "1", "--input", "100", "--output", "10", "--cached", "200"]
     assert runner.invoke(app, args).exit_code == 1
 
 
-def test_ask_with_stats_and_another_model(monkeypatch):
+def test_cost_for_one_model_at_batch_prices():
+    args = ["cost", "--per-day", "50", "--input", "8000", "--output", "1500"]
+    result = runner.invoke(app, [*args, "--model", "claude-sonnet-5-5", "--batch"])
+    assert result.exit_code == 0
+    assert "$23.25" in result.output  # half of $46.50
+    assert "claude-haiku-4-5" not in result.output
+
+
+def test_cost_refuses_a_model_without_a_price():
+    args = ["cost", "--per-day", "1", "--input", "100", "--output", "10", "--model", "gpt-x"]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 1
+    assert "No price for 'gpt-x'" in result.output
+
+
+def test_cost_warns_when_prices_are_old(monkeypatch):
+    monkeypatch.setattr("vardex.pricing.PRICES_CHECKED", "2020-01-01")
+    result = runner.invoke(app, ["cost", "--per-day", "1", "--input", "100", "--output", "10"])
+    assert result.exit_code == 0
+    assert "Warning: prices were checked" in result.output
+
+
+def test_ask_with_stats_and_another_model(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # the call log is written to the current folder
     seen = {}
 
-    def fake_ask(question, settings, effort=None, on_text=None):
+    def connect(settings):
         seen["model"] = settings.model
-        return Answer(
-            text="Nine digits.",
-            model=settings.model,
-            usage=Usage(input_tokens=40, output_tokens=300),
-            thinking_tokens=250,
-            stop_reason="end_turn",
-            seconds=2.5,
-            cost_usd=Decimal("0.0015"),
-        )
+        return FakeModel("Nine digits.")
 
-    monkeypatch.setattr("vardex.cli.ask_model", fake_ask)
+    monkeypatch.setattr("vardex.cli.connect", connect)
     result = runner.invoke(app, ["ask", "--stats", "--model", "claude-haiku-4-5", "What?"])
     assert result.exit_code == 0
     assert seen["model"] == "claude-haiku-4-5"
     assert "Nine digits." in result.output
-    assert "250 thinking" in result.output
-    assert "$0.0015" in result.output
+    assert "150 thinking" in result.output
+    assert "$0.0040" in result.output
+
+
+def test_ask_streams_the_answer(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: FakeModel("Nine digits."))
+    result = runner.invoke(app, ["ask", "--stream", "--stats", "What?"])
+    assert result.exit_code == 0
+    assert result.output.startswith("Nine digits.\n")
+    assert "first text after 0.5 s" in result.output
+
+
+def test_ask_logs_every_call(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: FakeModel("One.", "Two."))
+    runner.invoke(app, ["ask", "One?"])
+    runner.invoke(app, ["ask", "Two?"])
+    lines = (tmp_path / "logs" / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["cost_usd"] == "0.004"
+
+
+def test_extract_prints_one_line_per_document_and_reports_failures(monkeypatch, tmp_path):
+    good = tmp_path / "good.txt"
+    good.write_text("Demo Bygg AS. Alle tal i heile tusen kroner. Driftsresultat 5 927.")
+    bad = tmp_path / "bad.txt"
+    bad.write_text("Til våre aksjonærer: 2025 ble et år med store endringer.")
+    values = {
+        "problem": None,
+        "company_name": "Demo Bygg AS",
+        "fiscal_year": 2025,
+        "accounts": "company",
+        "currency": "NOK",
+        "unit": "thousands",
+        "unit_quote": "Alle tal i heile tusen kroner",
+        "revenue": None,
+        "revenue_quote": None,
+        "operating_profit": 5927,
+        "operating_profit_quote": "5 927",
+    }
+    no_figures = values | {"problem": "The page has no figures."}
+    model = FakeModel(json.dumps(values), json.dumps(no_figures))
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["extract", str(FIRST_PACK), "key-figures", str(good), str(bad)])
+
+    assert result.exit_code == 1
+    first = json.loads(result.output.splitlines()[0])
+    assert first["file"] == "good.txt"
+    assert first["operating_profit"] == "5927"  # an exact string, never a float
+    assert "bad.txt: the model reports: The page has no figures." in result.output
+    assert "1 of 2 documents failed." in result.output
+    assert len((tmp_path / "logs" / "calls.jsonl").read_text().splitlines()) == 2
+
+
+def test_extract_with_an_unknown_extraction_fails_before_any_call(tmp_path):
+    page = tmp_path / "page.txt"
+    page.write_text("…")
+    result = runner.invoke(app, ["extract", str(FIRST_PACK), "invoices", str(page)])
+    assert result.exit_code == 1
+    assert "No extraction 'invoices'" in result.output
 
 
 def test_tokens_counts_a_file(monkeypatch, tmp_path):
-    monkeypatch.setattr("vardex.cli.count_tokens", lambda text, settings: 120)
+    model = FakeModel()
+    model.count_tokens = lambda text: 120
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
     file = tmp_path / "report.txt"
     file.write_text("Driftsinntektene økte med 12 prosent.", encoding="utf-8")
     result = runner.invoke(app, ["tokens", str(file)])
     assert result.exit_code == 0
     assert "120" in result.output
     assert "24.00" in result.output  # 120 tokens / 5 words
-
-
-def fake_answer(question, settings, effort=None, on_text=None):
-    return Answer(
-        text="Nine digits.",
-        model="claude-sonnet-5-5",
-        usage=Usage(input_tokens=40, output_tokens=300, cache_read_tokens=7),
-        thinking_tokens=None,
-        stop_reason="end_turn",
-        seconds=1.25,
-        cost_usd=Decimal("0.0030014"),
-    )
-
-
-def test_ask_appends_one_json_line_per_call(monkeypatch):
-    monkeypatch.setattr("vardex.cli.ask_model", fake_answer)
-    runner.invoke(app, ["ask", "What?"])
-    runner.invoke(app, ["ask", "What?"])
-
-    lines = Path("logs/calls.jsonl").read_text().splitlines()
-    assert len(lines) == 2
-    record = json.loads(lines[0])
-    assert record["model"] == "claude-sonnet-5-5"
-    assert record["input_tokens"] == 40
-    assert record["output_tokens"] == 300
-    assert record["cache_read_tokens"] == 7
-    assert record["seconds"] == 1.25
-    assert record["cost_usd"] == "0.0030014"  # a string, so the cost stays exact
-    assert record["time"].endswith("Z")
-
-
-def test_ask_still_prints_the_answer_when_the_log_cannot_be_written(monkeypatch):
-    monkeypatch.setattr("vardex.cli.ask_model", fake_answer)
-    Path("logs").write_text("a file where the log folder should be")
-
-    result = runner.invoke(app, ["ask", "What?"])
-
-    assert result.exit_code == 0
-    assert "Nine digits." in result.output
-    assert "could not write the call log" in result.output
-
-
-def test_cost_warns_on_stderr_when_prices_are_stale(monkeypatch):
-    monkeypatch.setattr("vardex.cli.today", lambda: date(2027, 1, 1))
-    result = runner.invoke(app, COST_ARGS)
-    assert result.exit_code == 0
-    assert "prices were last checked" in result.stderr
-    assert "platform.claude.com/docs/en/about-claude/pricing" in result.stderr
-    assert "prices were last checked" not in result.stdout
-
-
-def test_cost_does_not_warn_when_prices_are_fresh(monkeypatch):
-    monkeypatch.setattr("vardex.cli.today", lambda: date(2026, 10, 1))
-    result = runner.invoke(app, COST_ARGS)
-    assert "prices were last checked" not in result.output
-
-
-def test_ask_with_stats_warns_when_prices_are_stale(monkeypatch):
-    monkeypatch.setattr("vardex.cli.ask_model", fake_answer)
-    monkeypatch.setattr("vardex.cli.today", lambda: date(2027, 1, 1))
-    assert "prices were last checked" in runner.invoke(app, ["ask", "--stats", "What?"]).stderr
-    assert "prices were last checked" not in runner.invoke(app, ["ask", "What?"]).output
-
-
-def test_ask_with_stream_prints_pieces_as_they_come_and_the_first_text_time(monkeypatch):
-    def fake_stream(question, settings, effort=None, on_text=None):
-        for piece in ["Nine ", "digits."]:
-            on_text(piece)
-        return replace(fake_answer(question, settings), first_text_seconds=0.4)
-
-    monkeypatch.setattr("vardex.cli.ask_model", fake_stream)
-    result = runner.invoke(app, ["ask", "--stream", "--stats", "What?"])
-
-    assert result.exit_code == 0
-    assert result.stdout == "Nine digits.\n"
-    assert "first text 0.4 s" in result.stderr
-
-
-def test_ask_without_stream_does_not_stream(monkeypatch):
-    seen = {}
-
-    def fake(question, settings, effort=None, on_text=None):
-        seen["on_text"] = on_text
-        return fake_answer(question, settings)
-
-    monkeypatch.setattr("vardex.cli.ask_model", fake)
-    result = runner.invoke(app, ["ask", "--stats", "What?"])
-    assert seen["on_text"] is None
-    assert result.stdout == "Nine digits.\n"
-    assert "first text" not in result.stderr

@@ -1,0 +1,16 @@
+Demo Handel AS (et oppdiktet selskap, skrevet for Vardex-eksemplene)
+Resultatregnskap for 2025
+
+Beløp i kroner
+
+                                      2025              2024
+Salgsinntekt                    12 845 330        11 902 418
+Sum driftsinntekter             12 845 330        11 902 418
+
+Varekostnad                      7 902 114         7 340 006
+Lønnskostnad                     3 104 552         2 987 330
+Annen driftskostnad              1 210 880         1 144 210
+Sum driftskostnader             12 217 546        11 471 546
+
+Driftsresultat                     627 784           430 872
+Resultat før skattekostnad         601 337           412 905

@@ -1,0 +1,15 @@
+Demo Holding AS (et oppdiktet selskap, skrevet for Vardex-eksemplene)
+Resultatregnskap 2025 — morselskap
+
+Beløp i NOK 1 000
+
+                                         2025         2024
+Lønnskostnad                             (980)        (912)
+Annen driftskostnad                      (254)        (301)
+Driftsresultat                         (1 234)      (1 213)
+
+Inntekt på investering i datterselskap  42 500       38 000
+Renteinntekter                             610          455
+Resultat før skattekostnad              41 876       37 242
+
+Selskapet har ingen driftsinntekter. Inntektene kommer fra utbytte fra datterselskaper.

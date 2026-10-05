@@ -1,131 +1,28 @@
-from decimal import Decimal
-from types import SimpleNamespace
+from fakes import FakeModel
 
-import pytest
-
-from vardex.config import Settings
-from vardex.llm import MissingAPIKeyError, ask, count_tokens
+from vardex.llm import Message, ask
+from vardex.prompts import ASK
 
 
-class FakeMessages:
-    """Stands in for client.messages, so tests never call the real API."""
+def test_ask_sends_the_question_with_the_engine_prompt():
+    model = FakeModel("A nine-digit number.")
 
-    def __init__(self, stop_reason="end_turn"):
-        self.calls = []
-        self.stop_reason = stop_reason
+    answer = ask(model, "What is an organisation number?")
 
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
-        return self.message(kwargs)
-
-    def stream(self, **kwargs):
-        self.calls.append(kwargs)
-        return FakeStream(["A nine-digit ", "number that identifies…"], self.message(kwargs))
-
-    def message(self, kwargs):
-        return SimpleNamespace(
-            model=kwargs["model"],
-            content=[
-                SimpleNamespace(type="thinking", thinking=""),  # hidden thinking has no text
-                SimpleNamespace(type="text", text="A nine-digit number that identifies…"),
-            ],
-            stop_reason=self.stop_reason,
-            usage=SimpleNamespace(
-                input_tokens=40,
-                output_tokens=300,
-                cache_creation_input_tokens=None,
-                cache_read_input_tokens=None,
-                output_tokens_details=SimpleNamespace(thinking_tokens=250),
-            ),
-        )
-
-    def count_tokens(self, **kwargs):
-        self.calls.append(kwargs)
-        return SimpleNamespace(input_tokens=17)
+    assert answer.text == "A nine-digit number."
+    request = model.requests[0]
+    assert request.system == ASK
+    assert request.messages == [Message("user", "What is an organisation number?")]
+    assert request.effort is None
+    assert request.output_schema is None
 
 
-class FakeStream:
-    """Stands in for the stream that client.messages.stream(...) opens."""
-
-    def __init__(self, pieces, final_message):
-        self.text_stream = iter(pieces)
-        self.final_message = final_message
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def get_final_message(self):
-        return self.final_message
-
-
-class FakeClient:
-    def __init__(self, stop_reason="end_turn"):
-        self.messages = FakeMessages(stop_reason)
-
-
-SETTINGS = Settings(anthropic_api_key="test", model="claude-sonnet-5-5")
-
-
-def test_ask_returns_the_text_and_what_it_cost():
-    client = FakeClient()
-
-    answer = ask("What is an organisation number?", SETTINGS, client=client)
-
-    assert answer.text.startswith("A nine-digit number")
-    assert answer.usage.input_tokens == 40
-    assert answer.thinking_tokens == 250
-    assert answer.cost_usd == Decimal("0.00308")  # 40 × $2 + 300 × $10, per million
-    assert not answer.truncated
-    call = client.messages.calls[0]
-    assert call["model"] == "claude-sonnet-5-5"
-    assert call["messages"] == [{"role": "user", "content": "What is an organisation number?"}]
-
-
-def test_effort_is_sent_only_when_chosen():
-    client = FakeClient()
-    ask("q", SETTINGS, client=client)
-    ask("q", SETTINGS, client=client, effort="low")
-    assert "output_config" not in client.messages.calls[0]
-    assert client.messages.calls[1]["output_config"] == {"effort": "low"}
-
-
-def test_an_answer_cut_off_by_max_tokens_is_flagged():
-    answer = ask("q", SETTINGS, client=FakeClient(stop_reason="max_tokens"))
-    assert answer.truncated
-
-
-def test_unknown_model_gives_an_answer_without_a_cost():
-    settings = Settings(anthropic_api_key="test", model="some-future-model")
-    answer = ask("q", settings, client=FakeClient())
-    assert answer.cost_usd is None
-
-
-def test_count_tokens_uses_the_configured_model():
-    client = FakeClient()
-    assert count_tokens("Hei", SETTINGS, client=client) == 17
-    assert client.messages.calls[0]["model"] == "claude-sonnet-5-5"
-
-
-def test_no_key_is_a_clear_error():
-    with pytest.raises(MissingAPIKeyError):
-        ask("q", Settings(anthropic_api_key=None, model="claude-sonnet-5-5"))
-
-
-def test_streaming_passes_each_piece_and_records_the_time_to_the_first():
-    client = FakeClient()
+def test_ask_passes_on_effort_and_streaming():
+    model = FakeModel("Nine digits.")
     pieces = []
 
-    answer = ask("q", SETTINGS, client=client, on_text=pieces.append)
+    answer = ask(model, "q", effort="low", on_text=pieces.append)
 
-    assert pieces == ["A nine-digit ", "number that identifies…"]
-    assert answer.text == "".join(pieces)
-    assert answer.usage.output_tokens == 300
-    assert 0 <= answer.first_text_seconds <= answer.seconds
-    assert client.messages.calls[0]["model"] == "claude-sonnet-5-5"
-
-
-def test_without_streaming_there_is_no_time_to_first_text():
-    assert ask("q", SETTINGS, client=FakeClient()).first_text_seconds is None
+    assert model.requests[0].effort == "low"
+    assert pieces == ["Nine digits."]
+    assert answer.first_text_seconds == 0.5

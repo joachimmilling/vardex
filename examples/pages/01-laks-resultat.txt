@@ -1,0 +1,23 @@
+Demo Laks AS (et oppdiktet selskap, skrevet for Vardex-eksemplene)
+Årsregnskap 2025
+
+RESULTATREGNSKAP
+Beløp i NOK 1 000
+
+                                         Note        2025         2024
+Salgsinntekt                                    1 462 870    1 309 455
+Annen driftsinntekt                                17 442       12 108
+Sum driftsinntekter                       2     1 480 312    1 321 563
+
+Varekostnad                                       702 115      640 220
+Lønnskostnad                              3       214 380      198 774
+Avskrivning på driftsmidler               5        96 540       88 310
+Annen driftskostnad                       4       154 822      126 004
+Sum driftskostnader                             1 167 857    1 053 308
+
+Driftsresultat før verdijustering                 312 455      268 255
+Verdijustering biomasse                   6        41 200      -18 900
+Driftsresultat                                    353 655      249 355
+
+Netto finansposter                        7       -22 410      -19 870
+Resultat før skattekostnad                        331 245      229 485

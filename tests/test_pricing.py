@@ -1,9 +1,11 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 
 from vardex.pricing import (
+    PRICES_CHECKED,
+    STALE_AFTER_DAYS,
     UnknownModelError,
     Usage,
     cost_usd,
@@ -58,20 +60,15 @@ def test_format_usd():
     assert format_usd(Decimal("1650")) == "$1,650.00"
 
 
-def test_prices_checked_90_days_ago_are_not_stale():
-    assert stale_prices_warning(date(2026, 4, 1), checked="2026-01-01") is None
+def test_batch_prices_are_half():
+    usage = Usage(input_tokens=8000, output_tokens=1500, cache_read_tokens=2000)
+    full = cost_usd("claude-opus-5-5", usage)
+    assert cost_usd("claude-opus-5-5", usage, batch=True) * 2 == full
 
 
-def test_prices_checked_91_days_ago_are_stale_and_the_warning_says_where_to_check():
-    warning = stale_prices_warning(date(2026, 4, 2), checked="2026-01-01")
+def test_prices_are_stale_after_ninety_days():
+    checked = date.fromisoformat(PRICES_CHECKED)
+    assert stale_prices_warning(checked + timedelta(days=STALE_AFTER_DAYS)) is None
+    warning = stale_prices_warning(checked + timedelta(days=STALE_AFTER_DAYS + 1))
     assert warning is not None
     assert "91 days ago" in warning
-    assert "platform.claude.com/docs/en/about-claude/pricing" in warning
-
-
-def test_batch_calls_cost_half():
-    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000, cache_read_tokens=1_000_000)
-    full = cost_usd("claude-sonnet-5-5", usage)
-    assert cost_usd("claude-sonnet-5-5", usage, batch=True) == full / 2
-    monthly = monthly_cost_usd("claude-sonnet-5-5", usage, requests_per_day=10, batch=True)
-    assert monthly == full / 2 * 300

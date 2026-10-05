@@ -6,6 +6,29 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
+### Added
+
+- `vardex extract PACK NAME FILES...` extracts structured values from documents. A pack describes
+  the fields in `extractions/<name>.yaml`; each document gives one JSON line of checked values, or
+  a red reason why not.
+- The `key-figures` extraction in the `norwegian-companies` pack: revenue, operating profit, year,
+  currency, unit and accounts from a page of an annual report, with the words each came from.
+- Checks on extracted values: quotes must appear in the document, amounts must match their quotes,
+  and required values must be present.
+- `ModelClient`, a provider-neutral interface to models, and `AnthropicClient`, its implementation
+  for Claude, with a 120-second timeout, two retries and prompt caching.
+- `--stats` shows cache reads and writes.
+- Examples: ten sample report pages, and one round of tool calling by hand.
+
+### Changed
+
+- `vardex.llm.ask` takes a `ModelClient` instead of settings. Only `anthropic_client.py` imports
+  `anthropic`, and a test enforces it.
+- The engine's prompts live in `vardex.prompts`. They name no product and no audience; both belong
+  to the app built on Vardex.
+- `--effort` is ignored on Claude Haiku 4.5 instead of failing.
 ## [0.2.1] - 2026-10-01
 
 ### Added
