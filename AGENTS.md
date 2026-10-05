@@ -12,6 +12,10 @@ recipes, and domain packs (packs/). Each release is described in CHANGELOG.md.
 ## Rules
 - The engine in src/vardex never imports a pack or mentions one by name.
   tests/test_architecture.py enforces this. Never weaken or skip that test.
+- Only src/vardex/anthropic_client.py imports anthropic. Everything else talks to models
+  through ModelClient in vardex.llm. tests/test_architecture.py enforces this too.
+- Prompts are code. Engine prompts live in src/vardex/prompts.py, domain prompts in packs.
+  Describe every prompt change in CHANGELOG.md.
 - Validate all external data (files, API responses, model output) with Pydantic.
 - Tests never call real APIs. Pass fake clients instead.
 - Never read, print or commit .env. Use .env.example for variable names.

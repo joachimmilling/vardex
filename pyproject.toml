@@ -1,6 +1,6 @@
 [project]
 name = "vardex"
-version = "0.2.1"
+version = "0.3.0"
 description = "Blocks, recipes and packs for enterprise AI apps"
 readme = "README.md"
 authors = [

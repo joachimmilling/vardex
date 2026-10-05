@@ -1,0 +1,12 @@
+Demo Kraft AS (et oppdiktet selskap, skrevet for Vardex-eksemplene)
+Nøkkeltall for konsernet
+
+MNOK                                     2025          2024
+Driftsinntekter                       2 315,4       2 742,9
+EBITDA                                  904,7       1 288,1
+Driftsresultat                          611,2         997,5
+Resultat før skatt                      548,0         941,3
+Grunnrenteskatt                        -142,6        -301,8
+Produksjon (GWh)                        3 120         3 455
+
+Lavere kraftpriser i NO5 ga lavere inntekter enn i rekordåret 2024.

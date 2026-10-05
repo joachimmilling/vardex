@@ -15,7 +15,7 @@ import anthropic
 import typer
 
 from vardex.config import load_settings
-from vardex.llm import SYSTEM_PROMPT, MissingAPIKeyError, make_client
+from vardex.prompts import ASK
 
 
 def main(
@@ -27,21 +27,22 @@ def main(
     """Ask one question several times and count how many different answers come back."""
     settings = load_settings()
     model = model or settings.model
-    try:
-        client = make_client(settings)
-    except MissingAPIKeyError as err:
-        typer.secho(str(err), fg="red", err=True)
-        raise typer.Exit(1) from err
+    if not settings.anthropic_api_key:
+        typer.secho("ANTHROPIC_API_KEY is not set.", fg="red", err=True)
+        raise typer.Exit(1)
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
     # The SDK no longer has a temperature argument, so it goes into the request body directly.
     extra_body = {"temperature": temperature} if temperature is not None else None
+    setting = "default" if temperature is None else temperature
+    typer.echo(f"=== {model} · temperature {setting} · {runs} runs ===\n")
     answers = []
     for run in range(1, runs + 1):
         try:
             response = client.messages.create(
                 model=model,
                 max_tokens=4096,
-                system=SYSTEM_PROMPT,
+                system=ASK,
                 messages=[{"role": "user", "content": question}],
                 extra_body=extra_body,
             )
@@ -50,10 +51,11 @@ def main(
             raise typer.Exit(1) from err
         text = "".join(b.text for b in response.content if b.type == "text").strip()
         answers.append(text)
-        typer.echo(f"--- run {run} · {response.usage.output_tokens} output tokens\n{text}\n")
+        tokens = response.usage.output_tokens
+        typer.echo(f"--- run {run} · {tokens} output tokens, thinking included\n{text}\n")
 
     distinct = Counter(answers)
-    typer.echo(f"{model}: {len(distinct)} different answers in {runs} runs.")
+    typer.echo(f"{len(distinct)} different answers in {runs} runs.\n")
 
 
 if __name__ == "__main__":

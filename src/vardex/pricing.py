@@ -5,11 +5,9 @@ from datetime import date
 from decimal import Decimal
 
 MILLION = Decimal(1_000_000)
-PRICES_CHECKED = "2026-09-29"
-PRICES_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
+PRICES_CHECKED = "2026-09-29"  # platform.claude.com/docs/en/about-claude/pricing
 STALE_AFTER_DAYS = 90
-# The Message Batches API halves every token price. Checked 2026-10-01.
-BATCH_DISCOUNT = Decimal("0.5")
+BATCH_DISCOUNT = Decimal("0.5")  # the Message Batches API halves every token price
 
 
 @dataclass(frozen=True)
@@ -51,36 +49,41 @@ def price_for(model: str) -> Price:
         raise UnknownModelError(f"No price for {model!r}. Add it to vardex/pricing.py.") from err
 
 
-def cost_usd(model: str, usage: Usage, batch: bool = False) -> Decimal:
-    """The cost of one call, in US dollars. Batch calls get BATCH_DISCOUNT."""
+def cost_usd(model: str, usage: Usage, *, batch: bool = False) -> Decimal:
+    """The cost of one call, in US dollars."""
     price = price_for(model)
-    full = (
+    total = (
         usage.input_tokens * price.input
         + usage.output_tokens * price.output
         + usage.cache_write_tokens * price.cache_write
         + usage.cache_read_tokens * price.cache_read
     ) / MILLION
-    return full * (1 - BATCH_DISCOUNT) if batch else full
+    return total * BATCH_DISCOUNT if batch else total
 
 
 def monthly_cost_usd(
-    model: str, usage: Usage, requests_per_day: int, days: int = 30, batch: bool = False
+    model: str, usage: Usage, requests_per_day: int, days: int = 30, *, batch: bool = False
 ) -> Decimal:
     """The cost of a month of identical calls, in US dollars."""
-    return cost_usd(model, usage, batch) * requests_per_day * days
+    return cost_usd(model, usage, batch=batch) * requests_per_day * days
+
+
+def prices_age_days(today: date | None = None) -> int:
+    """How many days ago the price table was checked."""
+    return ((today or date.today()) - date.fromisoformat(PRICES_CHECKED)).days
+
+
+def stale_prices_warning(today: date | None = None) -> str | None:
+    """A warning when the price table is too old to trust, otherwise None."""
+    age = prices_age_days(today)
+    if age <= STALE_AFTER_DAYS:
+        return None
+    return (
+        f"Warning: prices were checked {age} days ago ({PRICES_CHECKED}). Compare them with "
+        "platform.claude.com/docs/en/about-claude/pricing and update vardex/pricing.py."
+    )
 
 
 def format_usd(amount: Decimal) -> str:
     """Dollars with cents, or with four decimals for amounts under one dollar."""
     return f"${amount:,.4f}" if amount < 1 else f"${amount:,.2f}"
-
-
-def stale_prices_warning(today: date, checked: str = PRICES_CHECKED) -> str | None:
-    """A warning if the price table was last checked more than STALE_AFTER_DAYS ago."""
-    age = (today - date.fromisoformat(checked)).days
-    if age <= STALE_AFTER_DAYS:
-        return None
-    return (
-        f"Warning: prices were last checked {age} days ago ({checked}). "
-        f"Check them at {PRICES_URL} and update vardex/pricing.py."
-    )

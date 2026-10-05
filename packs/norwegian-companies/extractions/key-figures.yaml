@@ -1,0 +1,61 @@
+# Key figures from one page of a Norwegian annual report.
+# Run: uv run vardex extract packs/norwegian-companies key-figures <page.txt> ...
+description: Revenue and operating profit, with year, currency, unit and accounts.
+
+instructions: |
+  The document is one page from a company's annual report: an income statement
+  (resultatregnskap), a table of key figures (nøkkeltall) or a board of directors' report
+  (årsberetning). It may be in Bokmål, Nynorsk or English.
+
+  Extract the key figures for the most recent fiscal year on the page. When the page shows
+  several years side by side, use the newest column, never the previous year.
+
+  Units. Annual reports rarely state amounts in whole kroner. The unit is usually given once,
+  in a table heading or a note, and applies to every amount on the page:
+  - "Beløp i NOK 1 000", "Tall i hele tusen", "Alle tal i heile tusen kroner", "TNOK",
+    "NOK thousand" and "USD 1,000" mean thousands.
+  - "MNOK", "NOK mill.", "Beløp i millioner kroner" and "NOK million" mean millions.
+  - "Beløp i kroner" or "NOK" with no multiplier means ones.
+  Quote the words that state the unit. If the page does not state a unit, set problem.
+
+  Names. Revenue is total operating revenue: "Sum driftsinntekter", "Driftsinntekter",
+  "Sum inntekter", "Total operating revenue" or "Revenue". Operating profit is
+  "Driftsresultat", "Operating profit" or "EBIT". Do not use a sales line (salgsinntekt) when
+  a total is shown, and do not use a profit before tax (resultat før skatt).
+  Some companies have no operating revenue, such as a holding company. Then leave revenue empty.
+
+  Accounts. A group's accounts (konsern, consolidated) include its subsidiaries; a parent
+  company's (morselskap) do not. When the page shows both, use the group's figures.
+
+  Negative amounts are shown with a minus sign or in parentheses: (1 234) means −1234.
+  Return them as negative numbers, and quote them as printed.
+
+fields:
+  company_name:
+    type: text
+    description: The company's name as printed, such as "Demo Laks AS".
+  fiscal_year:
+    type: integer
+    description: The fiscal year the figures are for, such as 2025.
+  accounts:
+    type: choice
+    choices: [company, group]
+    description: group for consolidated (konsern) figures, company otherwise.
+  currency:
+    type: choice
+    choices: [NOK, EUR, USD, SEK, DKK]
+    description: The currency of the amounts.
+  unit:
+    type: choice
+    choices: [ones, thousands, millions]
+    description: The unit the amounts on the page are stated in.
+    quote: true
+  revenue:
+    type: amount
+    required: false
+    description: Total operating revenue in the page's unit, as a number. 1 480 312 is 1480312.
+    quote: true
+  operating_profit:
+    type: amount
+    description: Operating profit in the page's unit, as a number. (1 234) is -1234.
+    quote: true

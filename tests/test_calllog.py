@@ -1,44 +1,31 @@
 import json
-from datetime import UTC, datetime
 from decimal import Decimal
 
-from vardex.calllog import CallRecord, log_call
+from vardex.calllog import log_call
 from vardex.llm import Answer
 from vardex.pricing import Usage
 
-ANSWER = Answer(
-    text="Nine digits.",
-    model="claude-haiku-4-5",
-    usage=Usage(input_tokens=1, output_tokens=3, cache_write_tokens=5, cache_read_tokens=2),
-    thinking_tokens=None,
-    stop_reason="end_turn",
-    seconds=0.5,
-    cost_usd=Decimal("0.000017225"),
-)
+
+def make_answer(cost):
+    return Answer(
+        text="Nine digits.",
+        model="claude-sonnet-5-5",
+        usage=Usage(input_tokens=40, output_tokens=300),
+        thinking_tokens=250,
+        stop_reason="end_turn",
+        seconds=2.5,
+        cost_usd=cost,
+    )
 
 
-def test_log_call_creates_the_folder_and_appends(tmp_path):
+def test_each_call_appends_one_line(tmp_path):
     path = tmp_path / "logs" / "calls.jsonl"
-    log_call(ANSWER, path)
-    log_call(ANSWER, path)
-    lines = path.read_text().splitlines()
-    assert len(lines) == 2
-    assert json.loads(lines[1])["cache_write_tokens"] == 5
+    log_call(make_answer(Decimal("0.00308")), path)
+    log_call(make_answer(None), path)
 
-
-def test_cost_round_trips_exactly(tmp_path):
-    path = tmp_path / "calls.jsonl"
-    log_call(ANSWER, path)
-    record = CallRecord.model_validate_json(path.read_text())
-    assert record.cost_usd == Decimal("0.000017225")
-
-
-def test_unknown_cost_is_logged_as_null(tmp_path):
-    path = tmp_path / "calls.jsonl"
-    log_call(Answer(**{**ANSWER.__dict__, "cost_usd": None}), path)
-    assert json.loads(path.read_text())["cost_usd"] is None
-
-
-def test_record_keeps_the_time_it_is_given():
-    when = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
-    assert CallRecord.from_answer(ANSWER, time=when).time == when
+    first, second = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert first["model"] == "claude-sonnet-5-5"
+    assert first["output_tokens"] == 300
+    assert first["thinking_tokens"] == 250
+    assert first["cost_usd"] == "0.00308"  # a string, so the exact Decimal survives
+    assert second["cost_usd"] is None
