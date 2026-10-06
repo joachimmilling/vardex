@@ -100,7 +100,8 @@ class Conversation:
     """A chat with a model: the messages so far, and the answer to each turn.
 
     Every turn sends the whole conversation, cached so that the next turn reads the earlier
-    ones back cheaply. A failed call leaves the conversation as it was.
+    ones back cheaply. A failed call leaves the conversation as it was, and so does an answer
+    without text (a refusal, say), since the API rejects an empty message; its cost still counts.
     """
 
     def __init__(
@@ -119,8 +120,9 @@ class Conversation:
             system=self.system, messages=messages, effort=self.effort, cache_conversation=True
         )
         answer = self.client.send(request, on_text=on_text)
-        self.messages = [*messages, Message("assistant", answer.text)]
         self.answers.append(answer)
+        if answer.text:
+            self.messages = [*messages, Message("assistant", answer.text)]
         return answer
 
     @property

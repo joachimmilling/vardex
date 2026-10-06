@@ -78,3 +78,14 @@ def test_the_cost_of_a_conversation_is_unknown_when_one_turn_is():
     conversation.answers[0] = replace(conversation.answers[0], cost_usd=None)
     conversation.send("2")
     assert conversation.cost_usd is None
+
+
+def test_an_answer_without_text_is_counted_but_not_kept_in_the_conversation():
+    model = FakeModel("", "Nine digits.")
+    conversation = Conversation(model)
+
+    conversation.send("Refused?")
+    conversation.send("What is it?")
+
+    assert [m.text for m in model.requests[1].messages] == ["What is it?"]
+    assert len(conversation.answers) == 2
