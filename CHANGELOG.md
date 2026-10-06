@@ -6,6 +6,13 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Worked examples in extractions: an `examples` list in `extractions/<name>.yaml`, each a document
+  and the values it should give. The model sees them in the system prompt, after the pack's
+  instructions, inside `<examples>` tags. Each must pass the same checks as a real answer when the
+  pack loads. The `key-figures` extraction has one, with a negative operating profit in TNOK.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

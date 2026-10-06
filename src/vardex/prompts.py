@@ -21,4 +21,21 @@ harm than an empty one.
 
 <task>
 {instructions}
-</task>"""
+</task>{examples}"""
+
+# Added to EXTRACT when a pack gives worked examples; empty otherwise.
+EXAMPLES = """
+
+<examples>
+Each example shows a document and the JSON answer it should give.
+{examples}
+</examples>"""
+
+EXAMPLE = """<example>
+<document>
+{document}
+</document>
+<answer>
+{answer}
+</answer>
+</example>"""

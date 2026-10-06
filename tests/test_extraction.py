@@ -122,3 +122,78 @@ def test_amounts_must_be_numbers_not_text():
     # With text allowed, a model may answer "1 480 312", which is not a number.
     revenue = output_model(SPEC).model_json_schema()["properties"]["revenue"]
     assert revenue["anyOf"] == [{"type": "number"}, {"type": "null"}]
+
+
+TOTAL_EXAMPLE = (
+    "examples:\n  - document: Total 1 200\n    values: {amount: 1200, amount_quote: 1 200}\n"
+)
+
+
+def write_extraction(folder: Path, examples: str) -> Path:
+    (folder / "extractions").mkdir(parents=True)
+    (folder / "extractions" / "demo.yaml").write_text(
+        "description: d\ninstructions: Find the amount.\nfields:\n"
+        "  amount: {type: amount, description: a, quote: true}\n"
+        "  note: {type: text, description: n, required: false}\n" + examples,
+        encoding="utf-8",
+    )
+    return folder
+
+
+def test_the_pack_has_a_worked_example_that_passes_its_checks():
+    example = SPEC.examples[0]
+    assert "TNOK" in example.document
+    assert example.values["operating_profit"] == -3145
+    assert example.values["operating_profit_quote"] == "(3 145)"
+
+
+def test_examples_follow_the_instructions_in_the_system_prompt():
+    model = FakeModel(reply())
+    extract(model, SPEC, PAGE)
+    system = model.requests[0].system
+    assert system.index("</task>") < system.index("<examples>") < system.index("<example>")
+    assert SPEC.examples[0].document.strip() in system
+    assert '"operating_profit": -3145, "operating_profit_quote": "(3 145)"' in system
+
+
+def test_an_extraction_without_examples_shows_none(tmp_path):
+    spec = load_extraction(write_extraction(tmp_path, ""), "demo")
+    model = FakeModel('{"problem": null, "amount": 5, "amount_quote": "5", "note": null}')
+    extract(model, spec, "Total 5")
+    assert "<example" not in model.requests[0].system
+
+
+def test_a_left_out_value_is_shown_as_empty(tmp_path):
+    examples = TOTAL_EXAMPLE
+    spec = load_extraction(write_extraction(tmp_path, examples), "demo")
+    model = FakeModel('{"problem": null, "amount": 5, "amount_quote": "5", "note": null}')
+    extract(model, spec, "Total 5")
+    answer = '{"problem": null, "amount": 1200, "amount_quote": "1 200", "note": null}'
+    assert answer in model.requests[0].system
+
+
+@pytest.mark.parametrize(
+    ("values", "reason"),
+    [
+        ("{amount: 1200, amount_quote: 1 300}", "the quote for amount is not in the document"),
+        ("{amount: 120, amount_quote: 1 200}", "amount is 120, but the document says '1 200'"),
+        ("{amount_quote: 1 200}", "amount is missing"),
+        ("{amount: lots, amount_quote: 1 200}", "amount: "),
+        ("{amount: 1200, amount_quote: 1 200, total: 1}", "total is not a field"),
+    ],
+)
+def test_an_example_that_fails_its_checks_is_a_pack_error(tmp_path, values, reason):
+    examples = TOTAL_EXAMPLE + f"  - document: Total 1 200\n    values: {values}\n"
+    with pytest.raises(PackError, match="example 2 fails its checks") as caught:
+        load_extraction(write_extraction(tmp_path, examples), "demo")
+    assert reason in str(caught.value)
+
+
+def test_an_example_with_a_problem_only_needs_the_right_shape(tmp_path):
+    examples = "examples:\n  - document: A poem.\n    values: {problem: No amounts here.}\n"
+    spec = load_extraction(write_extraction(tmp_path, examples), "demo")
+    assert spec.examples[0].values == {"problem": "No amounts here."}
+
+    shape = "examples:\n  - document: A poem.\n    values: {problem: None here., amount: [1]}\n"
+    with pytest.raises(PackError, match="example 1 fails its checks: amount: "):
+        load_extraction(write_extraction(tmp_path / "shape", shape), "demo")
