@@ -12,6 +12,7 @@ from vardex.extraction import (
     load_extraction,
     output_model,
 )
+from vardex.llm import Message
 from vardex.packs import PackError
 
 PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
@@ -75,7 +76,7 @@ def test_a_problem_reported_by_the_model_is_a_failure():
 
 def test_a_missing_required_value_is_a_failure():
     with pytest.raises(ExtractionError, match="operating_profit is missing"):
-        extract(FakeModel(reply(operating_profit=None)), SPEC, PAGE)
+        extract(FakeModel(reply(operating_profit=None)), SPEC, PAGE, repairs=0)
 
 
 def test_an_optional_value_may_be_missing():
@@ -85,18 +86,18 @@ def test_an_optional_value_may_be_missing():
 
 def test_a_quote_that_is_not_in_the_document_is_a_failure():
     with pytest.raises(ExtractionError, match="quote for unit is not in the document"):
-        extract(FakeModel(reply(unit_quote="Amounts in NOK million")), SPEC, PAGE)
+        extract(FakeModel(reply(unit_quote="Amounts in NOK million")), SPEC, PAGE, repairs=0)
 
 
 def test_an_amount_that_was_scaled_is_a_failure():
     # The classic trap: the page is in thousands, and the model "helpfully" gives kroner.
     with pytest.raises(ExtractionError, match="revenue is 1480312000"):
-        extract(FakeModel(reply(revenue=1480312000)), SPEC, PAGE)
+        extract(FakeModel(reply(revenue=1480312000)), SPEC, PAGE, repairs=0)
 
 
 def test_an_answer_of_the_wrong_shape_is_a_failure():
     with pytest.raises(ExtractionError, match="unit: must be one of ones, thousands, millions"):
-        extract(FakeModel(reply(unit="billions")), SPEC, PAGE)
+        extract(FakeModel(reply(unit="billions")), SPEC, PAGE, repairs=0)
 
 
 def test_an_answer_cut_off_by_max_tokens_is_a_failure():
@@ -106,8 +107,8 @@ def test_an_answer_cut_off_by_max_tokens_is_a_failure():
 
 def test_a_failure_keeps_the_answer_so_it_can_be_logged():
     with pytest.raises(ExtractionError) as caught:
-        extract(FakeModel(reply(operating_profit=None)), SPEC, PAGE)
-    assert caught.value.answer.cost_usd == Decimal("0.004")
+        extract(FakeModel(reply(operating_profit=None)), SPEC, PAGE, repairs=0)
+    assert [a.cost_usd for a in caught.value.answers] == [Decimal("0.004")]
 
 
 def test_an_unknown_extraction_lists_the_known_ones():
@@ -222,3 +223,64 @@ def test_extract_sends_the_request_build_request_gives():
     built = build_request(SPEC, PAGE, effort="high")
     assert (sent.system, sent.messages, sent.effort) == (built.system, built.messages, "high")
     assert sent.output_schema.model_json_schema() == built.output_schema.model_json_schema()
+
+
+def test_a_failed_answer_is_repaired_once_by_default():
+    bad = reply(revenue=1480312000)
+    model = FakeModel(bad, reply())
+
+    result = extract(model, SPEC, PAGE)
+
+    assert result.values["revenue"] == Decimal("1480312")
+    assert len(result.answers) == 2
+    first, second = model.requests
+    assert second.system == first.system
+    assert second.messages[:2] == [first.messages[0], Message("assistant", bad)]
+    assert second.messages[2].role == "user"
+    assert "- revenue is 1480312000, but the document says '1 480 312'" in second.messages[2].text
+    assert "same JSON format" in second.messages[2].text
+    assert second.output_schema is first.output_schema
+
+
+def test_an_answer_of_the_wrong_shape_is_repaired():
+    model = FakeModel(reply(unit="billions"), reply())
+    extract(model, SPEC, PAGE)
+    assert "unit: must be one of" in model.requests[1].messages[2].text
+
+
+def test_repairs_stop_at_the_limit_and_keep_every_answer():
+    model = FakeModel(*[reply(operating_profit=None)] * 3)
+
+    with pytest.raises(ExtractionError, match="operating_profit is missing") as caught:
+        extract(model, SPEC, PAGE, repairs=2)
+
+    assert len(caught.value.answers) == 3
+    assert len(model.requests[2].messages) == 5  # document, then two answers and their problems
+
+
+def test_zero_repairs_sends_one_request():
+    model = FakeModel(reply(operating_profit=None), reply())
+    with pytest.raises(ExtractionError):
+        extract(model, SPEC, PAGE, repairs=0)
+    assert len(model.requests) == 1
+
+
+def test_a_problem_reported_by_the_model_is_not_repaired():
+    model = FakeModel(reply(problem="There are no figures on this page."), reply())
+    with pytest.raises(ExtractionError, match="no figures") as caught:
+        extract(model, SPEC, PAGE)
+    assert len(model.requests) == 1
+    assert len(caught.value.answers) == 1
+
+
+def test_an_answer_cut_off_is_not_repaired():
+    model = FakeModel('{"problem": nu', reply(), stop_reason="max_tokens")
+    with pytest.raises(ExtractionError, match="stopped early"):
+        extract(model, SPEC, PAGE)
+    assert len(model.requests) == 1
+
+
+@pytest.mark.parametrize("repairs", [-1, 4])
+def test_repairs_must_be_from_0_to_3(repairs):
+    with pytest.raises(ValueError, match="from 0 to 3"):
+        extract(FakeModel(reply()), SPEC, PAGE, repairs=repairs)

@@ -7,7 +7,7 @@ for exactly that shape, and checks the result before anyone can use it.
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -25,7 +25,7 @@ from pydantic import (
 
 from vardex.llm import Answer, Effort, Message, ModelClient, Request
 from vardex.packs import PackError, describe_problem
-from vardex.prompts import EXAMPLE, EXAMPLES, EXTRACT
+from vardex.prompts import EXAMPLE, EXAMPLES, EXTRACT, REPAIR
 
 FieldType = Literal["text", "integer", "amount", "choice"]
 # An amount is a JSON number in the schema, so the model cannot answer "1 480 312" as text,
@@ -34,6 +34,7 @@ Amount = Annotated[Decimal, WithJsonSchema({"type": "number"})]
 PYTHON_TYPES: dict[str, Any] = {"text": str, "integer": int, "amount": Amount}
 MAX_VALUES = 16  # structured outputs accept at most 16 fields that may be empty in one schema
 FIELD_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+MAX_REPAIRS = 3  # each repair is another paid call
 
 
 class FieldSpec(BaseModel):
@@ -89,18 +90,18 @@ class ExtractionSpec(BaseModel):
 
 @dataclass(frozen=True)
 class Extraction:
-    """Values that passed every check, and the answer they came from."""
+    """Values that passed every check, and every answer it took to get them, in order."""
 
     values: dict[str, Any]
-    answer: Answer
+    answers: list[Answer]
 
 
 class ExtractionError(Exception):
     """Raised when a document gives no usable values. The message says why."""
 
-    def __init__(self, reason: str, answer: Answer | None = None) -> None:
+    def __init__(self, reason: str, answers: list[Answer] | None = None) -> None:
         super().__init__(reason)
-        self.answer = answer  # so the call can still be logged and paid for
+        self.answers = answers or []  # so every call can still be logged and paid for
 
 
 def load_extraction(pack: Path, name: str) -> ExtractionSpec:
@@ -206,22 +207,56 @@ def build_request(spec: ExtractionSpec, document: str, *, effort: Effort | None 
 
 
 def extract(
-    client: ModelClient, spec: ExtractionSpec, document: str, *, effort: Effort | None = "low"
+    client: ModelClient,
+    spec: ExtractionSpec,
+    document: str,
+    *,
+    effort: Effort | None = "low",
+    repairs: int = 1,
 ) -> Extraction:
-    """Extract the values a spec describes from one document, and check them."""
+    """Extract the values a spec describes from one document, and check them.
+
+    When an answer fails the schema or the checks, the model gets its answer and the problems
+    back and answers again, at most `repairs` times. A problem the model reports is final.
+    """
+    if not 0 <= repairs <= MAX_REPAIRS:
+        raise ValueError(f"repairs must be from 0 to {MAX_REPAIRS}, not {repairs}")
     schema = output_model(spec)
-    answer = client.send(build_request(spec, document, effort=effort))
-    if answer.stop_reason != "end":
-        raise ExtractionError(f"the model stopped early ({answer.stop_reason})", answer)
-    try:
-        values = schema.model_validate_json(answer.text).model_dump()
-    except ValidationError as err:
-        problems = "; ".join(describe_problem(e) for e in err.errors())
-        raise ExtractionError(f"the answer does not match the schema: {problems}", answer) from err
-    problems = check(spec, values, document)
-    if problems:
-        raise ExtractionError("; ".join(problems), answer)
-    return Extraction(values=values, answer=answer)
+    request = build_request(spec, document, effort=effort)
+    answers: list[Answer] = []
+    while True:
+        answer = client.send(request)
+        answers.append(answer)
+        if answer.stop_reason != "end":
+            raise ExtractionError(f"the model stopped early ({answer.stop_reason})", answers)
+        try:
+            values = schema.model_validate_json(answer.text).model_dump()
+        except ValidationError as err:
+            problems = [describe_problem(e) for e in err.errors()]
+            reason = f"the answer does not match the schema: {'; '.join(problems)}"
+        else:
+            problems = check(spec, values, document)
+            if not problems:
+                return Extraction(values=values, answers=answers)
+            if values["problem"]:
+                raise ExtractionError("; ".join(problems), answers)
+            reason = "; ".join(problems)
+        if len(answers) > repairs:
+            raise ExtractionError(reason, answers)
+        request = repair_request(request, answer, problems)
+
+
+def repair_request(request: Request, answer: Answer, problems: list[str]) -> Request:
+    """The request with the model's answer and its problems added, asking it to answer again."""
+    problem_list = "\n".join(f"- {problem}" for problem in problems)
+    return replace(
+        request,
+        messages=[
+            *request.messages,
+            Message("assistant", answer.text),
+            Message("user", REPAIR.format(problems=problem_list)),
+        ],
+    )
 
 
 def check(spec: ExtractionSpec, values: dict[str, Any], document: str) -> list[str]:

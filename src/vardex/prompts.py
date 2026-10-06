@@ -39,3 +39,11 @@ EXAMPLE = """<example>
 {answer}
 </answer>
 </example>"""
+
+# Sent after an answer that fails the schema or the checks, with the answer before it.
+REPAIR = """\
+Your answer has these problems:
+{problems}
+
+Answer again in the same JSON format, with the problems fixed. Follow the same rules: if the \
+document does not show a value, leave it empty rather than guess."""

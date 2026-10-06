@@ -14,6 +14,15 @@ All notable changes to Vardex are recorded here. The format follows
   pack loads. The `key-figures` extraction has one, with a negative operating profit in TNOK.
 - `vardex extract --show-prompt` prints the system prompt, each message and the output schema
   for the first file, exactly as they would be sent, and calls no model, so it needs no API key.
+- `vardex extract --repairs N` (default 1, at most 3, 0 turns it off): when an answer fails the
+  schema or the checks, the model gets its answer and the list of problems back in a new turn,
+  with the new `REPAIR` prompt, and answers again. A problem the model reports itself is never
+  repaired. Every call is logged and priced, and `--stats` shows one line per call.
+
+### Changed
+
+- `Extraction.answers` and `ExtractionError.answers` hold every answer, in order, instead of
+  `answer`.
 
 ## [0.3.0] - 2026-10-01
 
