@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
 
+import pytest
 from fakes import FakeModel
 from typer.testing import CliRunner
 
 from vardex.cli import app
+from vardex.extraction import build_request, load_extraction
 
 runner = CliRunner()
 FIRST_PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
@@ -184,3 +186,27 @@ def test_tokens_counts_a_file(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert "120" in result.output
     assert "24.00" in result.output  # 120 tokens / 5 words
+
+
+def test_extract_show_prompt_prints_the_request_and_calls_nothing(monkeypatch, tmp_path):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("vardex.config.load_dotenv", lambda: None)
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: pytest.fail("must not connect"))
+    first = tmp_path / "first.txt"
+    first.write_text("Demo Bygg AS. Driftsresultat 5 927.")
+    second = tmp_path / "second.txt"
+    second.write_text("Not shown.")
+
+    result = runner.invoke(
+        app, ["extract", str(FIRST_PACK), "key-figures", str(first), str(second), "--show-prompt"]
+    )
+
+    assert result.exit_code == 0
+    spec = load_extraction(FIRST_PACK, "key-figures")
+    request = build_request(spec, first.read_text())
+    assert request.system in result.output
+    assert "=== Message 1 (user) ===" in result.output
+    assert request.messages[0].text in result.output
+    assert "Not shown." not in result.output
+    schema = json.dumps(request.output_schema.model_json_schema(), indent=2)
+    assert result.output.endswith(schema + "\n")

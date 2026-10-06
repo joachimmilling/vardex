@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 from fakes import FakeModel
 
-from vardex.extraction import ExtractionError, extract, load_extraction, output_model
+from vardex.extraction import (
+    ExtractionError,
+    build_request,
+    extract,
+    load_extraction,
+    output_model,
+)
 from vardex.packs import PackError
 
 PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
@@ -205,3 +211,14 @@ def test_examples_show_values_in_the_schema_types(tmp_path):
     model = FakeModel('{"problem": null, "amount": 5, "amount_quote": "5", "note": null}')
     extract(model, spec, "Total 5")
     assert '"amount": 1200,' in model.requests[0].system
+
+
+def test_extract_sends_the_request_build_request_gives():
+    model = FakeModel(reply())
+
+    extract(model, SPEC, PAGE, effort="high")
+
+    sent = model.requests[0]
+    built = build_request(SPEC, PAGE, effort="high")
+    assert (sent.system, sent.messages, sent.effort) == (built.system, built.messages, "high")
+    assert sent.output_schema.model_json_schema() == built.output_schema.model_json_schema()

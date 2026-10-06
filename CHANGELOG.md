@@ -12,6 +12,8 @@ All notable changes to Vardex are recorded here. The format follows
   and the values it should give. The model sees them in the system prompt, after the pack's
   instructions, inside `<examples>` tags. Each must pass the same checks as a real answer when the
   pack loads. The `key-figures` extraction has one, with a negative operating profit in TNOK.
+- `vardex extract --show-prompt` prints the system prompt, each message and the output schema
+  for the first file, exactly as they would be sent, and calls no model, so it needs no API key.
 
 ## [0.3.0] - 2026-10-01
 

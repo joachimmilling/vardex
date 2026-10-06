@@ -194,19 +194,23 @@ def output_model(spec: ExtractionSpec) -> type[BaseModel]:
     return create_model("Extracted", **fields)
 
 
+def build_request(spec: ExtractionSpec, document: str, *, effort: Effort | None = "low") -> Request:
+    """The request extract sends for one document. --show-prompt prints this same request."""
+    return Request(
+        system=system_prompt(spec),
+        messages=[Message("user", f"<document>\n{document}\n</document>")],
+        effort=effort,
+        output_schema=output_model(spec),
+        cache_system=True,  # the same instructions for every document
+    )
+
+
 def extract(
     client: ModelClient, spec: ExtractionSpec, document: str, *, effort: Effort | None = "low"
 ) -> Extraction:
     """Extract the values a spec describes from one document, and check them."""
     schema = output_model(spec)
-    request = Request(
-        system=system_prompt(spec),
-        messages=[Message("user", f"<document>\n{document}\n</document>")],
-        effort=effort,
-        output_schema=schema,
-        cache_system=True,  # the same instructions for every document
-    )
-    answer = client.send(request)
+    answer = client.send(build_request(spec, document, effort=effort))
     if answer.stop_reason != "end":
         raise ExtractionError(f"the model stopped early ({answer.stop_reason})", answer)
     try:
