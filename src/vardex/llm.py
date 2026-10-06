@@ -48,6 +48,7 @@ class Request:
     effort: Effort | None = None  # None means the model's default
     output_schema: type[BaseModel] | None = None  # set it to get JSON of this shape back
     cache_system: bool = False  # keep the system prompt in the prompt cache between calls
+    cache_conversation: bool = False  # keep everything up to the last message in the cache
 
 
 @dataclass(frozen=True)
@@ -93,3 +94,41 @@ def ask(
     """Send one question to the model and return its answer with tokens, time and cost."""
     request = Request(system=ASK, messages=[Message("user", question)], effort=effort)
     return client.send(request, on_text=on_text)
+
+
+class Conversation:
+    """A chat with a model: the messages so far, and the answer to each turn.
+
+    Every turn sends the whole conversation, cached so that the next turn reads the earlier
+    ones back cheaply. A failed call leaves the conversation as it was, and so does an answer
+    without text (a refusal, say), since the API rejects an empty message; its cost still counts.
+    """
+
+    def __init__(
+        self, client: ModelClient, *, system: str = ASK, effort: Effort | None = None
+    ) -> None:
+        self.client = client
+        self.system = system
+        self.effort = effort
+        self.messages: list[Message] = []
+        self.answers: list[Answer] = []
+
+    def send(self, text: str, on_text: Callable[[str], None] | None = None) -> Answer:
+        """Send one message with the conversation so far, and keep it and the answer."""
+        messages = [*self.messages, Message("user", text)]
+        request = Request(
+            system=self.system, messages=messages, effort=self.effort, cache_conversation=True
+        )
+        answer = self.client.send(request, on_text=on_text)
+        self.answers.append(answer)
+        if answer.text:
+            self.messages = [*messages, Message("assistant", answer.text)]
+        return answer
+
+    @property
+    def cost_usd(self) -> Decimal | None:
+        """What every turn cost together, or None when any turn's cost is unknown."""
+        costs = [answer.cost_usd for answer in self.answers]
+        if None in costs:
+            return None
+        return sum(costs, Decimal(0))

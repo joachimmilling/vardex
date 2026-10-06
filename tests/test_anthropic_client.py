@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -141,6 +142,14 @@ def test_effort_schema_and_cache_go_into_the_request():
     schema = call["output_config"]["format"]["schema"]
     assert schema["additionalProperties"] is False  # structured outputs require it
     assert schema["required"] == ["revenue"]
+
+
+def test_a_cached_conversation_turns_on_automatic_caching():
+    client, messages = client_with()
+    client.send(REQUEST)
+    client.send(replace(REQUEST, cache_conversation=True))
+    assert "cache_control" not in messages.calls[0]
+    assert messages.calls[1]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_effort_is_left_out_for_a_model_that_rejects_it():

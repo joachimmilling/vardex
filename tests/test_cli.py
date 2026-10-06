@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from vardex.cli import app
 from vardex.extraction import build_request, load_extraction
+from vardex.llm import ModelError
 
 runner = CliRunner()
 FIRST_PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
@@ -248,3 +249,47 @@ def test_extract_repairs_must_be_from_0_to_3(repairs, tmp_path):
         app, ["extract", str(FIRST_PACK), "key-figures", str(page), "--repairs", repairs]
     )
     assert result.exit_code == 2
+
+
+def test_chat_sends_the_conversation_so_far_and_ends_on_an_empty_line(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    model = FakeModel("Nine digits.", "Yes.")
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+
+    result = runner.invoke(app, ["chat"], input="What is it?\nA check digit?\n\nNot sent\n")
+
+    assert result.exit_code == 0
+    assert "Nine digits.\n" in result.stdout
+    assert "Yes.\n" in result.stdout
+    assert len(model.requests) == 2
+    sent = [m.text for m in model.requests[1].messages]
+    assert sent == ["What is it?", "Nine digits.", "A check digit?"]
+    assert "2 turns · $0.0080" in result.stderr
+    assert "Turn 1" not in result.stderr
+    assert len((tmp_path / "logs" / "calls.jsonl").read_text().splitlines()) == 2
+
+
+def test_chat_ends_at_the_end_of_input_and_shows_each_turn_with_stats(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: FakeModel("One.", "Two."))
+
+    result = runner.invoke(app, ["chat", "--stats"], input="1\n2\n")
+
+    assert result.exit_code == 0
+    assert "Turn 1: claude-sonnet-5-5" in result.stderr
+    assert "Turn 2: claude-sonnet-5-5" in result.stderr
+    assert "first text after 0.5 s" in result.stderr
+    assert "2 turns · $0.0080" in result.stderr
+
+
+def test_chat_goes_on_after_a_failed_call(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    model = FakeModel(ModelError("Could not reach the API"), "Nine digits.")
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+
+    result = runner.invoke(app, ["chat"], input="Lost?\nWhat is it?\n")
+
+    assert result.exit_code == 0
+    assert "Could not reach the API" in result.stderr
+    assert [m.text for m in model.requests[1].messages] == ["What is it?"]
+    assert "1 turn · $0.0040" in result.stderr

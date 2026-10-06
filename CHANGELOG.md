@@ -8,6 +8,12 @@ All notable changes to Vardex are recorded here. The format follows
 
 ### Added
 
+- `vardex chat`: type a line, and the model answers it with the whole conversation so far,
+  streamed as it is written. An empty line or the end of input ends the chat, and the number of
+  turns and the total cost are printed; `--stats` also shows each turn. A failed call prints the
+  error and changes nothing, so the next line can carry on; so does an answer without text. The conversation is cached with
+  automatic caching, through the new `Request.cache_conversation`. `Conversation` in `vardex.llm`
+  does the same for code.
 - Worked examples in extractions: an `examples` list in `extractions/<name>.yaml`, each a document
   and the values it should give. The model sees them in the system prompt, after the pack's
   instructions, inside `<examples>` tags. Each must pass the same checks as a real answer when the
