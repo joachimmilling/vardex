@@ -1,6 +1,7 @@
 """The vardex command-line tool."""
 
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
@@ -18,7 +19,7 @@ from vardex.extraction import (
     extract,
     load_extraction,
 )
-from vardex.llm import Answer, Effort, ModelClient, ModelError, Request
+from vardex.llm import Answer, Conversation, Effort, ModelClient, ModelError, Request
 from vardex.llm import ask as ask_model
 from vardex.packs import PackError, load_pack
 from vardex.pricing import (
@@ -130,6 +131,43 @@ def ask(
     if stats:
         warn_if_prices_are_stale()
     record(answer, stats)
+
+
+@app.command()
+def chat(
+    model: ModelOption = None,
+    effort: Annotated[
+        Effort | None, typer.Option(help="How much work the model puts in. Ignored on Haiku 4.5.")
+    ] = None,
+    stats: StatsOption = False,
+) -> None:
+    """Chat with the model. An empty line or the end of input ends the chat."""
+    try:
+        conversation = Conversation(connect(settings_for(model)), effort=effort)
+    except ModelError as err:
+        raise fail(str(err)) from err
+
+    while True:
+        typer.echo("> ", nl=False, err=True)
+        line = sys.stdin.readline()
+        if not line.strip():  # "" at the end of input, "\n" for an empty line
+            break
+        try:
+            answer = conversation.send(line.strip(), on_text=echo_piece)
+        except ModelError as err:
+            typer.secho(str(err), fg=typer.colors.RED, err=True)  # the next line can retry
+            continue
+        typer.echo()
+        record(answer, stats=False)
+
+    if stats:
+        warn_if_prices_are_stale()
+        for number, answer in enumerate(conversation.answers, start=1):
+            typer.secho(f"Turn {number}: {describe(answer)}", fg="bright_black", err=True)
+    total = conversation.cost_usd
+    cost = format_usd(total) if total is not None else "cost unknown"
+    turns = len(conversation.answers)
+    typer.echo(f"{turns} turn{'' if turns == 1 else 's'} · {cost}", err=True)
 
 
 @app.command(name="extract")
