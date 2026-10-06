@@ -11,8 +11,8 @@ from vardex import __version__
 from vardex.anthropic_client import AnthropicClient
 from vardex.calllog import log_call
 from vardex.config import Settings, load_settings
-from vardex.extraction import ExtractionError, extract, load_extraction
-from vardex.llm import Answer, Effort, ModelClient, ModelError
+from vardex.extraction import ExtractionError, build_request, extract, load_extraction
+from vardex.llm import Answer, Effort, ModelClient, ModelError, Request
 from vardex.llm import ask as ask_model
 from vardex.packs import PackError, load_pack
 from vardex.pricing import (
@@ -138,10 +138,19 @@ def extract_command(
         Effort, typer.Option(help="How much work the model puts in. Ignored on Haiku 4.5.")
     ] = "low",
     stats: StatsOption = False,
+    show_prompt: Annotated[
+        bool,
+        typer.Option(
+            "--show-prompt", help="Print the request for the first file and send nothing."
+        ),
+    ] = False,
 ) -> None:
     """Extract values from documents. Prints one JSON line per document that passes the checks."""
     try:
         spec = load_extraction(pack, name)
+        if show_prompt:
+            show(build_request(spec, files[0].read_text(encoding="utf-8"), effort=effort))
+            return
         client = connect(settings_for(model))
     except (PackError, ModelError) as err:
         raise fail(str(err)) from err
@@ -166,6 +175,18 @@ def extract_command(
             record(answer, stats)
     if failed:
         raise fail(f"{failed} of {len(files)} documents failed.")
+
+
+def show(request: Request) -> None:
+    """Print a request under headings: the system prompt, each message and the output schema."""
+    typer.secho("=== System prompt ===", bold=True)
+    typer.echo(request.system)
+    for number, message in enumerate(request.messages, start=1):
+        typer.secho(f"\n=== Message {number} ({message.role}) ===", bold=True)
+        typer.echo(message.text)
+    if request.output_schema is not None:
+        typer.secho("\n=== Output schema ===", bold=True)
+        typer.echo(json.dumps(request.output_schema.model_json_schema(), indent=2))
 
 
 @app.command()
