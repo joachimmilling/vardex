@@ -146,10 +146,15 @@ def check_example(spec: ExtractionSpec, example: ExampleSpec) -> list[str]:
 
 def system_prompt(spec: ExtractionSpec) -> str:
     """The pack's instructions and worked examples, inside the engine's extraction prompt."""
+    schema = output_model(spec)
     examples = "\n".join(
         EXAMPLE.format(
             document=example.document.strip(),
-            answer=json.dumps(example_answer(spec, example), ensure_ascii=False),
+            answer=json.dumps(
+                schema.model_validate(example_answer(spec, example)).model_dump(),
+                ensure_ascii=False,
+                default=json_number,
+            ),
         )
         for example in spec.examples
     )
@@ -157,6 +162,11 @@ def system_prompt(spec: ExtractionSpec) -> str:
         instructions=spec.instructions.strip(),
         examples=EXAMPLES.format(examples=examples) if examples else "",
     )
+
+
+def json_number(value: Decimal) -> int | float:
+    """An amount as a JSON number, the way the schema asks the model to give it."""
+    return int(value) if value == value.to_integral_value() else float(value)
 
 
 def output_model(spec: ExtractionSpec) -> type[BaseModel]:

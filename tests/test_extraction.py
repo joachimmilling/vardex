@@ -197,3 +197,11 @@ def test_an_example_with_a_problem_only_needs_the_right_shape(tmp_path):
     shape = "examples:\n  - document: A poem.\n    values: {problem: None here., amount: [1]}\n"
     with pytest.raises(PackError, match="example 1 fails its checks: amount: "):
         load_extraction(write_extraction(tmp_path / "shape", shape), "demo")
+
+
+def test_examples_show_values_in_the_schema_types(tmp_path):
+    examples = TOTAL_EXAMPLE.replace("amount: 1200", 'amount: "1200"')
+    spec = load_extraction(write_extraction(tmp_path, examples), "demo")
+    model = FakeModel('{"problem": null, "amount": 5, "amount_quote": "5", "note": null}')
+    extract(model, spec, "Total 5")
+    assert '"amount": 1200,' in model.requests[0].system
