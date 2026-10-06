@@ -6,6 +6,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-01
+
 ### Added
 
 - `vardex chat`: type a line, and the model answers it with the whole conversation so far,
