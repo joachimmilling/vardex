@@ -17,7 +17,8 @@ All notable changes to Vardex are recorded here. The format follows
 - `vardex extract --repairs N` (default 1, at most 3, 0 turns it off): when an answer fails the
   schema or the checks, the model gets its answer and the list of problems back in a new turn,
   with the new `REPAIR` prompt, and answers again. A problem the model reports itself is never
-  repaired. Every call is logged and priced, and `--stats` shows one line per call.
+  repaired. Every call is logged and priced, and `--stats` shows one line per call. If a repair
+  call fails, the document fails, and the calls before it are still logged.
 
 ### Changed
 

@@ -12,7 +12,7 @@ from vardex.extraction import (
     load_extraction,
     output_model,
 )
-from vardex.llm import Message
+from vardex.llm import Message, ModelError
 from vardex.packs import PackError
 
 PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
@@ -284,3 +284,18 @@ def test_an_answer_cut_off_is_not_repaired():
 def test_repairs_must_be_from_0_to_3(repairs):
     with pytest.raises(ValueError, match="from 0 to 3"):
         extract(FakeModel(reply()), SPEC, PAGE, repairs=repairs)
+
+
+def test_a_failed_repair_call_keeps_the_answers_already_paid_for():
+    model = FakeModel(reply(operating_profit=None))  # no second reply: the repair call fails
+    send = model.send
+
+    def send_once(request, on_text=None):
+        if model.requests:
+            raise ModelError("no connection")
+        return send(request, on_text)
+
+    model.send = send_once
+    with pytest.raises(ExtractionError, match="the repair failed: no connection") as caught:
+        extract(model, SPEC, PAGE)
+    assert len(caught.value.answers) == 1

@@ -23,7 +23,7 @@ from pydantic import (
     model_validator,
 )
 
-from vardex.llm import Answer, Effort, Message, ModelClient, Request
+from vardex.llm import Answer, Effort, Message, ModelClient, ModelError, Request
 from vardex.packs import PackError, describe_problem
 from vardex.prompts import EXAMPLE, EXAMPLES, EXTRACT, REPAIR
 
@@ -225,7 +225,13 @@ def extract(
     request = build_request(spec, document, effort=effort)
     answers: list[Answer] = []
     while True:
-        answer = client.send(request)
+        try:
+            answer = client.send(request)
+        except ModelError as err:
+            if not answers:
+                raise
+            # keep the answers already paid for, so they are still logged
+            raise ExtractionError(f"the repair failed: {err}", answers) from err
         answers.append(answer)
         if answer.stop_reason != "end":
             raise ExtractionError(f"the model stopped early ({answer.stop_reason})", answers)
