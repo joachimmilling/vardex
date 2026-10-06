@@ -5,6 +5,7 @@ model and the fields to return. The engine turns the fields into a JSON schema, 
 for exactly that shape, and checks the result before anyone can use it.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from decimal import Decimal
@@ -24,7 +25,7 @@ from pydantic import (
 
 from vardex.llm import Answer, Effort, Message, ModelClient, Request
 from vardex.packs import PackError, describe_problem
-from vardex.prompts import EXTRACT
+from vardex.prompts import EXAMPLE, EXAMPLES, EXTRACT
 
 FieldType = Literal["text", "integer", "amount", "choice"]
 # An amount is a JSON number in the schema, so the model cannot answer "1 480 312" as text,
@@ -53,6 +54,15 @@ class FieldSpec(BaseModel):
         return self
 
 
+class ExampleSpec(BaseModel):
+    """A worked example: a document and the values it should give. A field left out is empty."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    document: str
+    values: dict[str, Any] = {}
+
+
 class ExtractionSpec(BaseModel):
     """The contents of extractions/<name>.yaml in a pack."""
 
@@ -61,6 +71,7 @@ class ExtractionSpec(BaseModel):
     description: str
     instructions: str
     fields: dict[str, FieldSpec] = Field(min_length=1)
+    examples: list[ExampleSpec] = []
 
     @model_validator(mode="after")
     def names_and_size(self) -> "ExtractionSpec":
@@ -100,12 +111,62 @@ def load_extraction(pack: Path, name: str) -> ExtractionSpec:
         raise PackError(f"No extraction {name!r} in {pack}. Known: {', '.join(known) or 'none'}")
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return ExtractionSpec.model_validate(data)
+        spec = ExtractionSpec.model_validate(data)
     except yaml.YAMLError as err:
         raise PackError(f"{path} is not valid YAML:\n{err}") from err
     except ValidationError as err:
         problems = "\n".join(f"  {describe_problem(e)}" for e in err.errors())
         raise PackError(f"{path} is not a valid extraction:\n{problems}") from err
+    for number, example in enumerate(spec.examples, start=1):
+        problems = check_example(spec, example)
+        if problems:
+            raise PackError(f"{path}: example {number} fails its checks: {'; '.join(problems)}")
+    return spec
+
+
+def example_answer(spec: ExtractionSpec, example: ExampleSpec) -> dict[str, Any]:
+    """The full answer an example stands for, in the schema's order, with left-out values empty."""
+    return {name: example.values.get(name) for name in output_model(spec).model_fields}
+
+
+def check_example(spec: ExtractionSpec, example: ExampleSpec) -> list[str]:
+    """Everything wrong with an example, checked like a real answer. Empty means usable."""
+    schema = output_model(spec)
+    unknown = sorted(set(example.values) - set(schema.model_fields))
+    if unknown:
+        return [f"{', '.join(unknown)} is not a field of this extraction"]
+    try:
+        values = schema.model_validate(example_answer(spec, example)).model_dump()
+    except ValidationError as err:
+        return [describe_problem(e) for e in err.errors()]
+    if values["problem"]:
+        return []  # an example of a document that cannot be used only needs the right shape
+    return check(spec, values, example.document)
+
+
+def system_prompt(spec: ExtractionSpec) -> str:
+    """The pack's instructions and worked examples, inside the engine's extraction prompt."""
+    schema = output_model(spec)
+    examples = "\n".join(
+        EXAMPLE.format(
+            document=example.document.strip(),
+            answer=json.dumps(
+                schema.model_validate(example_answer(spec, example)).model_dump(),
+                ensure_ascii=False,
+                default=json_number,
+            ),
+        )
+        for example in spec.examples
+    )
+    return EXTRACT.format(
+        instructions=spec.instructions.strip(),
+        examples=EXAMPLES.format(examples=examples) if examples else "",
+    )
+
+
+def json_number(value: Decimal) -> int | float:
+    """An amount as a JSON number, the way the schema asks the model to give it."""
+    return int(value) if value == value.to_integral_value() else float(value)
 
 
 def output_model(spec: ExtractionSpec) -> type[BaseModel]:
@@ -139,7 +200,7 @@ def extract(
     """Extract the values a spec describes from one document, and check them."""
     schema = output_model(spec)
     request = Request(
-        system=EXTRACT.format(instructions=spec.instructions.strip()),
+        system=system_prompt(spec),
         messages=[Message("user", f"<document>\n{document}\n</document>")],
         effort=effort,
         output_schema=schema,

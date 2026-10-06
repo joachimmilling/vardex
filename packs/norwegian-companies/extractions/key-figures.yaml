@@ -59,3 +59,24 @@ fields:
     type: amount
     description: Operating profit in the page's unit, as a number. (1 234) is -1234.
     quote: true
+examples:
+  - document: |
+      Demo Programvare AS (et oppdiktet selskap, skrevet for Vardex-eksemplene)
+      Nøkkeltall
+
+      Tall i TNOK                    2025        2024
+      Driftsinntekter              48 210      52 904
+      Driftsresultat              (3 145)       1 870
+      Resultat før skattekostnad  (3 902)       1 455
+      Egenkapitalandel               41 %        46 %
+    values:
+      company_name: Demo Programvare AS
+      fiscal_year: 2025
+      accounts: company
+      currency: NOK
+      unit: thousands
+      unit_quote: Tall i TNOK
+      revenue: 48210
+      revenue_quote: 48 210
+      operating_profit: -3145
+      operating_profit_quote: (3 145)
