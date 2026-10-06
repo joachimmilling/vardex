@@ -11,7 +11,13 @@ from vardex import __version__
 from vardex.anthropic_client import AnthropicClient
 from vardex.calllog import log_call
 from vardex.config import Settings, load_settings
-from vardex.extraction import ExtractionError, build_request, extract, load_extraction
+from vardex.extraction import (
+    MAX_REPAIRS,
+    ExtractionError,
+    build_request,
+    extract,
+    load_extraction,
+)
 from vardex.llm import Answer, Effort, ModelClient, ModelError, Request
 from vardex.llm import ask as ask_model
 from vardex.packs import PackError, load_pack
@@ -138,6 +144,14 @@ def extract_command(
         Effort, typer.Option(help="How much work the model puts in. Ignored on Haiku 4.5.")
     ] = "low",
     stats: StatsOption = False,
+    repairs: Annotated[
+        int,
+        typer.Option(
+            min=0,
+            max=MAX_REPAIRS,
+            help="How many times to send a failed answer back to the model to fix. 0 turns it off.",
+        ),
+    ] = 1,
     show_prompt: Annotated[
         bool,
         typer.Option(
@@ -158,11 +172,13 @@ def extract_command(
     failed = 0
     for file in files:
         try:
-            result = extract(client, spec, file.read_text(encoding="utf-8"), effort=effort)
+            result = extract(
+                client, spec, file.read_text(encoding="utf-8"), effort=effort, repairs=repairs
+            )
         except ExtractionError as err:
             failed += 1
             typer.secho(f"{file.name}: {err}", fg=typer.colors.RED, err=True)
-            answer = err.answer
+            answers = err.answers
         except ModelError as err:
             raise fail(f"{file.name}: {err}") from err
         else:
@@ -170,8 +186,8 @@ def extract_command(
             typer.echo(
                 json.dumps({"file": file.name, **result.values}, default=str, ensure_ascii=False)
             )
-            answer = result.answer
-        if answer is not None:
+            answers = result.answers
+        for answer in answers:
             record(answer, stats)
     if failed:
         raise fail(f"{failed} of {len(files)} documents failed.")

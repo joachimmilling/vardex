@@ -210,3 +210,41 @@ def test_extract_show_prompt_prints_the_request_and_calls_nothing(monkeypatch, t
     assert "Not shown." not in result.output
     schema = json.dumps(request.output_schema.model_json_schema(), indent=2)
     assert result.output.endswith(schema + "\n")
+
+
+def test_extract_logs_and_shows_every_call_of_a_repair(monkeypatch, tmp_path):
+    page = tmp_path / "page.txt"
+    page.write_text("Demo Bygg AS. Driftsresultat 5 927.")
+    values = {
+        "problem": None,
+        "company_name": "Demo Bygg AS",
+        "fiscal_year": None,
+        "accounts": None,
+        "currency": None,
+        "unit": None,
+        "unit_quote": None,
+        "revenue": None,
+        "revenue_quote": None,
+        "operating_profit": 5927,
+        "operating_profit_quote": "5 927",
+    }
+    wrong = values | {"operating_profit_quote": "5 928"}
+    model = FakeModel(json.dumps(wrong), json.dumps(values))
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["extract", str(FIRST_PACK), "key-figures", str(page), "--stats"])
+
+    assert len(model.requests) == 2
+    assert result.output.count("claude-sonnet-5-5 ·") == 2
+    assert len((tmp_path / "logs" / "calls.jsonl").read_text().splitlines()) == 2
+
+
+@pytest.mark.parametrize("repairs", ["-1", "4"])
+def test_extract_repairs_must_be_from_0_to_3(repairs, tmp_path):
+    page = tmp_path / "page.txt"
+    page.write_text("…")
+    result = runner.invoke(
+        app, ["extract", str(FIRST_PACK), "key-figures", str(page), "--repairs", repairs]
+    )
+    assert result.exit_code == 2
