@@ -1,0 +1,169 @@
+# The models a question may be answered from: what every column means, and the tests that
+# must pass before a build is used. Every column is described; a test checks that.
+models:
+  - name: dim_companies
+    description: >
+      Every legal entity in the Central Coordinating Register for Legal Entities, as it stands
+      on the day of the last fetch. Industry, employees and address are today's values, not
+      history.
+    columns:
+      - name: orgnr
+        description: Organisation number, nine digits. The key of every company.
+        data_tests: [unique, not_null]
+      - name: name
+        description: Registered name, usually in capitals.
+      - name: legal_form
+        description: Legal form code, such as AS (private limited), ASA (public limited) or ENK.
+        data_tests: [not_null]
+      - name: industry_code
+        description: Main industry as an SN2025 subclass, such as 03.211. Empty when not stated.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_industries')
+                field: industry_code
+      - name: employees
+        description: Employees as last reported. Empty when the company has reported none.
+      - name: municipality_code
+        description: Four-digit municipality number of the business address, such as 4601.
+      - name: municipality
+        description: Municipality of the business address, in capitals.
+      - name: county_code
+        description: Two-digit county number, the first two digits of the municipality number.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_counties')
+                field: county_code
+      - name: county
+        description: County of the business address, such as Vestland.
+      - name: founded_on
+        description: Date the company was founded.
+      - name: in_group
+        description: True when the company is part of a group of companies.
+      - name: is_bankrupt
+        description: True when the company is in bankruptcy.
+      - name: is_being_wound_up
+        description: True when the company is being wound up.
+      - name: last_accounts_year
+        description: The last fiscal year the company filed accounts for.
+
+  - name: dim_industries
+    description: Every SN2025 industry subclass, with the division and section it belongs to.
+    columns:
+      - name: industry_code
+        description: Five-digit SN2025 subclass, such as 03.211.
+        data_tests: [unique, not_null]
+      - name: industry
+        description: Name of the subclass, in Norwegian.
+      - name: division_code
+        description: Two-digit division, such as 03 (fishing and aquaculture).
+        data_tests: [not_null]
+      - name: division
+        description: Name of the division, in Norwegian.
+      - name: section_code
+        description: Section letter, such as A (agriculture, forestry and fishing).
+        data_tests: [not_null]
+      - name: section
+        description: Name of the section, in Norwegian.
+
+  - name: fct_accounts
+    description: >
+      Annual accounts of limited companies (AS and ASA) with at least 50 employees: one row
+      per company, fiscal year and kind of accounts. Amounts are in whole units of the
+      currency the accounts were filed in.
+    columns:
+      - name: accounts_key
+        description: orgnr, fiscal year and accounts type, joined with hyphens.
+        data_tests: [unique, not_null]
+      - name: orgnr
+        description: Organisation number of the company.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_companies')
+                field: orgnr
+      - name: fiscal_year
+        description: The calendar year the fiscal year ends in.
+        data_tests: [not_null]
+      - name: accounts_type
+        description: >
+          company for the company's own accounts; group for a parent's consolidated accounts,
+          which include its subsidiaries. Never add the two.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [company, group]
+      - name: period_start
+        description: First day of the fiscal year.
+      - name: period_end
+        description: Last day of the fiscal year. Usually 31 December, not always.
+      - name: period_months
+        description: Length of the fiscal year in months. 12 for most; a first or changed year may be shorter or longer.
+      - name: currency
+        description: ISO code of the currency all amounts in the row are in, such as NOK or USD.
+        data_tests:
+          - not_null
+          - accepted_values:
+              name: currency_is_a_known_code
+              arguments:
+                values: [NOK, USD, EUR, SEK, DKK, GBP]
+              config:
+                severity: warn
+      - name: accounting_rules
+        description: >
+          regnskapslovenAlminneligRegler (Norwegian GAAP), IFRS, or forenkletAnvendelseIFRS
+          (simplified IFRS).
+      - name: revenue
+        description: Total operating revenue (sum driftsinntekter), in whole units of currency.
+      - name: operating_profit
+        description: Operating profit (driftsresultat), in whole units of currency.
+      - name: net_profit
+        description: Profit for the year after tax (årsresultat), in whole units of currency.
+      - name: total_assets
+        description: Total assets at the end of the year, in whole units of currency.
+      - name: equity
+        description: Total equity at the end of the year, in whole units of currency.
+      - name: filing_id
+        description: The register's id for the filing these figures come from.
+      - name: first_seen_at
+        description: When Vardex first fetched this filing, in UTC.
+
+  - name: bridge_industry_codes
+    description: >
+      From SN2007 subclasses to SN2025 subclasses. A code that was split has one row per new
+      code, so a figure joined through it is counted once for each.
+    columns:
+      - name: sn2007_code
+        description: Five-digit SN2007 subclass.
+        data_tests: [not_null]
+      - name: sn2025_code
+        description: Five-digit SN2025 subclass it maps to.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_industries')
+                field: industry_code
+
+  - name: fct_industry_statistics
+    description: >
+      SSB's principal figures for all enterprises in Norway (table 12910), by SN2007 industry
+      and year. Excludes agriculture, forestry and fishing (section A), finance and public
+      administration.
+    columns:
+      - name: sn2007_code
+        description: SN2007 code at any level, such as C, 10, 10.2, 10.20 or 10.201.
+        data_tests: [not_null]
+      - name: level
+        description: section, division, group, class, subclass, or other for SSB's own groupings.
+      - name: year
+        description: Calendar year.
+        data_tests: [not_null]
+      - name: enterprises
+        description: Number of enterprises.
+      - name: employed
+        description: Number of persons employed. Empty when SSB does not publish it.
+      - name: turnover_nok
+        description: Turnover in NOK, excluding VAT. Empty when SSB does not publish it.
