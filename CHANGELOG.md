@@ -6,6 +6,10 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Downloads send the last ETag back; a file the server reports unchanged is not downloaded again.
+
 ## [0.4.0] - 2026-10-09
 
 ### Added

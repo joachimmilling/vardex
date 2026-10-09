@@ -203,8 +203,9 @@ def fetch_and_load(
                 statuses = fetch_keys(client, source, keys, folder, now)
                 say(f"{source.name}: fetched {len(keys):,} keys: {describe_statuses(statuses)}")
             else:
-                path = fetch_file(client, source, folder, now)
-                say(f"{source.name}: fetched {size(path.stat().st_size)}")
+                path, changed = fetch_file(client, source, folder, now)
+                done = "fetched" if changed else "not modified, kept"
+                say(f"{source.name}: {done} {size(path.stat().st_size)}")
             prune(source, folder)
         except (IngestError, duckdb.Error) as err:
             if not landed(folder):
