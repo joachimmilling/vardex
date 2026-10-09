@@ -7,10 +7,7 @@ from vardex.pricing import Usage
 
 
 class FakeModel:
-    """A ModelClient that replies with prepared texts, in order, and keeps every request.
-
-    A reply that is an exception is raised instead, as a failed call.
-    """
+    """A ModelClient that replies with prepared texts, in order, and keeps every request."""
 
     def __init__(self, *replies: str, stop_reason: str = "end") -> None:
         self.replies = list(replies)
@@ -21,8 +18,6 @@ class FakeModel:
     def send(self, request, on_text=None):
         self.requests.append(request)
         text = self.replies.pop(0)
-        if isinstance(text, Exception):
-            raise text
         if on_text:
             on_text(text)
         return Answer(

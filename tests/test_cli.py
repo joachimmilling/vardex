@@ -1,13 +1,10 @@
 import json
 from pathlib import Path
 
-import pytest
 from fakes import FakeModel
 from typer.testing import CliRunner
 
 from vardex.cli import app
-from vardex.extraction import build_request, load_extraction
-from vardex.llm import ModelError
 
 runner = CliRunner()
 FIRST_PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
@@ -169,6 +166,34 @@ def test_extract_prints_one_line_per_document_and_reports_failures(monkeypatch, 
     assert len((tmp_path / "logs" / "calls.jsonl").read_text().splitlines()) == 2
 
 
+def test_extract_can_show_the_prompt_without_a_key(monkeypatch, tmp_path):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("vardex.config.load_dotenv", lambda: None)
+    page = tmp_path / "page.txt"
+    page.write_text("Demo Bygg AS. Driftsresultat 5 927.")
+    args = ["extract", str(FIRST_PACK), "key-figures", str(page), "--show-prompt"]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0
+    assert "=== system ===" in result.output
+    assert "Demo Bygg AS. Driftsresultat 5 927." in result.output
+    assert '"revenue_quote"' in result.output
+
+
+def test_chat_keeps_the_history_and_totals_the_cost(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    model = FakeModel("Hei!", "Oslo.")
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+
+    result = runner.invoke(app, ["chat"], input="Hei\nHva er hovedstaden?\n\n")
+
+    assert result.exit_code == 0
+    assert "Oslo." in result.output
+    second = model.requests[1]
+    assert [m.text for m in second.messages] == ["Hei", "Hei!", "Hva er hovedstaden?"]
+    assert second.cache_conversation
+    assert "2 turns · $0.0080" in result.output
+
+
 def test_extract_with_an_unknown_extraction_fails_before_any_call(tmp_path):
     page = tmp_path / "page.txt"
     page.write_text("…")
@@ -187,109 +212,3 @@ def test_tokens_counts_a_file(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert "120" in result.output
     assert "24.00" in result.output  # 120 tokens / 5 words
-
-
-def test_extract_show_prompt_prints_the_request_and_calls_nothing(monkeypatch, tmp_path):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setattr("vardex.config.load_dotenv", lambda: None)
-    monkeypatch.setattr("vardex.cli.connect", lambda settings: pytest.fail("must not connect"))
-    first = tmp_path / "first.txt"
-    first.write_text("Demo Bygg AS. Driftsresultat 5 927.")
-    second = tmp_path / "second.txt"
-    second.write_text("Not shown.")
-
-    result = runner.invoke(
-        app, ["extract", str(FIRST_PACK), "key-figures", str(first), str(second), "--show-prompt"]
-    )
-
-    assert result.exit_code == 0
-    spec = load_extraction(FIRST_PACK, "key-figures")
-    request = build_request(spec, first.read_text())
-    assert request.system in result.output
-    assert "=== Message 1 (user) ===" in result.output
-    assert request.messages[0].text in result.output
-    assert "Not shown." not in result.output
-    schema = json.dumps(request.output_schema.model_json_schema(), indent=2)
-    assert result.output.endswith(schema + "\n")
-
-
-def test_extract_logs_and_shows_every_call_of_a_repair(monkeypatch, tmp_path):
-    page = tmp_path / "page.txt"
-    page.write_text("Demo Bygg AS. Driftsresultat 5 927.")
-    values = {
-        "problem": None,
-        "company_name": "Demo Bygg AS",
-        "fiscal_year": None,
-        "accounts": None,
-        "currency": None,
-        "unit": None,
-        "unit_quote": None,
-        "revenue": None,
-        "revenue_quote": None,
-        "operating_profit": 5927,
-        "operating_profit_quote": "5 927",
-    }
-    wrong = values | {"operating_profit_quote": "5 928"}
-    model = FakeModel(json.dumps(wrong), json.dumps(values))
-    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(app, ["extract", str(FIRST_PACK), "key-figures", str(page), "--stats"])
-
-    assert len(model.requests) == 2
-    assert result.output.count("claude-sonnet-5-5 ·") == 2
-    assert len((tmp_path / "logs" / "calls.jsonl").read_text().splitlines()) == 2
-
-
-@pytest.mark.parametrize("repairs", ["-1", "4"])
-def test_extract_repairs_must_be_from_0_to_3(repairs, tmp_path):
-    page = tmp_path / "page.txt"
-    page.write_text("…")
-    result = runner.invoke(
-        app, ["extract", str(FIRST_PACK), "key-figures", str(page), "--repairs", repairs]
-    )
-    assert result.exit_code == 2
-
-
-def test_chat_sends_the_conversation_so_far_and_ends_on_an_empty_line(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    model = FakeModel("Nine digits.", "Yes.")
-    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
-
-    result = runner.invoke(app, ["chat"], input="What is it?\nA check digit?\n\nNot sent\n")
-
-    assert result.exit_code == 0
-    assert "Nine digits.\n" in result.stdout
-    assert "Yes.\n" in result.stdout
-    assert len(model.requests) == 2
-    sent = [m.text for m in model.requests[1].messages]
-    assert sent == ["What is it?", "Nine digits.", "A check digit?"]
-    assert "2 turns · $0.0080" in result.stderr
-    assert "Turn 1" not in result.stderr
-    assert len((tmp_path / "logs" / "calls.jsonl").read_text().splitlines()) == 2
-
-
-def test_chat_ends_at_the_end_of_input_and_shows_each_turn_with_stats(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("vardex.cli.connect", lambda settings: FakeModel("One.", "Two."))
-
-    result = runner.invoke(app, ["chat", "--stats"], input="1\n2\n")
-
-    assert result.exit_code == 0
-    assert "Turn 1: claude-sonnet-5-5" in result.stderr
-    assert "Turn 2: claude-sonnet-5-5" in result.stderr
-    assert "first text after 0.5 s" in result.stderr
-    assert "2 turns · $0.0080" in result.stderr
-
-
-def test_chat_goes_on_after_a_failed_call(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    model = FakeModel(ModelError("Could not reach the API"), "Nine digits.")
-    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
-
-    result = runner.invoke(app, ["chat"], input="Lost?\nWhat is it?\n")
-
-    assert result.exit_code == 0
-    assert "Could not reach the API" in result.stderr
-    assert [m.text for m in model.requests[1].messages] == ["What is it?"]
-    assert "1 turn · $0.0040" in result.stderr

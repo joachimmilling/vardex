@@ -1,7 +1,6 @@
 """The vardex command-line tool."""
 
 import json
-import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
@@ -12,14 +11,8 @@ from vardex import __version__
 from vardex.anthropic_client import AnthropicClient
 from vardex.calllog import log_call
 from vardex.config import Settings, load_settings
-from vardex.extraction import (
-    MAX_REPAIRS,
-    ExtractionError,
-    build_request,
-    extract,
-    load_extraction,
-)
-from vardex.llm import Answer, Conversation, Effort, ModelClient, ModelError, Request
+from vardex.extraction import ExtractionError, build_request, extract, load_extraction
+from vardex.llm import Answer, Conversation, Effort, ModelClient, ModelError
 from vardex.llm import ask as ask_model
 from vardex.packs import PackError, load_pack
 from vardex.pricing import (
@@ -136,38 +129,32 @@ def ask(
 @app.command()
 def chat(
     model: ModelOption = None,
-    effort: Annotated[
-        Effort | None, typer.Option(help="How much work the model puts in. Ignored on Haiku 4.5.")
-    ] = None,
     stats: StatsOption = False,
 ) -> None:
-    """Chat with the model. An empty line or the end of input ends the chat."""
+    """Talk with the model. The history is sent with every message; an empty line ends it."""
     try:
-        conversation = Conversation(connect(settings_for(model)), effort=effort)
+        conversation = Conversation(connect(settings_for(model)))
     except ModelError as err:
         raise fail(str(err)) from err
-
+    typer.secho("Chat with Vardex. Press Enter on an empty line to stop.", fg="bright_black")
     while True:
-        typer.echo("> ", nl=False, err=True)
-        line = sys.stdin.readline()
-        if not line.strip():  # "" at the end of input, "\n" for an empty line
+        try:
+            text = input("> ").strip()
+        except EOFError:
+            break
+        if not text:
             break
         try:
-            answer = conversation.send(line.strip(), on_text=echo_piece)
+            answer = conversation.say(text, on_text=echo_piece)
         except ModelError as err:
-            typer.secho(str(err), fg=typer.colors.RED, err=True)  # the next line can retry
+            typer.secho(str(err), fg=typer.colors.RED, err=True)
             continue
-        typer.echo()
-        record(answer, stats=False)
-
-    if stats:
-        warn_if_prices_are_stale()
-        for number, answer in enumerate(conversation.answers, start=1):
-            typer.secho(f"Turn {number}: {describe(answer)}", fg="bright_black", err=True)
+        typer.echo("\n")
+        record(answer, stats)
     total = conversation.cost_usd
-    cost = format_usd(total) if total is not None else "cost unknown"
     turns = len(conversation.answers)
-    typer.echo(f"{turns} turn{'' if turns == 1 else 's'} · {cost}", err=True)
+    cost = format_usd(total) if total is not None else "cost unknown"
+    typer.secho(f"{turns} turns · {cost}", fg="bright_black", err=True)
 
 
 @app.command(name="extract")
@@ -181,30 +168,31 @@ def extract_command(
     effort: Annotated[
         Effort, typer.Option(help="How much work the model puts in. Ignored on Haiku 4.5.")
     ] = "low",
-    stats: StatsOption = False,
     repairs: Annotated[
-        int,
-        typer.Option(
-            min=0,
-            max=MAX_REPAIRS,
-            help="How many times to send a failed answer back to the model to fix. 0 turns it off.",
-        ),
+        int, typer.Option(min=0, max=3, help="How often to ask again after a failed check.")
     ] = 1,
     show_prompt: Annotated[
         bool,
-        typer.Option(
-            "--show-prompt", help="Print the request for the first file and send nothing."
-        ),
+        typer.Option("--show-prompt", help="Print the request for the first file; call nothing."),
     ] = False,
+    stats: StatsOption = False,
 ) -> None:
     """Extract values from documents. Prints one JSON line per document that passes the checks."""
     try:
         spec = load_extraction(pack, name)
-        if show_prompt:
-            show(build_request(spec, files[0].read_text(encoding="utf-8"), effort=effort))
-            return
+    except PackError as err:
+        raise fail(str(err)) from err
+    if show_prompt:
+        request = build_request(spec, files[0].read_text(encoding="utf-8"), effort)
+        schema = request.output_schema.model_json_schema() if request.output_schema else None
+        typer.echo(f"=== system ===\n{request.system}\n")
+        for message in request.messages:
+            typer.echo(f"=== {message.role} ===\n{message.text}\n")
+        typer.echo(f"=== output schema ===\n{json.dumps(schema, indent=2, ensure_ascii=False)}")
+        return
+    try:
         client = connect(settings_for(model))
-    except (PackError, ModelError) as err:
+    except ModelError as err:
         raise fail(str(err)) from err
 
     failed = 0
@@ -229,18 +217,6 @@ def extract_command(
             record(answer, stats)
     if failed:
         raise fail(f"{failed} of {len(files)} documents failed.")
-
-
-def show(request: Request) -> None:
-    """Print a request under headings: the system prompt, each message and the output schema."""
-    typer.secho("=== System prompt ===", bold=True)
-    typer.echo(request.system)
-    for number, message in enumerate(request.messages, start=1):
-        typer.secho(f"\n=== Message {number} ({message.role}) ===", bold=True)
-        typer.echo(message.text)
-    if request.output_schema is not None:
-        typer.secho("\n=== Output schema ===", bold=True)
-        typer.echo(json.dumps(request.output_schema.model_json_schema(), indent=2))
 
 
 @app.command()

@@ -92,8 +92,8 @@ class AnthropicClient:
             "messages": [{"role": m.role, "content": m.text} for m in request.messages],
         }
         if request.cache_conversation:
-            # Automatic caching: the API puts the breakpoint on the last block it can cache,
-            # so each turn of a conversation reads the turns before it from the cache.
+            # Automatic caching: the breakpoint moves to the last message on every turn, so
+            # each turn reads the whole earlier conversation from the cache.
             params["cache_control"] = {"type": "ephemeral"}
         output_config: dict[str, Any] = {}
         if request.effort is not None and not self.model.startswith(MODELS_WITHOUT_EFFORT):
