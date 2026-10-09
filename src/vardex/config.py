@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -14,6 +15,7 @@ class Settings:
     model: str
     timeout_seconds: float = 120.0  # per attempt; the SDK's own default is ten minutes
     max_retries: int = 2  # extra attempts after a rate limit, an overload or a dropped connection
+    data_dir: Path = Path("data")  # fetched files and the warehouse, one folder per pack
 
 
 def load_settings() -> Settings:
@@ -22,4 +24,5 @@ def load_settings() -> Settings:
     return Settings(
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
         model=os.getenv("VARDEX_MODEL") or DEFAULT_MODEL,  # an empty value means "use the default"
+        data_dir=Path(os.getenv("VARDEX_DATA_DIR") or "data"),
     )
