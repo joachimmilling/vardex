@@ -1,0 +1,51 @@
+# Where the warehouse's data comes from, in the order it is loaded.
+# Run: uv run vardex ingest packs/norwegian-companies
+sources:
+  - name: units
+    description: >
+      Every legal entity in the Central Coordinating Register for Legal Entities
+      (Enhetsregisteret), from Brønnøysundregistrene. A file of about 150 MB, made every night.
+    url: https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv
+    format: csv
+    refresh_days: 1
+
+  - name: accounts
+    description: >
+      Annual accounts from the Register of Company Accounts (Regnskapsregisteret): the last three
+      years for each company, company and group accounts. Only limited companies with at least
+      50 employees, one request each. Every fetch is kept, to build history beyond three years.
+    url: https://data.brreg.no/regnskapsregisteret/regnskap/{key}
+    keys: >
+      select organisasjonsnummer from raw.units
+      where "organisasjonsform.kode" in ('AS', 'ASA')
+        and try_cast(antallAnsatte as integer) >= 50
+        and konkurs = 'false' and underAvvikling = 'false'
+    refresh_days: 7
+    history: true
+    workers: 4
+
+  - name: industries
+    description: The Standard Industrial Classification SN2025, from SSB's classification API (KLASS).
+    url: https://data.ssb.no/api/klass/v1/classifications/6/codes.json?from=2025-01-01&language=nb
+    refresh_days: 30
+
+  - name: industry_changes
+    description: >
+      SSB's change table from SN2025 to SN2007. It lists only the codes that changed: a code with
+      the same number and meaning in both versions is not in it.
+    url: https://data.ssb.no/api/klass/v1/correspondencetables/2919
+    refresh_days: 30
+
+  - name: counties
+    description: Norway's counties since the 2024 reform, from KLASS.
+    url: https://data.ssb.no/api/klass/v1/classifications/104/codes.json?from=2024-01-01&language=nb
+    refresh_days: 30
+
+  - name: industry_statistics
+    description: >
+      SSB table 12910: enterprises, employed persons and turnover (NOK million) by industry,
+      in SN2007, every year from 2017.
+    url: >-
+      https://data.ssb.no/api/pxwebapi/v2/tables/12910/data?lang=en&outputFormat=csv&stub=NACE2007,Enhet,Tid&heading=ContentsCode&valueCodes[NACE2007]=*&valueCodes[Enhet]=1&valueCodes[ContentsCode]=Enheter,Sysselsatte,Oms&valueCodes[Tid]=*
+    format: csv
+    refresh_days: 30
