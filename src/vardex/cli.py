@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
+import duckdb
 import typer
 
 from vardex import __version__
@@ -12,6 +13,7 @@ from vardex.anthropic_client import AnthropicClient
 from vardex.calllog import log_call
 from vardex.config import Settings, load_settings
 from vardex.extraction import ExtractionError, build_request, extract, load_extraction
+from vardex.ingest import http_client
 from vardex.llm import Answer, Conversation, Effort, ModelClient, ModelError
 from vardex.llm import ask as ask_model
 from vardex.packs import PackError, load_pack
@@ -25,6 +27,7 @@ from vardex.pricing import (
     price_for,
     stale_prices_warning,
 )
+from vardex.warehouse import WarehouseError, build, query, warehouse_path
 
 app = typer.Typer(
     help="Vardex: blocks, recipes and packs for enterprise AI apps.",
@@ -32,6 +35,7 @@ app = typer.Typer(
 )
 
 ModelOption = Annotated[str | None, typer.Option(help="Use this model instead of VARDEX_MODEL.")]
+PackArgument = Annotated[Path, typer.Argument(help="A pack folder.", exists=True, file_okay=False)]
 StatsOption = Annotated[bool, typer.Option("--stats", help="Show tokens, time and cost.")]
 CALL_LOG = Path("logs/calls.jsonl")
 
@@ -159,7 +163,7 @@ def chat(
 
 @app.command(name="extract")
 def extract_command(
-    pack: Annotated[Path, typer.Argument(help="A pack folder.", exists=True, file_okay=False)],
+    pack: PackArgument,
     name: Annotated[str, typer.Argument(help="An extraction in the pack, such as key-figures.")],
     files: Annotated[
         list[Path], typer.Argument(help="Text files to extract from.", exists=True, dir_okay=False)
@@ -217,6 +221,48 @@ def extract_command(
             record(answer, stats)
     if failed:
         raise fail(f"{failed} of {len(files)} documents failed.")
+
+
+@app.command()
+def ingest(
+    pack: PackArgument,
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Fetch every source, even those fetched recently.")
+    ] = False,
+) -> None:
+    """Fetch the pack's sources that are due, and rebuild its warehouse from scratch."""
+
+    def say(line: str) -> None:
+        typer.echo(line, err=True)
+
+    try:
+        with http_client() as client:
+            result = build(pack, load_settings().data_dir, client, refresh=refresh, say=say)
+    except (PackError, WarehouseError) as err:
+        raise fail(str(err)) from err
+    for warning in result.warnings:
+        typer.secho(f"Warning: {warning}", fg="yellow", err=True)
+    for stale in result.stale:
+        typer.secho(f"Stale: {stale}", fg=typer.colors.RED, err=True)
+    typer.echo(result.path)
+    if result.stale:
+        raise typer.Exit(code=1)  # the warehouse is in place, but a scheduler should notice
+
+
+@app.command(name="sql")
+def sql_command(
+    pack: PackArgument,
+    statement: Annotated[str, typer.Argument(help="The SQL to run, such as 'select 1'.")],
+) -> None:
+    """Run SQL on a pack's warehouse, read-only, and print the result."""
+    try:
+        name = load_pack(pack).name
+        result = query(warehouse_path(load_settings().data_dir, name), statement)
+        typer.echo(result)
+    except (PackError, WarehouseError) as err:
+        raise fail(str(err)) from err
+    except duckdb.Error as err:
+        raise fail(f"DuckDB: {err}") from err
 
 
 @app.command()
