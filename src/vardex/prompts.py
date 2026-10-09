@@ -21,29 +21,10 @@ harm than an empty one.
 
 <task>
 {instructions}
-</task>{examples}"""
+</task>"""
 
-# Added to EXTRACT when a pack gives worked examples; empty otherwise.
-EXAMPLES = """
-
-<examples>
-Each example shows a document and the JSON answer it should give.
-{examples}
-</examples>"""
-
-EXAMPLE = """<example>
-<document>
-{document}
-</document>
-<answer>
-{answer}
-</answer>
-</example>"""
-
-# Sent after an answer that fails the schema or the checks, with the answer before it.
 REPAIR = """\
 Your answer has these problems:
 {problems}
 
-Answer again in the same JSON format, with the problems fixed. Follow the same rules: if the \
-document does not show a value, leave it empty rather than guess."""
+Read the document again and answer once more in the same format. Correct only what is wrong."""

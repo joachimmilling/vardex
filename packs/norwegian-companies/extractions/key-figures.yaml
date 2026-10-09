@@ -59,24 +59,24 @@ fields:
     type: amount
     description: Operating profit in the page's unit, as a number. (1 234) is -1234.
     quote: true
+
+# Worked examples, shown to the model with the instructions. Each must pass the same checks
+# as a real answer, or the extraction will not load.
 examples:
   - document: |
-      Demo Programvare AS (et oppdiktet selskap, skrevet for Vardex-eksemplene)
-      Nøkkeltall
-
-      Tall i TNOK                    2025        2024
-      Driftsinntekter              48 210      52 904
-      Driftsresultat              (3 145)       1 870
-      Resultat før skattekostnad  (3 902)       1 455
-      Egenkapitalandel               41 %        46 %
+      Demo Reiseliv AS (fictional)
+      Nøkkeltall                        TNOK
+                               2025      2024      2023
+      Driftsinntekter        48 210    51 930    44 120
+      Driftsresultat         (2 315)    3 480     1 905
     values:
-      company_name: Demo Programvare AS
+      company_name: Demo Reiseliv AS
       fiscal_year: 2025
       accounts: company
       currency: NOK
       unit: thousands
-      unit_quote: Tall i TNOK
+      unit_quote: TNOK
       revenue: 48210
       revenue_quote: 48 210
-      operating_profit: -3145
-      operating_profit_quote: (3 145)
+      operating_profit: -2315
+      operating_profit_quote: (2 315)

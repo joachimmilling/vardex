@@ -1,0 +1,73 @@
+# The metrics a question about Norwegian companies may be answered with. Each is an aggregate
+# SQL expression over one model; group it by any column of that model, or of a model joined
+# to it. Vardex checks on every ingest that each one runs.
+metrics:
+  - name: companies
+    description: Number of companies.
+    table: dim_companies
+    sql: count(distinct orgnr)
+    unit: companies
+    notes:
+      - The register holds every kind of entity. Filter on legal_form, such as AS and ASA, to count companies in the everyday sense.
+
+  - name: employees
+    description: Employees, as the companies last reported them.
+    table: dim_companies
+    sql: sum(employees)
+    unit: persons
+    notes:
+      - A company that has reported no employees has an empty value, not zero.
+      - Today's figure; there is no history of employees.
+
+  - name: revenue
+    description: Total operating revenue (sum driftsinntekter) in the fiscal year.
+    table: fct_accounts
+    sql: sum(revenue)
+    unit: the currency in the currency column
+    notes:
+      - Only add amounts in the same currency. Filter on currency = 'NOK', or group by currency.
+      - Use accounts_type = 'company' when adding companies. Group accounts include subsidiaries that also report on their own, so mixing the two counts them twice.
+      - Covers limited companies (AS and ASA) with at least 50 employees, not every company.
+
+  - name: operating_profit
+    description: Operating profit (driftsresultat) in the fiscal year.
+    table: fct_accounts
+    sql: sum(operating_profit)
+    unit: the currency in the currency column
+    notes:
+      - The same rules as revenue on currency, accounts type and coverage.
+
+  - name: operating_margin
+    description: Operating profit as a share of revenue.
+    table: fct_accounts
+    sql: sum(operating_profit) / nullif(sum(revenue), 0)
+    unit: share, where 0.12 means 12%
+    notes:
+      - For a group of companies this is the margin of their totals, not the average of their margins; one large company weighs more than a small one.
+      - Empty when revenue is zero. Above 1 or very negative for companies with little revenue, such as holding companies.
+
+  - name: net_profit
+    description: Profit for the year after tax (årsresultat).
+    table: fct_accounts
+    sql: sum(net_profit)
+    unit: the currency in the currency column
+    notes:
+      - The same rules as revenue on currency, accounts type and coverage.
+
+  - name: equity_ratio
+    description: Equity as a share of total assets, at the end of the fiscal year.
+    table: fct_accounts
+    sql: sum(equity) / nullif(sum(total_assets), 0)
+    unit: share, where 0.35 means 35%
+    notes:
+      - For a group of companies this is the ratio of their totals.
+
+  - name: industry_turnover
+    description: Turnover of all enterprises in an industry, from Statistics Norway.
+    table: fct_industry_statistics
+    sql: sum(turnover_nok)
+    unit: NOK
+    notes:
+      - Industries are SN2007 codes. Join through bridge_industry_codes to compare with companies, whose industries are SN2025.
+      - Rows come at every level of the classification. Filter on one level, or the same turnover is counted several times.
+      - Statistics Norway publishes it a year or more after the year ends.

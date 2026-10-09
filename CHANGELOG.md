@@ -6,6 +6,30 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-09
+
+### Added
+
+- `vardex ingest PACK` fetches the pack's sources that are due, lands every fetch as a file in
+  `data/<pack>/landing/`, and rebuilds the pack's DuckDB warehouse from scratch with its dbt
+  project. The new warehouse replaces the old one only when every model, test and metric passes;
+  a failed fetch falls back on the newest landed file.
+- `vardex sql PACK QUERY` runs SQL on a pack's warehouse, read-only.
+- Packs declare their sources in `warehouse/ingest.yaml`: a file to download, or a URL fetched once
+  per key, with `refresh_days` and `history`. Rate limits, overloads and dropped connections are
+  retried.
+- Packs define metrics in `warehouse/metrics.yaml`, and every ingest checks that each one runs.
+- The `norwegian-companies` warehouse: the Central Coordinating Register for Legal Entities, the
+  accounts of limited companies with at least 50 employees, SN2025 industries with a map from
+  SN2007, counties, and Statistics Norway's figures by industry, with dbt tests on keys, units,
+  the industry map and freshness, and eight metrics.
+- `VARDEX_DATA_DIR` sets where fetched files and warehouses are kept (default `data`).
+- Decision records in `docs/decisions/`.
+
+### Changed
+
+- Every YAML file in a pack is read by `vardex.packs.read_yaml`, with one line per problem.
+
 ## [0.3.1] - 2026-10-01
 
 ### Added

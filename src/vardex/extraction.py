@@ -23,9 +23,9 @@ from pydantic import (
     model_validator,
 )
 
-from vardex.llm import Answer, Effort, Message, ModelClient, ModelError, Request
+from vardex.llm import Answer, Effort, Message, ModelClient, Request
 from vardex.packs import PackError, describe_problem
-from vardex.prompts import EXAMPLE, EXAMPLES, EXTRACT, REPAIR
+from vardex.prompts import EXTRACT, REPAIR
 
 FieldType = Literal["text", "integer", "amount", "choice"]
 # An amount is a JSON number in the schema, so the model cannot answer "1 480 312" as text,
@@ -34,7 +34,6 @@ Amount = Annotated[Decimal, WithJsonSchema({"type": "number"})]
 PYTHON_TYPES: dict[str, Any] = {"text": str, "integer": int, "amount": Amount}
 MAX_VALUES = 16  # structured outputs accept at most 16 fields that may be empty in one schema
 FIELD_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-MAX_REPAIRS = 3  # each repair is another paid call
 
 
 class FieldSpec(BaseModel):
@@ -55,13 +54,13 @@ class FieldSpec(BaseModel):
         return self
 
 
-class ExampleSpec(BaseModel):
-    """A worked example: a document and the values it should give. A field left out is empty."""
+class Example(BaseModel):
+    """A worked example for the prompt: a document and the values it should give."""
 
     model_config = ConfigDict(extra="forbid")
 
     document: str
-    values: dict[str, Any] = {}
+    values: dict[str, Any]  # a field left out means empty
 
 
 class ExtractionSpec(BaseModel):
@@ -72,7 +71,7 @@ class ExtractionSpec(BaseModel):
     description: str
     instructions: str
     fields: dict[str, FieldSpec] = Field(min_length=1)
-    examples: list[ExampleSpec] = []
+    examples: list[Example] = []
 
     @model_validator(mode="after")
     def names_and_size(self) -> "ExtractionSpec":
@@ -87,10 +86,22 @@ class ExtractionSpec(BaseModel):
             raise ValueError(f"{values} values with quotes and problem; the limit is {MAX_VALUES}")
         return self
 
+    @model_validator(mode="after")
+    def examples_pass_the_checks(self) -> "ExtractionSpec":
+        # A wrong example teaches the model the wrong thing, so every example must pass the
+        # same checks as a real answer. An example of a document that cannot be used, with a
+        # problem, only has to have the right shape.
+        for number, example in enumerate(self.examples, start=1):
+            answer = json.dumps(example_values(self, example), default=str)
+            problems, values = read_values(self, answer, example.document)
+            if values is None or (problems and not values["problem"]):
+                raise ValueError(f"example {number} fails its own checks: {'; '.join(problems)}")
+        return self
+
 
 @dataclass(frozen=True)
 class Extraction:
-    """Values that passed every check, and every answer it took to get them, in order."""
+    """Values that passed every check, and the answers they took: one, or more after repairs."""
 
     values: dict[str, Any]
     answers: list[Answer]
@@ -101,7 +112,7 @@ class ExtractionError(Exception):
 
     def __init__(self, reason: str, answers: list[Answer] | None = None) -> None:
         super().__init__(reason)
-        self.answers = answers or []  # so every call can still be logged and paid for
+        self.answers = answers or []  # so the calls can still be logged and paid for
 
 
 def load_extraction(pack: Path, name: str) -> ExtractionSpec:
@@ -112,62 +123,12 @@ def load_extraction(pack: Path, name: str) -> ExtractionSpec:
         raise PackError(f"No extraction {name!r} in {pack}. Known: {', '.join(known) or 'none'}")
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        spec = ExtractionSpec.model_validate(data)
+        return ExtractionSpec.model_validate(data)
     except yaml.YAMLError as err:
         raise PackError(f"{path} is not valid YAML:\n{err}") from err
     except ValidationError as err:
         problems = "\n".join(f"  {describe_problem(e)}" for e in err.errors())
         raise PackError(f"{path} is not a valid extraction:\n{problems}") from err
-    for number, example in enumerate(spec.examples, start=1):
-        problems = check_example(spec, example)
-        if problems:
-            raise PackError(f"{path}: example {number} fails its checks: {'; '.join(problems)}")
-    return spec
-
-
-def example_answer(spec: ExtractionSpec, example: ExampleSpec) -> dict[str, Any]:
-    """The full answer an example stands for, in the schema's order, with left-out values empty."""
-    return {name: example.values.get(name) for name in output_model(spec).model_fields}
-
-
-def check_example(spec: ExtractionSpec, example: ExampleSpec) -> list[str]:
-    """Everything wrong with an example, checked like a real answer. Empty means usable."""
-    schema = output_model(spec)
-    unknown = sorted(set(example.values) - set(schema.model_fields))
-    if unknown:
-        return [f"{', '.join(unknown)} is not a field of this extraction"]
-    try:
-        values = schema.model_validate(example_answer(spec, example)).model_dump()
-    except ValidationError as err:
-        return [describe_problem(e) for e in err.errors()]
-    if values["problem"]:
-        return []  # an example of a document that cannot be used only needs the right shape
-    return check(spec, values, example.document)
-
-
-def system_prompt(spec: ExtractionSpec) -> str:
-    """The pack's instructions and worked examples, inside the engine's extraction prompt."""
-    schema = output_model(spec)
-    examples = "\n".join(
-        EXAMPLE.format(
-            document=example.document.strip(),
-            answer=json.dumps(
-                schema.model_validate(example_answer(spec, example)).model_dump(),
-                ensure_ascii=False,
-                default=json_number,
-            ),
-        )
-        for example in spec.examples
-    )
-    return EXTRACT.format(
-        instructions=spec.instructions.strip(),
-        examples=EXAMPLES.format(examples=examples) if examples else "",
-    )
-
-
-def json_number(value: Decimal) -> int | float:
-    """An amount as a JSON number, the way the schema asks the model to give it."""
-    return int(value) if value == value.to_integral_value() else float(value)
 
 
 def output_model(spec: ExtractionSpec) -> type[BaseModel]:
@@ -195,8 +156,30 @@ def output_model(spec: ExtractionSpec) -> type[BaseModel]:
     return create_model("Extracted", **fields)
 
 
-def build_request(spec: ExtractionSpec, document: str, *, effort: Effort | None = "low") -> Request:
-    """The request extract sends for one document. --show-prompt prints this same request."""
+def example_values(spec: ExtractionSpec, example: Example) -> dict[str, Any]:
+    """An example's values as a complete answer: every field present, empty where left out."""
+    names = ["problem"]
+    for name, spec_field in spec.fields.items():
+        names += [name, f"{name}_quote"] if spec_field.quote else [name]
+    return {name: example.values.get(name) for name in names}
+
+
+def system_prompt(spec: ExtractionSpec) -> str:
+    """The engine's extraction prompt with the pack's instructions and examples filled in."""
+    prompt = EXTRACT.format(instructions=spec.instructions.strip())
+    if spec.examples:
+        shown = "\n".join(
+            f"<example>\n<document>\n{example.document.strip()}\n</document>\n"
+            f"<answer>{json.dumps(example_values(spec, example), ensure_ascii=False)}</answer>\n"
+            "</example>"
+            for example in spec.examples
+        )
+        prompt += f"\n\n<examples>\n{shown}\n</examples>"
+    return prompt
+
+
+def build_request(spec: ExtractionSpec, document: str, effort: Effort | None = "low") -> Request:
+    """The request that extracts a spec's values from one document."""
     return Request(
         system=system_prompt(spec),
         messages=[Message("user", f"<document>\n{document}\n</document>")],
@@ -216,53 +199,42 @@ def extract(
 ) -> Extraction:
     """Extract the values a spec describes from one document, and check them.
 
-    When an answer fails the schema or the checks, the model gets its answer and the problems
-    back and answers again, at most `repairs` times. A problem the model reports is final.
+    When the answer fails a check, the model is shown what is wrong and asked again, up to
+    `repairs` times. When the model itself reports a problem, it is not asked again.
     """
-    if not 0 <= repairs <= MAX_REPAIRS:
-        raise ValueError(f"repairs must be from 0 to {MAX_REPAIRS}, not {repairs}")
-    schema = output_model(spec)
-    request = build_request(spec, document, effort=effort)
+    request = build_request(spec, document, effort)
     answers: list[Answer] = []
-    while True:
-        try:
-            answer = client.send(request)
-        except ModelError as err:
-            if not answers:
-                raise
-            # keep the answers already paid for, so they are still logged
-            raise ExtractionError(f"the repair failed: {err}", answers) from err
+    for _ in range(repairs + 1):
+        answer = client.send(request)
         answers.append(answer)
         if answer.stop_reason != "end":
             raise ExtractionError(f"the model stopped early ({answer.stop_reason})", answers)
-        try:
-            values = schema.model_validate_json(answer.text).model_dump()
-        except ValidationError as err:
-            problems = [describe_problem(e) for e in err.errors()]
-            reason = f"the answer does not match the schema: {'; '.join(problems)}"
-        else:
-            problems = check(spec, values, document)
-            if not problems:
-                return Extraction(values=values, answers=answers)
-            if values["problem"]:
-                raise ExtractionError("; ".join(problems), answers)
-            reason = "; ".join(problems)
-        if len(answers) > repairs:
-            raise ExtractionError(reason, answers)
-        request = repair_request(request, answer, problems)
+        problems, values = read_values(spec, answer.text, document)
+        if not problems:
+            return Extraction(values=values or {}, answers=answers)
+        if values and values["problem"]:
+            break
+        request = replace(
+            request,
+            messages=[
+                *request.messages,
+                Message("assistant", answer.text),
+                Message("user", REPAIR.format(problems="\n".join(f"- {p}" for p in problems))),
+            ],
+        )
+    raise ExtractionError("; ".join(problems), answers)
 
 
-def repair_request(request: Request, answer: Answer, problems: list[str]) -> Request:
-    """The request with the model's answer and its problems added, asking it to answer again."""
-    problem_list = "\n".join(f"- {problem}" for problem in problems)
-    return replace(
-        request,
-        messages=[
-            *request.messages,
-            Message("assistant", answer.text),
-            Message("user", REPAIR.format(problems=problem_list)),
-        ],
-    )
+def read_values(
+    spec: ExtractionSpec, text: str, document: str
+) -> tuple[list[str], dict[str, Any] | None]:
+    """Parse an answer and check it: the problems found, and the values if they parsed."""
+    try:
+        values = output_model(spec).model_validate_json(text).model_dump()
+    except ValidationError as err:
+        problems = "; ".join(describe_problem(e) for e in err.errors())
+        return [f"the answer does not match the schema: {problems}"], None
+    return check(spec, values, document), values
 
 
 def check(spec: ExtractionSpec, values: dict[str, Any], document: str) -> list[str]:

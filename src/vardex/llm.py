@@ -5,7 +5,7 @@ implements a client for a provider imports that provider's SDK.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Literal, Protocol
 
@@ -96,39 +96,30 @@ def ask(
     return client.send(request, on_text=on_text)
 
 
+@dataclass
 class Conversation:
-    """A chat with a model: the messages so far, and the answer to each turn.
+    """A conversation with a model. Every turn sends the whole history again, because the
+    model remembers nothing between calls; the prompt cache makes the repeated part cheap."""
 
-    Every turn sends the whole conversation, cached so that the next turn reads the earlier
-    ones back cheaply. A failed call leaves the conversation as it was, and so does an answer
-    without text (a refusal, say), since the API rejects an empty message; its cost still counts.
-    """
+    client: ModelClient
+    system: str = ASK
+    messages: list[Message] = field(default_factory=list)
+    answers: list[Answer] = field(default_factory=list)
 
-    def __init__(
-        self, client: ModelClient, *, system: str = ASK, effort: Effort | None = None
-    ) -> None:
-        self.client = client
-        self.system = system
-        self.effort = effort
-        self.messages: list[Message] = []
-        self.answers: list[Answer] = []
-
-    def send(self, text: str, on_text: Callable[[str], None] | None = None) -> Answer:
-        """Send one message with the conversation so far, and keep it and the answer."""
-        messages = [*self.messages, Message("user", text)]
+    def say(self, text: str, on_text: Callable[[str], None] | None = None) -> Answer:
+        """Send one message and add both it and the reply to the history."""
         request = Request(
-            system=self.system, messages=messages, effort=self.effort, cache_conversation=True
+            system=self.system,
+            messages=[*self.messages, Message("user", text)],
+            cache_conversation=True,
         )
-        answer = self.client.send(request, on_text=on_text)
+        answer = self.client.send(request, on_text=on_text)  # on failure, history is unchanged
+        self.messages += [Message("user", text), Message("assistant", answer.text)]
         self.answers.append(answer)
-        if answer.text:
-            self.messages = [*messages, Message("assistant", answer.text)]
         return answer
 
     @property
     def cost_usd(self) -> Decimal | None:
-        """What every turn cost together, or None when any turn's cost is unknown."""
+        """What the conversation has cost so far, or None if any call had no price."""
         costs = [answer.cost_usd for answer in self.answers]
-        if None in costs:
-            return None
-        return sum(costs, Decimal(0))
+        return None if None in costs else sum(costs, Decimal(0))

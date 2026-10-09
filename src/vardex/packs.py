@@ -59,16 +59,22 @@ def describe_problem(error: Any) -> str:
     return f"{where or 'pack.yaml'}: {problem}"
 
 
+def read_yaml[T: BaseModel](path: Path, model: type[T], kind: str) -> T:
+    """Read a YAML file from a pack and validate it, or raise a PackError that lists every
+    problem, one per line."""
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return model.model_validate(data)
+    except yaml.YAMLError as err:
+        raise PackError(f"{path} is not valid YAML:\n{err}") from err
+    except ValidationError as err:
+        problems = "\n".join(f"  {describe_problem(e)}" for e in err.errors())
+        raise PackError(f"{path} is not a valid {kind}:\n{problems}") from err
+
+
 def load_pack(folder: Path) -> PackManifest:
     """Read and validate the pack.yaml in a folder."""
     manifest = folder / "pack.yaml"
     if not manifest.is_file():
         raise PackError(f"No pack.yaml found in {folder}")
-    try:
-        data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
-        return PackManifest.model_validate(data)
-    except yaml.YAMLError as err:
-        raise PackError(f"{manifest} is not valid YAML:\n{err}") from err
-    except ValidationError as err:
-        problems = "\n".join(f"  {describe_problem(e)}" for e in err.errors())
-        raise PackError(f"{manifest} is not a valid pack:\n{problems}") from err
+    return read_yaml(manifest, PackManifest, "pack")

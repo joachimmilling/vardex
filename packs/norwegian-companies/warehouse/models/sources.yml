@@ -1,0 +1,31 @@
+# The raw tables Vardex loads from ingest.yaml, and how fresh each must be.
+# _fetched_at is when Vardex fetched the file a row came from.
+sources:
+  - name: raw
+    schema: raw
+    loaded_at_field: _fetched_at
+    tables:
+      - name: units
+        description: The register of legal entities, as downloaded. Every column is text.
+        freshness:
+          warn_after: {count: 3, period: day}
+          error_after: {count: 8, period: day}
+      - name: accounts
+        description: One row per company and fetch, with the API's answer as JSON in body.
+        freshness:
+          warn_after: {count: 10, period: day}
+          error_after: {count: 35, period: day}
+      - name: industries
+        description: SN2025 codes, as one row holding a list.
+        freshness: &monthly
+          warn_after: {count: 35, period: day}
+          error_after: {count: 100, period: day}
+      - name: industry_changes
+        description: The SN2025 to SN2007 change table, as one row holding a list.
+        freshness: *monthly
+      - name: counties
+        description: County codes, as one row holding a list.
+        freshness: *monthly
+      - name: industry_statistics
+        description: SSB table 12910 in long form. Every column is text; ':' means not published.
+        freshness: *monthly
