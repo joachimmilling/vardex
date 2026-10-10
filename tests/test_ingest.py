@@ -70,7 +70,10 @@ def test_a_missing_ingest_file(tmp_path):
 
 def test_a_file_lands_with_the_time_in_its_name(tmp_path):
     body = gzip.compress(b"a,b\n1,2\n")
-    path = fetch_file(client(lambda r: httpx2.Response(200, content=body)), FILE, tmp_path, NOW)
+    path, changed = fetch_file(
+        client(lambda r: httpx2.Response(200, content=body)), FILE, tmp_path, NOW
+    )
+    assert changed
     assert path.name == "2026-10-05T061502Z.csv.gz"  # gzip found from the bytes, not the url
     assert gzip.decompress(path.read_bytes()) == b"a,b\n1,2\n"
     assert fetched_at(path) == NOW
@@ -87,7 +90,7 @@ def test_a_rate_limit_is_tried_again(tmp_path):
         calls.append(request)
         return next(replies)
 
-    path = fetch_file(client(handler), FILE, tmp_path, NOW)
+    path, _ = fetch_file(client(handler), FILE, tmp_path, NOW)
     assert len(calls) == 3
     assert path.read_text() == "a\n1\n"
 
@@ -146,3 +149,22 @@ def test_prune_keeps_only_the_newest_without_history(tmp_path):
     assert len(landed(tmp_path)) == 3
     prune(FILE, tmp_path)
     assert [p.name for p in landed(tmp_path)] == ["2026-10-05T061502Z.csv"]
+
+
+def test_an_unchanged_file_is_not_downloaded_again(tmp_path):
+    def first(request):
+        return httpx2.Response(200, text="a\n1\n", headers={"ETag": '"v1"'})
+
+    fetch_file(client(first), FILE, tmp_path, NOW)
+    seen = []
+
+    def second(request):
+        seen.append(request.headers.get("If-None-Match"))
+        return httpx2.Response(304)
+
+    tomorrow = datetime(2026, 10, 6, 6, 15, 2, tzinfo=UTC)
+    path, changed = fetch_file(client(second), FILE, tmp_path, tomorrow)
+    assert seen == ['"v1"']
+    assert not changed
+    assert path.name == "2026-10-06T061502Z.csv"
+    assert path.read_text() == "a\n1\n"

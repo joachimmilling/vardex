@@ -7,6 +7,8 @@ edited, so the warehouse can always be thrown away and rebuilt from them.
 
 import gzip
 import json
+import os
+import shutil
 import time
 from collections import Counter
 from collections.abc import Iterable
@@ -104,14 +106,19 @@ def is_due(source: Source, folder: Path, now: datetime) -> bool:
     return not files or (now.date() - fetched_at(files[-1]).date()).days >= source.refresh_days
 
 
-def get(client: httpx2.Client, url: str, into: Path | None = None) -> httpx2.Response:
+def get(
+    client: httpx2.Client,
+    url: str,
+    into: Path | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx2.Response:
     """GET a URL, and try again after a rate limit, an overload or a dropped connection.
 
     With `into`, a successful body is streamed to that file instead of held in memory.
     """
     for wait in (*RETRY_WAITS, None):  # None marks the last attempt: whatever happens, stop
         try:
-            with client.stream("GET", url) as response:
+            with client.stream("GET", url, headers=headers) as response:
                 if wait is None or response.status_code not in RETRY_STATUSES:
                     if into is not None and response.status_code == 200:
                         with into.open("wb") as file:
@@ -127,22 +134,46 @@ def get(client: httpx2.Client, url: str, into: Path | None = None) -> httpx2.Res
     raise AssertionError("unreachable: the last attempt returns or raises")
 
 
-def fetch_file(client: httpx2.Client, source: Source, folder: Path, now: datetime) -> Path:
-    """Download a source's url into a new landed file, and return its path."""
+def fetch_file(
+    client: httpx2.Client, source: Source, folder: Path, now: datetime
+) -> tuple[Path, bool]:
+    """Download a source's url into a new landed file. Returns its path, and whether the
+    content changed.
+
+    The ETag of the last download is sent back, so a server can answer 304 Not Modified
+    instead of sending the same file again. Then the newest file lands again under the new
+    time, as a hard link where the file system allows it, so schedules and freshness see a
+    fetch that happened.
+    """
     folder.mkdir(parents=True, exist_ok=True)
     part = folder / ".download.part"  # renamed only when complete, so no half file ever lands
+    etag = folder / ".etag"
+    before = landed(folder)
+    headers = {"If-None-Match": etag.read_text()} if etag.is_file() and before else None
     try:
-        response = get(client, source.url, into=part)
+        response = get(client, source.url, into=part, headers=headers)
     except httpx2.TransportError as err:
         raise IngestError(f"{source.name}: could not reach {source.url}: {err}") from err
+    stamp = now.strftime(STAMP)
+    if response.status_code == 304 and before:
+        path = folder / f"{stamp}.{before[-1].name.split('.', 1)[1]}"
+        try:
+            os.link(before[-1], path)
+        except OSError:
+            shutil.copyfile(before[-1], path)
+        return path, False
     if response.status_code != 200:
         part.unlink(missing_ok=True)
         raise IngestError(f"{source.name}: HTTP {response.status_code} from {source.url}")
     with part.open("rb") as file:
         gzipped = file.read(2) == b"\x1f\x8b"  # the magic bytes at the start of every gzip file
-    path = folder / f"{now.strftime(STAMP)}.{source.format}{'.gz' if gzipped else ''}"
+    path = folder / f"{stamp}.{source.format}{'.gz' if gzipped else ''}"
     part.rename(path)
-    return path
+    if "etag" in response.headers:
+        etag.write_text(response.headers["etag"])
+    else:
+        etag.unlink(missing_ok=True)
+    return path, True
 
 
 def fetch_one(client: httpx2.Client, url: str, key: str) -> dict[str, Any]:
