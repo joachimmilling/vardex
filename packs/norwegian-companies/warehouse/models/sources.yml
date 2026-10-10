@@ -29,3 +29,6 @@ sources:
       - name: industry_statistics
         description: SSB table 12910 in long form. Every column is text; ':' means not published.
         freshness: *monthly
+      - name: exchange_rates
+        description: Norges Bank's exchange rates, semicolon-separated. Every column is text.
+        freshness: *monthly
