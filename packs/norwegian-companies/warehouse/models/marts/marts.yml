@@ -71,7 +71,7 @@ models:
     description: >
       Annual accounts of limited companies (AS and ASA) with at least 50 employees: one row
       per company, fiscal year and kind of accounts. Amounts are in whole units of the
-      currency the accounts were filed in.
+      currency the accounts were filed in; columns ending in _nok are converted to NOK.
     columns:
       - name: accounts_key
         description: orgnr, fiscal year and accounts type, joined with hyphens.
@@ -125,6 +125,16 @@ models:
         description: Total assets at the end of the year, in whole units of currency.
       - name: equity
         description: Total equity at the end of the year, in whole units of currency.
+      - name: nok_per_unit
+        description: >
+          NOK for one unit of the currency: Norges Bank's average for the calendar year the
+          fiscal year ends in. 1 for NOK; empty when Norges Bank has no rate yet.
+      - name: revenue_nok
+        description: Revenue in NOK, at nok_per_unit. Use it to add across currencies.
+      - name: operating_profit_nok
+        description: Operating profit in NOK, at nok_per_unit.
+      - name: net_profit_nok
+        description: Profit for the year in NOK, at nok_per_unit.
       - name: filing_id
         description: The register's id for the filing these figures come from.
       - name: first_seen_at

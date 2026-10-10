@@ -25,9 +25,18 @@ metrics:
     sql: sum(revenue)
     unit: the currency in the currency column
     notes:
-      - Only add amounts in the same currency. Filter on currency = 'NOK', or group by currency.
+      - Only add amounts in the same currency. Filter on currency = 'NOK', group by currency, or use revenue_nok.
       - Use accounts_type = 'company' when adding companies. Group accounts include subsidiaries that also report on their own, so mixing the two counts them twice.
       - Covers limited companies (AS and ASA) with at least 50 employees, not every company.
+
+  - name: revenue_nok
+    description: Total operating revenue in the fiscal year, converted to NOK.
+    table: fct_accounts
+    sql: sum(revenue_nok)
+    unit: NOK
+    notes:
+      - Converted at Norges Bank's average rate for the calendar year the fiscal year ends in. Empty for a year Norges Bank has not finished, and for a currency it does not quote.
+      - The same rules as revenue on accounts type and coverage.
 
   - name: operating_profit
     description: Operating profit (driftsresultat) in the fiscal year.
@@ -45,6 +54,14 @@ metrics:
     notes:
       - For a group of companies this is the margin of their totals, not the average of their margins; one large company weighs more than a small one.
       - Empty when revenue is zero. Above 1 or very negative for companies with little revenue, such as holding companies.
+
+  - name: operating_margin_nok
+    description: Operating profit as a share of revenue, for companies in any currency.
+    table: fct_accounts
+    sql: sum(operating_profit_nok) / nullif(sum(revenue_nok), 0)
+    unit: share, where 0.12 means 12%
+    notes:
+      - Use it when the companies compared file in different currencies; otherwise operating_margin gives the same answer without a rate.
 
   - name: net_profit
     description: Profit for the year after tax (årsresultat).

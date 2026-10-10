@@ -6,6 +6,7 @@ companies with numbers from 100000008 are fictional; 923609016 is Equinor ASA.
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import httpx2
@@ -103,6 +104,11 @@ STATISTICS = """\
 "62.020","1","2024",6634,35485,117980.0
 "62.030","1","2024",166,:,:
 """
+RATES = """\
+FREQ;BASE_CUR;QUOTE_CUR;UNIT_MULT;TIME_PERIOD;OBS_VALUE
+A;USD;NOK;0;2025;10.5
+A;SEK;NOK;2;2025;105.2
+"""
 LANDED = {
     "units/2026-10-05T060000Z.csv": UNITS,
     "accounts/2026-09-28T060000Z.jsonl": LAST_WEEK,
@@ -111,6 +117,7 @@ LANDED = {
     "industry_changes/2026-10-05T060000Z.json": json.dumps(CHANGES),
     "counties/2026-10-05T060000Z.json": json.dumps(COUNTIES),
     "industry_statistics/2026-10-05T060000Z.csv": STATISTICS,
+    "exchange_rates/2026-10-05T060000Z.csv": RATES,
 }
 
 
@@ -156,6 +163,16 @@ def test_the_newest_filing_wins_and_keeps_when_it_was_first_seen(warehouse):
     assert laks[6] == datetime(2026, 10, 5, 6, 0)  # the corrected filing arrived today
     assert equinor[2:4] == ("group", "USD")
     assert equinor[6] == datetime(2026, 9, 28, 6, 0)
+
+
+def test_amounts_are_converted_to_nok(warehouse):
+    sql = "select orgnr, nok_per_unit, revenue_nok from fct_accounts order by orgnr"
+    assert rows(warehouse, sql) == [
+        ("100000008", 1, 1480312000),
+        ("923609016", Decimal("10.5"), 1117851000000),  # USD 106,462 million at 10.5
+    ]
+    sek = "select nok_per_unit from stg_exchange_rates where currency = 'SEK'"
+    assert rows(warehouse, sek) == [(Decimal("1.052"),)]  # quoted per 100 kronor, exact
 
 
 def test_ssb_turnover_is_in_kroner(warehouse):

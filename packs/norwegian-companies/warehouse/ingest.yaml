@@ -49,3 +49,11 @@ sources:
       https://data.ssb.no/api/pxwebapi/v2/tables/12910/data?lang=en&outputFormat=csv&stub=NACE2007,Enhet,Tid&heading=ContentsCode&valueCodes[NACE2007]=*&valueCodes[Enhet]=1&valueCodes[ContentsCode]=Enheter,Sysselsatte,Oms&valueCodes[Tid]=*
     format: csv
     refresh_days: 30
+
+  - name: exchange_rates
+    description: >
+      Norges Bank's annual average exchange rates in NOK for the currencies accounts are filed
+      in. SEK and DKK are quoted per 100 units.
+    url: https://data.norges-bank.no/api/data/EXR/A.USD+EUR+SEK+DKK+GBP.NOK.SP?format=csv&startPeriod=2015&locale=en
+    format: csv
+    refresh_days: 30
