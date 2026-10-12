@@ -26,6 +26,7 @@ from vardex.packs import PackError, read_yaml
 STAMP = "%Y-%m-%dT%H%M%SZ"  # landed files are named by when they were fetched, in UTC
 RETRY_STATUSES = {429, 502, 503, 504}  # worth another try: rate limits and overloads
 RETRY_WAITS = (1.0, 2.0, 4.0)  # seconds to wait before each extra attempt
+UNCHANGED = 304  # in a landed row: the same answer as the key's newest row before it
 
 
 class Source(BaseModel):
@@ -190,14 +191,40 @@ def fetch_one(client: httpx2.Client, url: str, key: str) -> dict[str, Any]:
         return {"key": key, "status": 200, "body": None, "error": "the body is not JSON"}
 
 
+def read_lines(path: Path) -> Iterable[dict[str, Any]]:
+    """The rows of a landed file of JSON lines, gzipped or not."""
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as file:
+        for line in file:
+            yield json.loads(line)
+
+
+def newest_answers(folder: Path) -> dict[str, tuple[int | None, Any]]:
+    """Each key's newest answer in the landed files, as its status and body."""
+    answers = {}
+    for path in landed(folder):  # oldest first, so a newer answer replaces an older one
+        for row in read_lines(path):
+            if row["status"] != UNCHANGED:
+                answers[row["key"]] = (row["status"], row["body"])
+    return answers
+
+
 def fetch_keys(
     client: httpx2.Client, source: Source, keys: Iterable[str], folder: Path, now: datetime
 ) -> Counter:
     """Fetch a source's url once per key into one landed file of JSON lines, and count the
-    HTTP statuses."""
+    statuses.
+
+    With history, a key whose answer has not changed lands as one short row with status 304,
+    so history grows only by what changed.
+    """
     folder.mkdir(parents=True, exist_ok=True)
     with ThreadPoolExecutor(source.workers) as pool:
         rows = list(pool.map(lambda key: fetch_one(client, source.url, key), keys))
+    before = newest_answers(folder) if source.history else {}
+    for row in rows:
+        if before.get(row["key"]) == (row["status"], row["body"]):
+            row.update(status=UNCHANGED, body=None, error=None)
     part = folder / ".download.part"
     with gzip.open(part, "wt", encoding="utf-8") as file:
         for row in rows:
@@ -215,4 +242,5 @@ def prune(source: Source, folder: Path) -> None:
 
 def describe_statuses(statuses: Counter) -> str:
     """A count of statuses such as `5,703 × 200, 43 × 500, 22 × 404`."""
-    return ", ".join(f"{n:,} × {status or 'no answer'}" for status, n in statuses.most_common())
+    names = {UNCHANGED: "unchanged", None: "no answer"}
+    return ", ".join(f"{n:,} × {names.get(s, s)}" for s, n in statuses.most_common())
