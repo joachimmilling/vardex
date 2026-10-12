@@ -17,6 +17,7 @@ from vardex.ingest import (
     landed,
     load_ingest,
     prune,
+    read_lines,
 )
 from vardex.packs import PackError
 
@@ -168,3 +169,21 @@ def test_an_unchanged_file_is_not_downloaded_again(tmp_path):
     assert not changed
     assert path.name == "2026-10-06T061502Z.csv"
     assert path.read_text() == "a\n1\n"
+
+
+def test_an_unchanged_answer_lands_as_a_short_row(tmp_path):
+    history = KEYED.model_copy(update={"history": True})
+
+    versions = iter(range(10))
+
+    def handler(request):
+        key = request.url.path[-1]
+        version = 1 if key == "1" else next(versions)  # key 2 changes on every fetch
+        return httpx2.Response(200, json={"key": key, "version": version})
+
+    fetch_keys(client(handler), history, ["1", "2"], tmp_path, NOW)
+    a_week_later = datetime(2026, 10, 12, tzinfo=UTC)
+    statuses = fetch_keys(client(handler), history, ["1", "2"], tmp_path, a_week_later)
+    assert statuses == Counter({304: 1, 200: 1})
+    newest = list(read_lines(landed(tmp_path)[-1]))
+    assert newest[0] == {"key": "1", "status": 304, "body": None, "error": None}
