@@ -23,6 +23,7 @@ sources:
     refresh_days: 7
     history: true
     workers: 4
+    max_failures: 0.05  # banks and insurers fail every time (about 1%); far more is an outage
 
   - name: industries
     description: The Standard Industrial Classification SN2025, from SSB's classification API (KLASS).

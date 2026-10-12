@@ -1,5 +1,6 @@
 import gzip
 import json
+import threading
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,7 +25,13 @@ from vardex.packs import PackError
 PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
 NOW = datetime(2026, 10, 5, 6, 15, 2, tzinfo=UTC)
 FILE = Source(name="units", description="x", url="https://example.no/units.csv", format="csv")
-KEYED = Source(name="accounts", description="x", url="https://example.no/a/{key}", keys="select 1")
+KEYED = Source(
+    name="accounts",
+    description="x",
+    url="https://example.no/a/{key}",
+    keys="select 1",
+    max_failures=0.5,
+)
 
 
 def client(handler) -> httpx2.Client:
@@ -135,23 +142,6 @@ def test_every_key_becomes_a_row(tmp_path):
     assert rows[2]["error"] == "layout not supported (BANK)"
 
 
-def test_due_counts_calendar_days(tmp_path):
-    (tmp_path / "2026-10-04T061502Z.csv").write_text("a\n")
-    a_minute_earlier = datetime(2026, 10, 5, 6, 14, tzinfo=UTC)  # 23 hours 59 minutes later
-    assert is_due(FILE, tmp_path, a_minute_earlier)
-    assert not is_due(FILE, tmp_path, datetime(2026, 10, 4, 23, 59, tzinfo=UTC))
-    assert is_due(FILE, tmp_path / "never-fetched", NOW)
-
-
-def test_prune_keeps_only_the_newest_without_history(tmp_path):
-    for day in ("03", "04", "05"):
-        (tmp_path / f"2026-10-{day}T061502Z.csv").write_text("a\n")
-    prune(KEYED.model_copy(update={"history": True}), tmp_path)
-    assert len(landed(tmp_path)) == 3
-    prune(FILE, tmp_path)
-    assert [p.name for p in landed(tmp_path)] == ["2026-10-05T061502Z.csv"]
-
-
 def test_an_unchanged_file_is_not_downloaded_again(tmp_path):
     def first(request):
         return httpx2.Response(200, text="a\n1\n", headers={"ETag": '"v1"'})
@@ -171,6 +161,32 @@ def test_an_unchanged_file_is_not_downloaded_again(tmp_path):
     assert path.read_text() == "a\n1\n"
 
 
+def test_too_many_failures_land_nothing(tmp_path):
+    def handler(request):
+        return httpx2.Response(503) if request.url.path != "/a/1" else httpx2.Response(404)
+
+    with pytest.raises(IngestError) as caught:
+        fetch_keys(client(handler), KEYED, ["1", "2", "3"], tmp_path, NOW)
+    assert "2 of the first 3 keys failed (2 × 503, 1 × 404)" in str(caught.value)
+    assert landed(tmp_path) == []
+
+
+def test_an_outage_stops_the_fetch_early(tmp_path):
+    asked = []
+
+    def handler(request):
+        asked.append(request.url.path)
+        threading.Event().wait(0.002)  # an outage takes time; time.sleep is patched to not wait
+        raise httpx2.ConnectError("no route to host")
+
+    one_at_a_time = KEYED.model_copy(update={"workers": 1})
+    keys = [str(n) for n in range(1000)]
+    with pytest.raises(IngestError) as caught:
+        fetch_keys(client(handler), one_at_a_time, keys, tmp_path, NOW)
+    assert "50 of the first 50 keys failed (50 × no answer); stopped" in str(caught.value)
+    assert len(set(asked)) < 100  # not 1,000 keys of four attempts each
+
+
 def test_an_unchanged_answer_lands_as_a_short_row(tmp_path):
     history = KEYED.model_copy(update={"history": True})
 
@@ -187,3 +203,20 @@ def test_an_unchanged_answer_lands_as_a_short_row(tmp_path):
     assert statuses == Counter({304: 1, 200: 1})
     newest = list(read_lines(landed(tmp_path)[-1]))
     assert newest[0] == {"key": "1", "status": 304, "body": None, "error": None}
+
+
+def test_due_counts_calendar_days(tmp_path):
+    (tmp_path / "2026-10-04T061502Z.csv").write_text("a\n")
+    a_minute_earlier = datetime(2026, 10, 5, 6, 14, tzinfo=UTC)  # 23 hours 59 minutes later
+    assert is_due(FILE, tmp_path, a_minute_earlier)
+    assert not is_due(FILE, tmp_path, datetime(2026, 10, 4, 23, 59, tzinfo=UTC))
+    assert is_due(FILE, tmp_path / "never-fetched", NOW)
+
+
+def test_prune_keeps_only_the_newest_without_history(tmp_path):
+    for day in ("03", "04", "05"):
+        (tmp_path / f"2026-10-{day}T061502Z.csv").write_text("a\n")
+    prune(KEYED.model_copy(update={"history": True}), tmp_path)
+    assert len(landed(tmp_path)) == 3
+    prune(FILE, tmp_path)
+    assert [p.name for p in landed(tmp_path)] == ["2026-10-05T061502Z.csv"]

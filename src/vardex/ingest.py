@@ -27,6 +27,7 @@ STAMP = "%Y-%m-%dT%H%M%SZ"  # landed files are named by when they were fetched, 
 RETRY_STATUSES = {429, 502, 503, 504}  # worth another try: rate limits and overloads
 RETRY_WAITS = (1.0, 2.0, 4.0)  # seconds to wait before each extra attempt
 UNCHANGED = 304  # in a landed row: the same answer as the key's newest row before it
+MIN_ANSWERS = 50  # answers to wait for before a keyed fetch is judged by its failures
 
 
 class Source(BaseModel):
@@ -42,6 +43,7 @@ class Source(BaseModel):
     refresh_days: int = Field(default=1, ge=1)  # fetch again when the newest file is this old
     history: bool = False  # keep every fetch, or only the newest
     workers: int = Field(default=4, ge=1, le=16)  # requests at once, for a source with keys
+    max_failures: float = Field(default=0.1, ge=0, le=1)  # share of keys that may fail
 
     @model_validator(mode="after")
     def keys_need_a_placeholder(self) -> "Source":
@@ -210,17 +212,31 @@ def newest_answers(folder: Path) -> dict[str, tuple[int | None, Any]]:
 
 
 def fetch_keys(
-    client: httpx2.Client, source: Source, keys: Iterable[str], folder: Path, now: datetime
+    client: httpx2.Client, source: Source, keys: list[str], folder: Path, now: datetime
 ) -> Counter:
     """Fetch a source's url once per key into one landed file of JSON lines, and count the
     statuses.
 
-    With history, a key whose answer has not changed lands as one short row with status 304,
-    so history grows only by what changed.
+    When more than max_failures of the answers so far are failures, the fetch stops and
+    nothing lands: an outage then costs minutes, not hours, and cannot pass for data. With
+    history, a key whose answer has not changed lands as one short row with status 304, so
+    history grows only by what changed.
     """
     folder.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    failed = 0
     with ThreadPoolExecutor(source.workers) as pool:
-        rows = list(pool.map(lambda key: fetch_one(client, source.url, key), keys))
+        for row in pool.map(lambda key: fetch_one(client, source.url, key), keys):
+            rows.append(row)
+            failed += row["status"] not in (200, 404)
+            judge = len(rows) >= MIN_ANSWERS or len(rows) == len(keys)
+            if judge and failed > source.max_failures * len(rows):
+                pool.shutdown(cancel_futures=True)  # drop the keys not yet started
+                statuses = describe_statuses(Counter(r["status"] for r in rows))
+                raise IngestError(
+                    f"{source.name}: {failed:,} of the first {len(rows):,} keys failed "
+                    f"({statuses}); stopped, and landed nothing"
+                )
     before = newest_answers(folder) if source.history else {}
     for row in rows:
         if before.get(row["key"]) == (row["status"], row["body"]):

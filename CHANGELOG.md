@@ -11,6 +11,7 @@ All notable changes to Vardex are recorded here. The format follows
 - Downloads send the last ETag back; a file the server reports unchanged is not downloaded again.
 - The `norwegian-companies` warehouse converts results to NOK at Norges Bank's average rates.
 - A source with keys and history lands an unchanged answer as one short row with status 304.
+- A keyed fetch stops, and lands nothing, when more than `max_failures` of its keys fail.
 
 ## [0.4.0] - 2026-10-09
 
