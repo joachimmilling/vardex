@@ -19,6 +19,7 @@ from vardex.semantic import Knowledge
 from vardex.sql import QueryError, Result, Table, Warehouse, check_sql, format_value
 
 DIALECTS = {"duckdb": "DuckDB", "postgres": "PostgreSQL", "snowflake": "Snowflake"}
+MAX_VALUES = 50  # list a column's values only when it has at most this many
 Kind = Literal["answer", "clarify", "refuse"]
 
 
@@ -97,6 +98,25 @@ def describe_ontology(knowledge: Knowledge) -> str:
     return "\n".join([*lines, "</objects>"])
 
 
+def describe_values(knowledge: Knowledge, warehouse: Warehouse) -> str:
+    """The values in each column a question may name, as the warehouse spells them, so a
+    filter matches: 'Vestland', not 'VESTLAND' or 'Vestland county'."""
+    lines = []
+    for obj in knowledge.ontology.objects:
+        for column in obj.values:
+            result = warehouse.run(
+                f"select distinct {column} from {obj.table} where {column} is not null"
+                f" order by {column}",
+                max_rows=MAX_VALUES,
+            )
+            if result.truncated:
+                lines.append(f"- {obj.table}.{column}: more than {MAX_VALUES} values")
+            else:
+                values = ", ".join(f"'{format_value(row[0])}'" for row in result.rows)
+                lines.append(f"- {obj.table}.{column}: {values}")
+    return "<values>\n" + "\n".join(lines) + "\n</values>" if lines else ""
+
+
 def describe_metrics(knowledge: Knowledge) -> str:
     """Every metric, with its SQL, unit and notes."""
     parts = []
@@ -136,6 +156,7 @@ def system_prompt(knowledge: Knowledge, warehouse: Warehouse, today: date, max_r
         for part in (
             describe_tables(knowledge, warehouse.tables()),
             describe_ontology(knowledge),
+            describe_values(knowledge, warehouse),
             describe_metrics(knowledge),
             describe_questions(knowledge),
         )
