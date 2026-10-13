@@ -91,6 +91,15 @@ def check_sql(sql: str, dialect: str, tables: set[str]) -> list[str]:
     return list(dict.fromkeys(problems))  # each problem once, in order
 
 
+def transpile(sql: str, read: str, write: str) -> str:
+    """SQL written in one dialect, rewritten for another: year(d) in DuckDB is
+    EXTRACT(YEAR FROM d) in PostgreSQL, and DuckDB's / always divides with decimals, where
+    PostgreSQL's divides two integers into an integer. Unchanged when the two are the same."""
+    if read == write:
+        return sql
+    return sqlglot.transpile(sql, read=read, write=write, pretty="\n" in sql.strip())[0]
+
+
 def is_number(value: Any) -> bool:
     """True for an int, a float or a Decimal; False for a bool, which Python counts as an int."""
     return isinstance(value, int | float | Decimal) and not isinstance(value, bool)

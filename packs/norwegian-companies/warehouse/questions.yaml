@@ -1,6 +1,7 @@
 # What a model writing SQL for this pack should know beyond the tables: the pack's own words,
 # and worked examples. Every example is checked on every ingest: it must pass Vardex's SQL
-# checks and run on the warehouse.
+# checks and run on the warehouse. On a warehouse with another dialect, the metrics and
+# examples are rewritten for it.
 dialect: duckdb  # the SQL dialect of the pack's metrics and examples
 
 glossary:
@@ -58,3 +59,11 @@ examples:
       select companies.revenue_nok, industry.turnover_nok,
              companies.revenue_nok / nullif(industry.turnover_nok, 0) as share
       from companies, industry
+
+  - question: How many limited companies were founded each year from 2020?
+    sql: |
+      select year(founded_on) as year, count(*) as companies
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and founded_on >= date '2020-01-01'
+      group by year(founded_on)
+      order by year

@@ -10,6 +10,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 - Objects in `ontology.yaml` may list `values`: columns whose values are shown to the
   model, as the warehouse spells them, so filters match.
+- The pack's metrics and examples are rewritten in the warehouse's SQL dialect, both in the
+  prompt and when the semantic layer is checked.
 
 ## [0.5.0] - 2026-10-13
 
