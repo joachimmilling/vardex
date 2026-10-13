@@ -10,17 +10,17 @@ from fakes import FakeModel
 
 from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.postgres_warehouse import PostgresWarehouse
-from vardex.semantic import Knowledge, Metric, ModelDoc, Ontology, Questions
+from vardex.semantic import Knowledge, Metric, ModelDoc, Ontology, Questions, check
 from vardex.text_to_sql import AnswerError, Plan, answer
 
 TABLES = """
 create table companies (orgnr varchar(9), name varchar(100), county varchar(30));
 insert into companies values ('100000008', 'DEMO LAKS AS', 'Vestland'),
                              ('100000016', 'DEMO DATA AS', 'Oslo');
-create table accounts (orgnr varchar(9), fiscal_year integer, revenue decimal(18, 0),
-                       operating_profit decimal(18, 0));
-insert into accounts values ('100000008', 2025, 1480312000, 350000000),
-                            ('100000016', 2025, 900000000, 45000000);
+create table accounts (orgnr varchar(9), fiscal_year integer, period_end date,
+                       revenue decimal(18, 0), operating_profit decimal(18, 0));
+insert into accounts values ('100000008', 2025, '2025-12-31', 1480312000, 350000000),
+                            ('100000016', 2025, '2025-12-31', 900000000, 45000000);
 """
 KNOWLEDGE = Knowledge(
     tables={
@@ -42,6 +42,7 @@ KNOWLEDGE = Knowledge(
                 "columns": [
                     {"name": "orgnr", "description": "The company."},
                     {"name": "fiscal_year", "description": "The year it ends in."},
+                    {"name": "period_end", "description": "The last day of the year."},
                     {"name": "revenue", "description": "Revenue in NOK."},
                     {"name": "operating_profit", "description": "Operating profit in NOK."},
                 ],
@@ -72,9 +73,18 @@ KNOWLEDGE = Knowledge(
             ]
         }
     ),
-    questions=Questions(
-        glossary={"last year": "The last complete fiscal year."},
-        examples=[],
+    questions=Questions.model_validate(
+        {
+            "dialect": "duckdb",
+            "glossary": {"last year": "The last complete fiscal year."},
+            "examples": [
+                {
+                    "question": "How many sets of accounts end in each year?",
+                    "sql": "select year(period_end) as year, count(*) as accounts\n"
+                    "from accounts group by year(period_end)",
+                }
+            ],
+        }
     ),
 )
 SQL = """\
@@ -143,7 +153,7 @@ def test_the_request_holds_the_semantic_layer(warehouse):
         "- county (",
         "One row per Company in companies, identified by orgnr, named by name.",
         "- companies.county: 'Oslo', 'Vestland'",
-        "SQL: sum(operating_profit) / nullif(sum(revenue), 0)",
+        '<metric name="operating_margin" table="accounts" unit="share">',
         "- The margin of the totals, not the average of margins.",
         "- last year: The last complete fiscal year.",
     ]:
@@ -219,3 +229,14 @@ def test_a_column_with_too_many_values_is_not_listed(warehouse, monkeypatch):
     model = FakeModel(plan(), "Demo Laks AS: 23.6%.")
     ask(model, warehouse)
     assert "- companies.county: more than 1 values" in model.requests[0].system
+
+
+def test_the_packs_sql_is_rewritten_for_the_warehouse(warehouse):
+    assert check(warehouse, KNOWLEDGE) == []
+    model = FakeModel(plan(), "Demo Laks AS: 23.6%.")
+    ask(model, warehouse)
+    if warehouse.dialect == "postgres":
+        assert "EXTRACT(YEAR FROM period_end)" in model.requests[0].system
+        assert "SQL: CAST(SUM(operating_profit) AS DOUBLE PRECISION)" in model.requests[0].system
+    else:
+        assert "year(period_end)" in model.requests[0].system

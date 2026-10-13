@@ -16,7 +16,7 @@ from vardex.packs import describe_problem
 from vardex.prompts import ANSWER, ANSWER_REPAIR, SQL_REPAIR, WRITE_SQL
 from vardex.provenance import Figure, trace
 from vardex.semantic import Knowledge
-from vardex.sql import QueryError, Result, Table, Warehouse, check_sql, format_value
+from vardex.sql import QueryError, Result, Table, Warehouse, check_sql, format_value, transpile
 
 DIALECTS = {"duckdb": "DuckDB", "postgres": "PostgreSQL", "snowflake": "Snowflake"}
 MAX_VALUES = 50  # list a column's values only when it has at most this many
@@ -117,14 +117,14 @@ def describe_values(knowledge: Knowledge, warehouse: Warehouse) -> str:
     return "<values>\n" + "\n".join(lines) + "\n</values>" if lines else ""
 
 
-def describe_metrics(knowledge: Knowledge) -> str:
-    """Every metric, with its SQL, unit and notes."""
+def describe_metrics(knowledge: Knowledge, dialect: str) -> str:
+    """Every metric, with its SQL in the warehouse's dialect, its unit and notes."""
     parts = []
     for metric in knowledge.metrics:
         lines = [
             f'<metric name="{metric.name}" table="{metric.table}" unit="{metric.unit}">',
             metric.description,
-            f"SQL: {metric.sql}",
+            f"SQL: {transpile(metric.sql, knowledge.questions.dialect, dialect)}",
             *(f"- {note}" for note in metric.notes),
             "</metric>",
         ]
@@ -132,8 +132,8 @@ def describe_metrics(knowledge: Knowledge) -> str:
     return "<metrics>\n" + "\n".join(parts) + "\n</metrics>"
 
 
-def describe_questions(knowledge: Knowledge) -> str:
-    """The pack's glossary and its worked examples."""
+def describe_questions(knowledge: Knowledge, dialect: str) -> str:
+    """The pack's glossary, and its worked examples in the warehouse's dialect."""
     questions = knowledge.questions
     parts = []
     if questions.glossary:
@@ -142,9 +142,10 @@ def describe_questions(knowledge: Knowledge) -> str:
         )
         parts.append(f"<glossary>\n{terms}\n</glossary>")
     for example in questions.examples:
+        sql = transpile(example.sql.strip(), questions.dialect, dialect)
         parts.append(
             f"<example>\n<question>{' '.join(example.question.split())}</question>\n"
-            f"<sql>\n{example.sql.strip()}\n</sql>\n</example>"
+            f"<sql>\n{sql}\n</sql>\n</example>"
         )
     return "\n".join(parts)
 
@@ -157,8 +158,8 @@ def system_prompt(knowledge: Knowledge, warehouse: Warehouse, today: date, max_r
             describe_tables(knowledge, warehouse.tables()),
             describe_ontology(knowledge),
             describe_values(knowledge, warehouse),
-            describe_metrics(knowledge),
-            describe_questions(knowledge),
+            describe_metrics(knowledge, warehouse.dialect),
+            describe_questions(knowledge, warehouse.dialect),
         )
         if part
     )

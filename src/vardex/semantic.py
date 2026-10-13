@@ -18,7 +18,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from vardex.packs import PackError, read_yaml
-from vardex.sql import QueryError, Warehouse, check_sql
+from vardex.sql import QueryError, Warehouse, check_sql, transpile
 
 NAME = r"^[a-z][a-z0-9_]*$"
 
@@ -234,6 +234,7 @@ def check(warehouse: Warehouse, knowledge: Knowledge) -> list[str]:
     column that is missing, a metric or example that does not run, a key that is not unique,
     a link that does not find its object. Empty means every claim holds."""
     actual = {t.name: {c.name for c in t.columns} for t in warehouse.tables()}
+    dialect = knowledge.questions.dialect  # the pack's SQL is rewritten for the warehouse's
     problems = []
     for name, doc in knowledge.tables.items():
         if name not in actual:
@@ -253,7 +254,8 @@ def check(warehouse: Warehouse, knowledge: Knowledge) -> list[str]:
         return rows[0][0] if rows else None
 
     for metric in knowledge.metrics:
-        first(f"select {metric.sql} from {metric.table} where false", f"metric {metric.name}")
+        sql = f"select {metric.sql} from {metric.table} where false"
+        first(transpile(sql, dialect, warehouse.dialect), f"metric {metric.name}")
     for obj in knowledge.ontology.objects:
         sql = f"select count({obj.key}) - count(distinct {obj.key}) from {obj.table}"
         if repeated := first(sql, f"object {obj.name}"):
@@ -271,5 +273,5 @@ def check(warehouse: Warehouse, knowledge: Knowledge) -> list[str]:
         if lost := first(sql, f"link {link.name}"):
             problems.append(f"link {link.name}: no {link.to} for {rows(lost)}")
     for number, example in enumerate(knowledge.questions.examples, start=1):
-        first(example.sql, f"example {number}")
+        first(transpile(example.sql, dialect, warehouse.dialect), f"example {number}")
     return problems

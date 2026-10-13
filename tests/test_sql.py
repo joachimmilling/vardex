@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from vardex.sql import Result, check_sql, format_table
+from vardex.sql import Result, check_sql, format_table, transpile
 
 TABLES = {"dim_companies", "fct_accounts"}
 
@@ -74,3 +74,10 @@ def test_rows_as_a_table():
         "DEMO DATA AS",
         "(2 rows; more not fetched)",
     ]
+
+
+def test_sql_is_rewritten_for_another_dialect():
+    assert transpile("year(period_end)", "duckdb", "postgres") == "EXTRACT(YEAR FROM period_end)"
+    # DuckDB's / divides with decimals; PostgreSQL's divides two integers into an integer
+    assert transpile("7 / 2", "duckdb", "postgres") == "CAST(7 AS DOUBLE PRECISION) / 2"
+    assert transpile("year(d)", "duckdb", "duckdb") == "year(d)"
