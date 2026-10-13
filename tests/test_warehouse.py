@@ -6,8 +6,10 @@ from pathlib import Path
 import httpx2
 import pytest
 
+from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.packs import PackError
-from vardex.warehouse import WarehouseError, build, load_metrics, query
+from vardex.semantic import load_metrics
+from vardex.warehouse import WarehouseError, build
 
 NOW = datetime(2026, 10, 5, 6, 0, tzinfo=UTC)
 PEOPLE = "id,name,team\n1,Kari,sales\n2,Ola,sales\n3,Ingrid,support\n"
@@ -50,6 +52,8 @@ models:
   - name: people
     columns:
       - {name: id, data_tests: [unique, not_null]}
+      - {name: name}
+      - {name: team}
 """,
 }
 
@@ -78,6 +82,14 @@ def offline() -> httpx2.Client:
     return httpx2.Client(transport=httpx2.MockTransport(handler))
 
 
+def query(path: Path, sql: str) -> list[tuple]:
+    warehouse = DuckDBWarehouse(path)
+    try:
+        return warehouse.run(sql).rows
+    finally:
+        warehouse.close()
+
+
 @pytest.fixture(autouse=True)
 def no_waiting(monkeypatch):
     monkeypatch.setattr("vardex.ingest.time.sleep", lambda seconds: None)
@@ -91,8 +103,8 @@ def test_a_build_fetches_loads_models_and_tests(tmp_path):
     assert "people: 3 rows in raw.people" in lines
     assert "badges: fetched 3 keys: 3 × 200" in lines
     rows = query(result.path, "select name from people where team = 'sales' order by id")
-    assert rows.fetchall() == [("Kari",), ("Ola",)]
-    badges = query(result.path, "select body->>'badge' from raw.badges order by key").fetchall()
+    assert rows == [("Kari",), ("Ola",)]
+    badges = query(result.path, "select body->>'badge' from raw.badges order by key")
     assert badges == [("B-1",), ("B-2",), ("B-3",)]
 
 
@@ -101,7 +113,7 @@ def test_a_relative_data_folder(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = build(pack, Path("data"), answer(), now=NOW)
     assert result.path == Path("data/demo/warehouse.duckdb")
-    assert query(result.path, "select count(*) from people").fetchone() == (3,)
+    assert query(result.path, "select count(*) from people") == [(3,)]
 
 
 def test_a_second_build_the_same_day_fetches_nothing(tmp_path):
@@ -118,7 +130,7 @@ def test_a_failed_fetch_falls_back_on_the_copy_from_before(tmp_path):
     a_week_later = datetime(2026, 10, 12, tzinfo=UTC)
     result = build(pack, tmp_path / "data", offline(), now=a_week_later)
     assert any("using the copy from 2026-10-05" in w for w in result.warnings)
-    assert query(result.path, "select count(*) from people").fetchone() == (3,)
+    assert query(result.path, "select count(*) from people") == [(3,)]
 
 
 def test_old_data_is_reported_but_still_used(tmp_path):
@@ -137,7 +149,7 @@ def test_a_failing_test_leaves_the_old_warehouse_in_place(tmp_path):
         build(pack, tmp_path / "data", answer(duplicate), refresh=True, now=NOW)
     assert "test unique_people_id: 1 failing row" in str(caught.value)
     path = tmp_path / "data" / "demo" / "warehouse.duckdb"
-    assert query(path, "select count(*) from people").fetchone() == (3,)
+    assert query(path, "select count(*) from people") == [(3,)]
 
 
 def test_a_metric_that_does_not_run_fails_the_build(tmp_path):
@@ -147,7 +159,7 @@ def test_a_metric_that_does_not_run_fails_the_build(tmp_path):
     pack = make_pack(tmp_path, **{"warehouse/metrics.yaml": metrics})
     with pytest.raises(WarehouseError) as caught:
         build(pack, tmp_path / "data", answer(), now=NOW)
-    assert "x: Binder Error" in str(caught.value)
+    assert "metric x: Binder Error" in str(caught.value)
     assert not (tmp_path / "data" / "demo" / "warehouse.duckdb").exists()
 
 
@@ -159,7 +171,9 @@ def test_a_typo_in_the_pack_fails_before_any_fetch(tmp_path):
         load_metrics(tmp_path)
 
 
-def test_query_without_a_warehouse(tmp_path):
+def test_an_ontology_that_does_not_hold_fails_the_build(tmp_path):
+    ontology = "objects: [{name: Person, description: x, table: people, key: team}]\n"
+    pack = make_pack(tmp_path, **{"warehouse/ontology.yaml": ontology})
     with pytest.raises(WarehouseError) as caught:
-        query(tmp_path / "warehouse.duckdb", "select 1")
-    assert "Run vardex ingest first" in str(caught.value)
+        build(pack, tmp_path / "data", answer(), now=NOW)
+    assert "object Person: team repeats in 1 row" in str(caught.value)

@@ -1,0 +1,60 @@
+# What a model writing SQL for this pack should know beyond the tables: the pack's own words,
+# and worked examples. Every example is checked on every ingest: it must pass Vardex's SQL
+# checks and run on the warehouse.
+dialect: duckdb  # the SQL dialect of the pack's metrics and examples
+
+glossary:
+  company: >
+    In everyday speech, a limited company: legal_form 'AS' or 'ASA'. The register also holds
+    sole proprietorships, associations, municipalities and more.
+  seafood company: >
+    A company in fishing and aquaculture (division_code '03'), fish processing (industry_code
+    starting with '10.20') or wholesale of fish (industry_code '46.322').
+  last year: >
+    The last complete fiscal year: the year before the current one. Most fiscal years end on
+    31 December; fiscal_year is the year the fiscal year ends in.
+  margin: The operating margin, unless the question says otherwise.
+  group: >
+    A parent company and its subsidiaries, reported as one business in group accounts
+    (accounts_type 'group'), filed by the parent.
+
+examples:
+  - question: How many limited companies are there in each county?
+    sql: |
+      select c.county, count(distinct c.orgnr) as companies
+      from dim_companies as c
+      where c.legal_form in ('AS', 'ASA') and c.county is not null
+      group by c.county
+      order by companies desc
+
+  - question: Which five groups had the largest revenue in 2024, and what were their margins?
+    sql: |
+      select c.name, a.currency, a.revenue_nok,
+             a.operating_profit_nok / nullif(a.revenue_nok, 0) as operating_margin_nok
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'group' and a.fiscal_year = 2024
+      order by a.revenue_nok desc nulls last
+      limit 5
+
+  - question: >
+      How much of the turnover in fish processing in 2024 came from the companies in the
+      warehouse?
+    sql: |
+      with companies as (
+          select sum(a.revenue_nok) as revenue_nok
+          from fct_accounts as a
+          join dim_companies as c on c.orgnr = a.orgnr
+          where a.accounts_type = 'company' and a.fiscal_year = 2024
+            and c.industry_code in (
+                select sn2025_code from bridge_industry_codes where sn2007_code like '10.20%'
+            )
+      ),
+      industry as (
+          select sum(turnover_nok) as turnover_nok
+          from fct_industry_statistics
+          where sn2007_code = '10.20' and year = 2024
+      )
+      select companies.revenue_nok, industry.turnover_nok,
+             companies.revenue_nok / nullif(industry.turnover_nok, 0) as share
+      from companies, industry

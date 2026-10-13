@@ -1,36 +1,59 @@
+import json
 from pathlib import Path
 
 import duckdb
 import pytest
+from fakes import FakeModel
 from typer.testing import CliRunner
 
 from vardex.cli import app
+from vardex.semantic import Knowledge, Metric, ModelDoc, Ontology, Questions
 from vardex.warehouse import Build, WarehouseError
 
 runner = CliRunner()
 PACK = str(Path(__file__).parent.parent / "packs" / "norwegian-companies")
+SQL = "select name, employees from dim_companies order by employees desc"
 
 
 @pytest.fixture
 def data(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("VARDEX_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("VARDEX_WAREHOUSE_URL", raising=False)
     return tmp_path
 
 
-def test_sql_prints_the_result(data):
+def make_warehouse(data: Path) -> Path:
+    """A warehouse holding two fictional companies, where the pack's warehouse would be."""
     path = data / "norwegian-companies" / "warehouse.duckdb"
     path.parent.mkdir()
     with duckdb.connect(path) as con:
-        con.execute("create table dim_companies as select 'DEMO LAKS AS' as name")
-    result = runner.invoke(app, ["sql", PACK, "select name from dim_companies"])
+        con.execute("create table dim_companies (name varchar, employees integer)")
+        con.execute("insert into dim_companies values ('DEMO LAKS AS', 120), ('DEMO FISK AS', 80)")
+    return path
+
+
+def test_sql_prints_the_result(data):
+    make_warehouse(data)
+    result = runner.invoke(app, ["sql", PACK, SQL])
     assert result.exit_code == 0
-    assert "DEMO LAKS AS" in result.output
+    assert result.output.splitlines() == [
+        "name          employees",
+        "------------  ---------",
+        "DEMO LAKS AS        120",
+        "DEMO FISK AS         80",
+        "(2 rows)",
+    ]
+
+
+def test_sql_on_another_warehouse(data):
+    path = make_warehouse(data).rename(data / "elsewhere.duckdb")
+    result = runner.invoke(app, ["sql", PACK, "select count(*) as n", "--warehouse", str(path)])
+    assert result.exit_code == 0
+    assert "(1 row)" in result.output
 
 
 def test_sql_cannot_write(data):
-    path = data / "norwegian-companies" / "warehouse.duckdb"
-    path.parent.mkdir()
-    duckdb.connect(path).close()
+    make_warehouse(data)
     result = runner.invoke(app, ["sql", PACK, "create table t (x integer)"])
     assert result.exit_code == 1
     assert "read-only" in result.output
@@ -40,6 +63,85 @@ def test_sql_before_any_ingest(data):
     result = runner.invoke(app, ["sql", PACK, "select 1"])
     assert result.exit_code == 1
     assert "Run vardex ingest first" in result.output
+
+
+def test_check_names_what_does_not_hold(data):
+    make_warehouse(data)
+    result = runner.invoke(app, ["check", PACK])
+    assert result.exit_code == 1
+    assert "model fct_accounts is not in the warehouse" in result.output
+
+
+def test_answer_shows_the_answer_the_sql_the_rows_and_where_each_number_came_from(
+    data, monkeypatch
+):
+    make_warehouse(data)
+    plan = {
+        "action": "query",
+        "sql": SQL,
+        "message": None,
+        "assumptions": ["Employees are today's figures."],
+    }
+    model = FakeModel(json.dumps(plan), "Demo Laks AS has the most employees: 120.")
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+
+    result = runner.invoke(app, ["answer", PACK, "Who has the most employees?"])
+
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert lines[0] == "Demo Laks AS has the most employees: 120."
+    assert "- Employees are today's figures." in lines
+    assert SQL in result.stdout
+    assert "DEMO LAKS AS        120" in lines
+    assert "  120              row 1, employees = 120" in lines
+
+
+def test_answer_that_fails_its_checks_is_red_and_shows_the_sql(data, monkeypatch):
+    make_warehouse(data)
+    plan = {"action": "query", "sql": SQL, "message": None, "assumptions": []}
+    made_up = "Demo Laks AS has 150 employees."
+    model = FakeModel(json.dumps(plan), made_up, made_up)
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+
+    result = runner.invoke(app, ["answer", PACK, "Who has the most employees?"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "the answer has numbers no query returned: 150" in result.stderr
+    assert SQL in result.stderr
+
+
+def test_answer_show_prompt_calls_nothing(data, monkeypatch):
+    make_warehouse(data)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+    result = runner.invoke(app, ["answer", PACK, "Who?", "--show-prompt"])
+    assert result.exit_code == 0
+    assert "one SQL query for DuckDB" in result.output
+    assert '<table name="dim_companies">' in result.output
+
+
+def knowledge() -> Knowledge:
+    """The semantic layer of a pack whose only model is dim_companies."""
+    doc = ModelDoc.model_validate(
+        {
+            "name": "dim_companies",
+            "description": "Companies.",
+            "columns": [
+                {"name": "name", "description": "Name."},
+                {"name": "employees", "description": "Employees."},
+            ],
+        }
+    )
+    metric = Metric(
+        name="employees",
+        description="Employees.",
+        table="dim_companies",
+        sql="sum(employees)",
+        unit="persons",
+    )
+    return Knowledge({"dim_companies": doc}, [metric], Ontology(), Questions())
 
 
 def test_ingest_prints_the_warehouse_and_fails_when_data_is_stale(data, monkeypatch):

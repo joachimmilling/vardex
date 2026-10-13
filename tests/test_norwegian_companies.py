@@ -13,7 +13,9 @@ import httpx2
 import pytest
 import yaml
 
-from vardex.warehouse import build, query
+from vardex.duckdb_warehouse import DuckDBWarehouse
+from vardex.semantic import check, load_knowledge
+from vardex.warehouse import build
 
 PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
 NOW = datetime(2026, 10, 5, 7, 0, tzinfo=UTC)
@@ -139,7 +141,11 @@ def warehouse(tmp_path_factory) -> Path:
 
 
 def rows(warehouse: Path, sql: str) -> list[tuple]:
-    return query(warehouse, sql).fetchall()
+    connection = DuckDBWarehouse(warehouse)
+    try:
+        return connection.run(sql).rows
+    finally:
+        connection.close()
 
 
 def test_companies_get_counties_and_svalbard(warehouse):
@@ -204,3 +210,13 @@ def test_every_column_is_documented(warehouse):
         columns = rows(warehouse, f"select column_name from (describe {model['name']})")
         built = {name for (name,) in columns}
         assert built == documented, f"{model['name']}: describe every column, and only those"
+
+
+def test_the_semantic_layer_holds_on_the_warehouse(warehouse):
+    knowledge = load_knowledge(PACK)
+    assert {o.name for o in knowledge.ontology.objects} == {"Company", "AnnualAccounts", "Industry"}
+    connection = DuckDBWarehouse(warehouse)
+    try:
+        assert check(connection, knowledge) == []
+    finally:
+        connection.close()

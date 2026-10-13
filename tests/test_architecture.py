@@ -1,4 +1,4 @@
-"""The engine must never depend on a specific pack."""
+"""The engine must never depend on a specific pack, a model provider or a database."""
 
 import ast
 from pathlib import Path
@@ -41,3 +41,19 @@ def test_only_the_anthropic_client_imports_anthropic():
         tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
         for module in imported_modules(tree):
             assert module.split(".")[0] != "anthropic", f"{file.name} imports {module!r}"
+
+
+# Each database driver, and the only engine modules that may import it. warehouse.py builds a
+# pack's DuckDB file; every query goes through a Warehouse.
+DRIVERS = {
+    "duckdb": {"duckdb_warehouse.py", "warehouse.py"},
+    "psycopg": {"postgres_warehouse.py"},
+}
+
+
+def test_only_the_warehouses_import_a_database_driver():
+    for file in ENGINE.rglob("*.py"):
+        tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
+        for module in imported_modules(tree):
+            allowed = DRIVERS.get(module.split(".")[0])
+            assert allowed is None or file.name in allowed, f"{file.name} imports {module!r}"
