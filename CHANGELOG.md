@@ -6,6 +6,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-13
+
 ### Added
 
 - Objects in `ontology.yaml` may list `values`: columns whose values are shown to the
