@@ -84,6 +84,7 @@ class ObjectType(BaseModel):
     table: str
     key: str  # the column that identifies one object; unique and never empty
     label: str | None = None  # the column that names one for people, such as a name
+    values: list[str] = []  # columns whose values a question names, such as a county
 
 
 class Link(BaseModel):
@@ -212,8 +213,9 @@ def disagreements(knowledge: Knowledge) -> list[str]:
         need(metric.table, None, f"metric {metric.name}")
     for obj in knowledge.ontology.objects:
         need(obj.table, obj.key, f"object {obj.name}")
-        if obj.label:
-            need(obj.table, obj.label, f"object {obj.name}")
+        for column in [obj.label, *obj.values]:
+            if column:
+                need(obj.table, column, f"object {obj.name}")
     for link in knowledge.ontology.links:
         name, column = link.source
         need(knowledge.ontology.object(name).table, column, f"link {link.name}")

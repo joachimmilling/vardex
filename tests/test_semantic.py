@@ -99,6 +99,12 @@ def test_ontology_and_questions_may_be_left_out(tmp_path):
             "object Company: companies has no described column id",
         ),
         (
+            "warehouse/ontology.yaml",
+            "objects: [{name: Company, description: x, table: companies, key: orgnr,"
+            " values: [region]}]",
+            "object Company: companies has no described column region",
+        ),
+        (
             "warehouse/questions.yaml",
             "examples: [{question: x, sql: 'drop table companies'}]",
             "example 1: only a query may run, not DROP",

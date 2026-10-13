@@ -67,6 +67,7 @@ KNOWLEDGE = Knowledge(
                     "table": "companies",
                     "key": "orgnr",
                     "label": "name",
+                    "values": ["county"],
                 }
             ]
         }
@@ -141,6 +142,7 @@ def test_the_request_holds_the_semantic_layer(warehouse):
         '<table name="accounts">',
         "- county (",
         "One row per Company in companies, identified by orgnr, named by name.",
+        "- companies.county: 'Oslo', 'Vestland'",
         "SQL: sum(operating_profit) / nullif(sum(revenue), 0)",
         "- The margin of the totals, not the average of margins.",
         "- last year: The last complete fiscal year.",
@@ -210,3 +212,10 @@ def test_a_model_that_stops_early_gets_no_answer(warehouse):
 
 def companies_left(warehouse) -> int:
     return warehouse.run("select count(*) from companies").rows[0][0]
+
+
+def test_a_column_with_too_many_values_is_not_listed(warehouse, monkeypatch):
+    monkeypatch.setattr("vardex.text_to_sql.MAX_VALUES", 1)
+    model = FakeModel(plan(), "Demo Laks AS: 23.6%.")
+    ask(model, warehouse)
+    assert "- companies.county: more than 1 values" in model.requests[0].system

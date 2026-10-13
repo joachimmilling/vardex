@@ -6,6 +6,11 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Objects in `ontology.yaml` may list `values`: columns whose values are shown to the
+  model, as the warehouse spells them, so filters match.
+
 ## [0.5.0] - 2026-10-13
 
 ### Added

@@ -1,13 +1,15 @@
 # The objects a question about Norwegian companies is about, and how they link. Each object is
 # a model that already exists in the warehouse; this file describes it and never creates
 # anything. Vardex checks on every ingest that every key is unique and every link finds its
-# object.
+# object. The values of the columns under values are listed for the model, so its filters
+# spell them as the warehouse does.
 objects:
   - name: Company
     description: A legal entity in the Central Coordinating Register for Legal Entities.
     table: dim_companies
     key: orgnr
     label: name
+    values: [county, legal_form]
 
   - name: AnnualAccounts
     description: >
@@ -15,12 +17,14 @@ objects:
       for its whole group.
     table: fct_accounts
     key: accounts_key
+    values: [accounts_type, currency]
 
   - name: Industry
     description: An SN2025 industry subclass, with its division and section.
     table: dim_industries
     key: industry_code
     label: industry
+    values: [section_code, section]
 
 links:
   - name: filed_by
