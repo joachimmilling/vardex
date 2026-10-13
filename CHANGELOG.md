@@ -12,6 +12,8 @@ All notable changes to Vardex are recorded here. The format follows
   model, as the warehouse spells them, so filters match.
 - The pack's metrics and examples are rewritten in the warehouse's SQL dialect, both in the
   prompt and when the semantic layer is checked.
+- A query that returns no rows is shown to the model once more, in case a filter is spelt
+  differently in the data. This second look does not count as a repair.
 
 ## [0.5.0] - 2026-10-13
 

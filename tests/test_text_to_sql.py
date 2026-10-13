@@ -240,3 +240,19 @@ def test_the_packs_sql_is_rewritten_for_the_warehouse(warehouse):
         assert "SQL: CAST(SUM(operating_profit) AS DOUBLE PRECISION)" in model.requests[0].system
     else:
         assert "year(period_end)" in model.requests[0].system
+
+
+def test_no_rows_gets_a_second_look(warehouse):
+    misspelt = SQL.replace("where a.fiscal_year = 2025", "where c.county = 'VESTLAND'")
+    model = FakeModel(plan(sql=misspelt), plan(), "Demo Laks AS had 23.6%.")
+    reply = ask(model, warehouse, repairs=0)  # a second look is not a repair
+    assert "The query returned no rows." in model.requests[1].messages[-1].text
+    assert reply.result.sql == SQL
+
+
+def test_no_rows_can_be_the_answer(warehouse):
+    nobody = SQL.replace("where a.fiscal_year = 2025", "where a.fiscal_year = 1990")
+    model = FakeModel(plan(sql=nobody), plan(sql=nobody), "No company filed accounts for 1990.")
+    reply = ask(model, warehouse)
+    assert reply.result.rows == []
+    assert len(model.requests) == 3  # one second look, then the answer

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from vardex.llm import Answer, Effort, Message, ModelClient, Request
 from vardex.packs import describe_problem
-from vardex.prompts import ANSWER, ANSWER_REPAIR, SQL_REPAIR, WRITE_SQL
+from vardex.prompts import ANSWER, ANSWER_REPAIR, NO_ROWS, SQL_REPAIR, WRITE_SQL
 from vardex.provenance import Figure, trace
 from vardex.semantic import Knowledge
 from vardex.sql import QueryError, Result, Table, Warehouse, check_sql, format_value, transpile
@@ -201,6 +201,12 @@ def rows_as_text(result: Result) -> str:
     return "\n".join(lines)
 
 
+def with_reply(request: Request, said: str, reply: str) -> Request:
+    """The request with the model's last answer and our reply to it added."""
+    messages = [*request.messages, Message("assistant", said), Message("user", reply)]
+    return replace(request, messages=messages)
+
+
 def plan_and_run(
     client: ModelClient,
     warehouse: Warehouse,
@@ -211,10 +217,13 @@ def plan_and_run(
     max_rows: int,
 ) -> tuple[Plan, Result | None, list[Answer]]:
     """Ask for a plan; when it is a query, check it and run it. When either fails, show the
-    model what went wrong and ask again, up to `repairs` times."""
+    model what went wrong and ask again, up to `repairs` times. A query that returns no rows
+    is shown to the model once, in case a filter is spelt differently in the data."""
     answers: list[Answer] = []
     allowed = set(knowledge.tables)
-    for _ in range(repairs + 1):
+    failures = 0
+    looked = False
+    while True:
         answer = client.send(request)
         answers.append(answer)
         if answer.stop_reason != "end":
@@ -229,18 +238,20 @@ def plan_and_run(
             problems = check_sql(plan.sql or "", warehouse.dialect, allowed)
             if not problems:
                 try:
-                    return plan, warehouse.run(plan.sql or "", max_rows=max_rows), answers
+                    result = warehouse.run(plan.sql or "", max_rows=max_rows)
                 except QueryError as err:
                     problems = [f"the warehouse refused it: {err}"]
-        request = replace(
-            request,
-            messages=[
-                *request.messages,
-                Message("assistant", answer.text),
-                Message("user", SQL_REPAIR.format(problems="\n".join(f"- {p}" for p in problems))),
-            ],
-        )
-    raise AnswerError("no query that could run: " + "; ".join(problems), answers)
+                else:
+                    if result.rows or looked:
+                        return plan, result, answers
+                    looked = True
+                    request = with_reply(request, answer.text, NO_ROWS)
+                    continue
+        failures += 1
+        if failures > repairs:
+            raise AnswerError("no query that could run: " + "; ".join(problems), answers)
+        problems_text = "\n".join(f"- {p}" for p in problems)
+        request = with_reply(request, answer.text, SQL_REPAIR.format(problems=problems_text))
 
 
 def answer_from_rows(
@@ -272,14 +283,8 @@ def answer_from_rows(
         untraced = [f.text for f in figures if not f.traced]
         if not untraced:
             return answer.text.strip(), figures, answers
-        request = replace(
-            request,
-            messages=[
-                *request.messages,
-                Message("assistant", answer.text),
-                Message("user", ANSWER_REPAIR.format(figures=", ".join(untraced))),
-            ],
-        )
+        repair = ANSWER_REPAIR.format(figures=", ".join(untraced))
+        request = with_reply(request, answer.text, repair)
     raise AnswerError(
         f"the answer has numbers no query returned: {', '.join(untraced)}", answers, result
     )
