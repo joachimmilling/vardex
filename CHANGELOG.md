@@ -14,6 +14,8 @@ All notable changes to Vardex are recorded here. The format follows
   prompt and when the semantic layer is checked.
 - A query that returns no rows is shown to the model once more, in case a filter is spelt
   differently in the data. This second look does not count as a repair.
+- `vardex answer` waits for an answer when the model asks a question back, up to twice;
+  without a keyboard, or with `--no-input`, it prints the question and exits with code 2.
 
 ## [0.5.0] - 2026-10-13
 

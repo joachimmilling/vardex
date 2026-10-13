@@ -179,11 +179,13 @@ def build_request(
     effort: Effort | None = "medium",
     max_rows: int = 100,
     today: date | None = None,
+    earlier: list[Message] | None = None,
 ) -> Request:
-    """The request that asks a model to write SQL for one question."""
+    """The request that asks a model to write SQL for one question, after any earlier turns:
+    a question the model asked back, and the person's answer to it."""
     return Request(
         system=system_prompt(knowledge, warehouse, today or date.today(), max_rows),
-        messages=[Message("user", question)],
+        messages=[*(earlier or []), Message("user", question)],
         effort=effort,
         output_schema=Plan,
         cache_system=True,  # the same tables and metrics for every question
@@ -300,11 +302,21 @@ def answer(
     repairs: int = 1,
     max_rows: int = 100,
     today: date | None = None,
+    earlier: list[Message] | None = None,
 ) -> Reply:
-    """Answer one question from a warehouse: plan a query, run it, answer from its rows."""
+    """Answer one question from a warehouse: plan a query, run it, answer from its rows.
+    `earlier` holds the turns before it, when the model asked a question back."""
     request = build_request(
-        knowledge, warehouse, question, effort=effort, max_rows=max_rows, today=today
+        knowledge,
+        warehouse,
+        question,
+        effort=effort,
+        max_rows=max_rows,
+        today=today,
+        earlier=earlier,
     )
+    # What the person asked, in all their turns, for the answer and for tracing its numbers
+    question = "\n".join([*(m.text for m in earlier or [] if m.role == "user"), question])
     plan, result, answers = plan_and_run(
         client, warehouse, knowledge, request, repairs=repairs, max_rows=max_rows
     )
