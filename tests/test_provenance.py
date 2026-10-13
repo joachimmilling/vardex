@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from vardex.provenance import readings, trace
+from vardex.provenance import misspelt, readings, trace
 from vardex.sql import Result
 
 RESULT = Result(
@@ -77,3 +77,19 @@ def test_rounding_is_allowed_only_to_the_digits_shown():
 
 def test_list_markers_codes_and_words_hold_no_numbers():
     assert where("1. Demo Laks AS, SN2007 code, Q3") == []
+
+
+NAMES = ["LERØY SEAFOOD GROUP ASA", "MOWI ASA", "SJØTROLL HAVBRUK AS"]
+
+
+def test_a_name_spelt_unlike_the_rows_is_found():
+    text = "Leròy Seafood Group ASA was last. Sjøtrol Havbruk AS was third."
+    assert misspelt(text, NAMES) == [
+        ("Leròy Seafood Group ASA", "LERØY SEAFOOD GROUP ASA"),
+        ("Sjøtrol Havbruk AS", "SJØTROLL HAVBRUK AS"),
+    ]
+
+
+def test_capitals_short_names_and_other_words_are_fine():
+    text = "Mowi led. Lerøy Seafood Group was last. In Vestland, in NOK, LERØY SEAFOOD GROUP ASA."
+    assert misspelt(text, NAMES) == []

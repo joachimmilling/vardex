@@ -417,6 +417,8 @@ def answer_command(
         connection.close()
 
     typer.echo(reply.text)
+    for warning in reply.warnings:
+        typer.secho(f"Warning: {warning}", fg="yellow", err=True)
     if reply.assumptions:
         typer.echo("\nAssumptions")
         for assumption in reply.assumptions:

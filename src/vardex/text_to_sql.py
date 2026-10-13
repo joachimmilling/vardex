@@ -5,7 +5,7 @@ runs it read-only, and gives the rows back to the model to answer from. Every nu
 answer must trace back to the rows, the query or the question, or the answer is not shown.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Literal
 
@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, ValidationError
 from vardex.llm import Answer, Effort, Message, ModelClient, Request
 from vardex.packs import describe_problem
 from vardex.prompts import ANSWER, ANSWER_REPAIR, NO_ROWS, SQL_REPAIR, WRITE_SQL
-from vardex.provenance import Figure, trace
+from vardex.provenance import Figure, misspelt, trace
 from vardex.semantic import Knowledge
 from vardex.sql import QueryError, Result, Table, Warehouse, check_sql, format_value, transpile
 
@@ -51,6 +51,7 @@ class Reply:
     result: Result | None  # the query that ran and its rows; None if none ran
     figures: list[Figure]  # every number in the text, and where it came from
     answers: list[Answer]  # the model calls it took
+    warnings: list[str] = field(default_factory=list)  # such as a name spelt unlike the rows
 
 
 class AnswerError(Exception):
@@ -292,6 +293,13 @@ def answer_from_rows(
     )
 
 
+def names_in(knowledge: Knowledge, result: Result) -> list[str]:
+    """The names in a result: the values of every column that is an object's label."""
+    labels = {obj.label for obj in knowledge.ontology.objects if obj.label}
+    columns = [i for i, column in enumerate(result.columns) if column in labels]
+    return [row[i] for row in result.rows for i in columns if isinstance(row[i], str)]
+
+
 def answer(
     client: ModelClient,
     warehouse: Warehouse,
@@ -327,4 +335,8 @@ def answer(
         text, figures, more = answer_from_rows(client, question, plan, result, repairs=repairs)
     except AnswerError as err:
         raise AnswerError(str(err), answers + err.answers, result) from err
-    return Reply("answer", text, plan.assumptions, result, figures, answers + more)
+    warnings = [
+        f'"{written}" is not in the rows; they spell it "{name}"'
+        for written, name in misspelt(text, names_in(knowledge, result))
+    ]
+    return Reply("answer", text, plan.assumptions, result, figures, answers + more, warnings)
