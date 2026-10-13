@@ -1,6 +1,7 @@
 """The vardex command-line tool."""
 
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
@@ -14,7 +15,7 @@ from vardex.config import Settings, load_settings
 from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.extraction import ExtractionError, build_request, extract, load_extraction
 from vardex.ingest import http_client
-from vardex.llm import Answer, Conversation, Effort, ModelClient, ModelError
+from vardex.llm import Answer, Conversation, Effort, Message, ModelClient, ModelError
 from vardex.llm import ask as ask_model
 from vardex.packs import PackError, load_pack
 from vardex.postgres_warehouse import PostgresWarehouse
@@ -51,6 +52,7 @@ WarehouseOption = Annotated[
     ),
 ]
 CALL_LOG = Path("logs/calls.jsonl")
+MAX_ASKED_BACK = 2  # questions the model may ask back before it must answer or give up
 
 
 def fail(message: str) -> typer.Exit:
@@ -63,6 +65,11 @@ def settings_for(model: str | None) -> Settings:
     """The settings, with the model replaced when one was given on the command line."""
     settings = load_settings()
     return replace(settings, model=model) if model else settings
+
+
+def interactive() -> bool:
+    """True when a person is at the keyboard to answer a question back."""
+    return sys.stdin.isatty()
 
 
 def connect(settings: Settings) -> ModelClient:
@@ -354,9 +361,14 @@ def answer_command(
     show_prompt: Annotated[
         bool, typer.Option("--show-prompt", help="Print the request for the SQL; call nothing.")
     ] = False,
+    no_input: Annotated[
+        bool, typer.Option("--no-input", help="Never wait for an answer to a question back.")
+    ] = False,
     stats: StatsOption = False,
 ) -> None:
-    """Answer a question from the pack's warehouse, with the SQL it ran and the rows it used."""
+    """Answer a question from the pack's warehouse, with the SQL it ran and the rows it used.
+    When the model asks a question back, answer it at the keyboard; without a keyboard, or
+    with --no-input, the question is printed and the exit code is 2."""
     settings = settings_for(model)
     try:
         knowledge = load_knowledge(pack)
@@ -371,15 +383,28 @@ def answer_command(
             typer.echo(f"=== system ===\n{request.system}\n\n=== user ===\n{question}")
             return
         client = connect(settings)
-        reply = text_to_sql.answer(
-            client,
-            connection,
-            knowledge,
-            question,
-            effort=effort,
-            repairs=repairs,
-            max_rows=max_rows,
-        )
+        earlier: list[Message] = []
+        while True:
+            reply = text_to_sql.answer(
+                client,
+                connection,
+                knowledge,
+                question,
+                effort=effort,
+                repairs=repairs,
+                max_rows=max_rows,
+                earlier=earlier,
+            )
+            for call in reply.answers:
+                record(call, stats)
+            asked_back = len(earlier) // 2
+            if reply.kind != "clarify" or no_input or asked_back == MAX_ASKED_BACK:
+                break
+            if not interactive():
+                break
+            typer.echo(reply.text)
+            earlier += [Message("user", question), Message("assistant", reply.answers[-1].text)]
+            question = typer.prompt(">", prompt_suffix=" ")
     except (ModelError, QueryError) as err:
         raise fail(str(err)) from err
     except AnswerError as err:
@@ -401,10 +426,9 @@ def answer_command(
     elif reply.kind == "clarify":
         note = "(a question back: ask again, with the answer in your question)"
         typer.secho(note, fg="bright_black", err=True)
+        raise typer.Exit(code=2)
     else:
         typer.secho("(refused: no query was run)", fg="bright_black", err=True)
-    for call in reply.answers:
-        record(call, stats)
 
 
 @app.command()

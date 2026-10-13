@@ -161,3 +161,39 @@ def test_a_failed_build_is_red(data, monkeypatch):
     result = runner.invoke(app, ["ingest", PACK])
     assert result.exit_code == 1
     assert "dbt build failed" in result.output
+
+
+def test_a_question_back_is_answered_at_the_keyboard(data, monkeypatch):
+    make_warehouse(data)
+    back = {"action": "clarify", "sql": None, "message": "Most of what?", "assumptions": []}
+    plan = {"action": "query", "sql": SQL, "message": None, "assumptions": []}
+    model = FakeModel(json.dumps(back), json.dumps(plan), "Demo Laks AS: 120.")
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+    monkeypatch.setattr("vardex.cli.interactive", lambda: True)
+
+    result = runner.invoke(app, ["answer", PACK, "Who has the most?"], input="Employees.\n")
+
+    assert result.exit_code == 0
+    assert "Most of what?" in result.stdout
+    assert [(m.role, m.text) for m in model.requests[1].messages] == [
+        ("user", "Who has the most?"),
+        ("assistant", json.dumps(back)),
+        ("user", "Employees."),
+    ]
+    assert "Who has the most?\nEmployees." in model.requests[2].messages[0].text
+
+
+def test_a_question_back_without_a_keyboard_ends_with_2(data, monkeypatch):
+    make_warehouse(data)
+    back = {"action": "clarify", "sql": None, "message": "Most of what?", "assumptions": []}
+    model = FakeModel(json.dumps(back))
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+    monkeypatch.setattr("vardex.cli.interactive", lambda: True)
+
+    result = runner.invoke(app, ["answer", PACK, "Who has the most?", "--no-input"])
+
+    assert result.exit_code == 2
+    assert result.stdout.startswith("Most of what?")
+    assert len(model.requests) == 1
