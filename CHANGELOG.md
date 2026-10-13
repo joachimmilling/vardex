@@ -16,6 +16,8 @@ All notable changes to Vardex are recorded here. The format follows
   differently in the data. This second look does not count as a repair.
 - `vardex answer` waits for an answer when the model asks a question back, up to twice;
   without a keyboard, or with `--no-input`, it prints the question and exits with code 2.
+- `vardex answer` warns when the answer spells a name unlike the rows, such as Leròy for
+  LERØY.
 
 ## [0.5.0] - 2026-10-13
 

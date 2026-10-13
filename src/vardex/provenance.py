@@ -6,6 +6,7 @@ SQL that ran, or the question itself. A number that traces to none of them came 
 model, not the data, and an answer that holds one is not shown.
 """
 
+import difflib
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -32,6 +33,9 @@ SUFFIX = re.compile(
 )
 LIST_MARKER = re.compile(r"^\s*\d+[.)]\s", re.MULTILINE)  # "1. " in a numbered list
 SPACES = re.compile(r"[ \u00a0\u202f]")
+# A run of capitalised words, such as Lerøy Seafood Group ASA: what a name looks like in text
+NAME = re.compile(r"[^\W\d_a-zà-ÿ][\w'&-]*(?:[ \u00a0][^\W\d_a-zà-ÿ][\w'&-]*)*")
+SIMILAR = 0.85  # how alike a written name and a name in the rows must be to count as a slip
 
 
 @dataclass(frozen=True)
@@ -170,3 +174,21 @@ def trace(text: str, results: list[Result], question: str) -> list[Figure]:
             )
         )
     return figures
+
+
+def misspelt(text: str, names: list[str]) -> list[tuple[str, str]]:
+    """Names in a text that are close to a name in the rows but not the same: each as written,
+    and as the rows spell it. Capitals do not count, and a name may be shortened, so Mowi is
+    fine for MOWI ASA; Leròy for LERØY is not. A name that is like none in the rows is not
+    reported: it may be a place or a word, not a slip."""
+    known = {name.casefold(): name for name in names if name}
+    found = []
+    for match in NAME.finditer(text):
+        written = match.group()
+        folded = written.casefold()
+        if len(folded) < 4 or any(folded in name or name in folded for name in known):
+            continue
+        close = difflib.get_close_matches(folded, list(known), n=1, cutoff=SIMILAR)
+        if close:
+            found.append((written, known[close[0]]))
+    return list(dict.fromkeys(found))

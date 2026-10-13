@@ -256,3 +256,10 @@ def test_no_rows_can_be_the_answer(warehouse):
     reply = ask(model, warehouse)
     assert reply.result.rows == []
     assert len(model.requests) == 3  # one second look, then the answer
+
+
+def test_a_misspelt_name_is_a_warning_not_a_rejection(warehouse):
+    model = FakeModel(plan(), "Demo Lacs AS had the highest margin, 23.6%.")
+    reply = ask(model, warehouse)
+    assert reply.kind == "answer"
+    assert reply.warnings == ['"Demo Lacs AS" is not in the rows; they spell it "DEMO LAKS AS"']
