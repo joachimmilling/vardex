@@ -57,6 +57,12 @@ The query cannot be used:
 
 Write it again in the same format. Correct only what is wrong."""
 
+NO_ROWS = """\
+The query returned no rows. Check every filter against the values listed and the column
+descriptions: a value spelt differently in the data, such as 'VESTLAND' for 'Vestland', finds
+nothing. If a filter was wrong, write the query again. If no rows is the right answer, return
+the same query."""
+
 ANSWER = """\
 You answer a question from the rows a query returned. People act on the numbers you give
 them, so every number you write must be in the rows, the query or the question, exactly or
