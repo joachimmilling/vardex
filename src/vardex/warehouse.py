@@ -2,7 +2,7 @@
 
 A build never touches the warehouse people are reading. It loads the landed files into raw
 tables in a new file, runs the pack's dbt project on it (models, then tests), checks the
-pack's metrics, and only then puts the new file in place of the old one.
+pack's semantic layer against it, and only then puts the new file in place of the old one.
 """
 
 import os
@@ -16,8 +16,9 @@ from pathlib import Path
 
 import duckdb
 import httpx2
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel
 
+from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.ingest import (
     IngestError,
     Source,
@@ -30,41 +31,14 @@ from vardex.ingest import (
     load_ingest,
     prune,
 )
-from vardex.packs import PackError, load_pack, read_yaml
+from vardex.packs import load_pack
+from vardex.semantic import check, load_knowledge
 
 Say = Callable[[str], None]  # prints one line of progress
 # When a row's file was fetched, from its name: 2026-10-05T061502Z.csv.gz
 FETCHED_AT = "strptime(split_part(parse_filename(filename), '.', 1), '%Y-%m-%dT%H%M%SZ')"
 DBT = [sys.executable, "-c", "import sys; from dbt.cli.main import cli; sys.exit(cli())"]
 KEYED_COLUMNS = "{'key': 'VARCHAR', 'status': 'INTEGER', 'body': 'JSON', 'error': 'VARCHAR'}"
-
-
-class Metric(BaseModel):
-    """One metric in metrics.yaml: a name, what it means, and the SQL that computes it."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
-    description: str
-    table: str  # the model it is computed from
-    sql: str  # an aggregate expression over that table, such as sum(revenue)
-    unit: str  # what the number is counted in, such as NOK or companies
-    notes: list[str] = []  # what to watch for when using it
-
-
-class SemanticLayer(BaseModel):
-    """The contents of warehouse/metrics.yaml: every metric a question may be answered with."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    metrics: list[Metric] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def names_are_unique(self) -> "SemanticLayer":
-        names = [metric.name for metric in self.metrics]
-        if len(names) != len(set(names)):
-            raise ValueError("every metric needs its own name")
-        return self
 
 
 class NodeResult(BaseModel):
@@ -108,14 +82,6 @@ def count(n: int, thing: str) -> str:
 def size(n_bytes: int) -> str:
     """A file size such as `154.8 MB` or `3.9 kB`."""
     return f"{n_bytes / 1e6:,.1f} MB" if n_bytes >= 100_000 else f"{n_bytes / 1e3:,.1f} kB"
-
-
-def load_metrics(pack: Path) -> SemanticLayer:
-    """Read and validate warehouse/metrics.yaml in a pack folder."""
-    path = pack / "warehouse" / "metrics.yaml"
-    if not path.is_file():
-        raise PackError(f"No warehouse/metrics.yaml in {pack}")
-    return read_yaml(path, SemanticLayer, "metrics file")
 
 
 def warehouse_path(data_dir: Path, pack_name: str) -> Path:
@@ -173,17 +139,6 @@ def run_dbt(command: list[str], project: Path, warehouse: Path, work: Path) -> l
     return DbtResults.model_validate_json(results.read_text(encoding="utf-8")).results
 
 
-def check_metrics(con: duckdb.DuckDBPyConnection, layer: SemanticLayer) -> list[str]:
-    """Every metric whose SQL does not run on the warehouse, with DuckDB's reason."""
-    problems = []
-    for metric in layer.metrics:
-        try:
-            con.execute(f"select {metric.sql} as {metric.name} from {metric.table} where false")
-        except duckdb.Error as err:
-            problems.append(f"{metric.name}: {err}")
-    return problems
-
-
 def fetch_and_load(
     con: duckdb.DuckDBPyConnection,
     client: httpx2.Client,
@@ -230,7 +185,7 @@ def build(
     place. Raises WarehouseError, leaving the old warehouse untouched, if anything fails."""
     manifest = load_pack(pack)
     spec = load_ingest(pack)
-    layer = load_metrics(pack)  # read every pack file first, so a typo fails before any fetch
+    knowledge = load_knowledge(pack)  # read every pack file first: a typo fails before a fetch
     now = now or datetime.now(UTC)
     home = data_dir / manifest.name
     work = home.resolve() / "build"  # absolute: dbt reads relative paths from the project
@@ -265,18 +220,22 @@ def build(
             when = f"{node.max_loaded_at:%Y-%m-%d %H:%M}" if node.max_loaded_at else "never"
             result.stale.append(f"{node.name} ({node.status}): last fetched {when}")
 
-    with duckdb.connect(new, read_only=True) as con:
-        problems = check_metrics(con, layer)
+    warehouse = DuckDBWarehouse(new)
+    try:
+        problems = check(warehouse, knowledge)
+    finally:
+        warehouse.close()
     if problems:
-        raise WarehouseError("metrics that do not run:\n" + "\n".join(f"  {p}" for p in problems))
-    say(f"metrics: all {len(layer.metrics)} run on the new warehouse")
+        raise WarehouseError(
+            "the semantic layer does not match the warehouse:\n"
+            + "\n".join(f"  {p}" for p in problems)
+        )
+    say(
+        f"semantic layer: {count(len(knowledge.metrics), 'metric')}, "
+        f"{count(len(knowledge.ontology.objects), 'object')}, "
+        f"{count(len(knowledge.ontology.links), 'link')} and "
+        f"{count(len(knowledge.questions.examples), 'example')} check out"
+    )
 
     os.replace(new, result.path)  # one step: readers see the old warehouse or the new one
     return result
-
-
-def query(path: Path, sql: str) -> duckdb.DuckDBPyRelation:
-    """Run SQL on a warehouse, read-only."""
-    if not path.is_file():
-        raise WarehouseError(f"No warehouse at {path}. Run vardex ingest first.")
-    return duckdb.connect(path, read_only=True).sql(sql)

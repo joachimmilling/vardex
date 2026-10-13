@@ -6,6 +6,35 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-13
+
+### Added
+
+- `vardex answer PACK QUESTION` answers a question about a pack's data, in English or Norwegian:
+  a model writes one SQL query against the pack's semantic layer, Vardex checks it and runs it
+  read-only, and the model answers from the rows. Every answer shows its assumptions, the SQL,
+  the rows and the row and column each number came from. The model may instead ask one
+  question back, or refuse.
+- Every number in an answer must trace to a query result, the SQL or the question; an answer
+  with a number that traces to nothing is repaired once, then rejected.
+- `Warehouse`, a provider-neutral connection to a warehouse, with `DuckDBWarehouse` and
+  `PostgresWarehouse`. `--warehouse` or `VARDEX_WAREHOUSE_URL` points Vardex at a PostgreSQL
+  database instead of the pack's own file.
+- `vardex check PACK` checks a pack's semantic layer against a warehouse.
+- Packs may declare `warehouse/ontology.yaml`, their objects, keys and links over existing
+  tables, and `warehouse/questions.yaml`, a glossary and example questions with their SQL.
+- `examples/copy_to_postgres.py` copies a pack's described tables into PostgreSQL.
+- The engine prompts `WRITE_SQL`, `SQL_REPAIR`, `ANSWER` and `ANSWER_REPAIR`.
+- Decision records 0009 to 0012.
+
+### Changed
+
+- `vardex sql` runs through the same read-only connection, with a time limit, and accepts
+  `--warehouse` and `--max-rows`. A DuckDB warehouse can no longer read or write other files.
+- Every ingest checks the whole semantic layer: described columns, metrics, keys, links and
+  examples. Metric definitions moved from `vardex.warehouse` to `vardex.semantic`.
+- CI also runs the tests against PostgreSQL.
+
 ## [0.4.1] - 2026-10-12
 
 ### Added

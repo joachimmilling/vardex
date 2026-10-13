@@ -5,18 +5,19 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
-import duckdb
 import typer
 
-from vardex import __version__
+from vardex import __version__, text_to_sql
 from vardex.anthropic_client import AnthropicClient
 from vardex.calllog import log_call
 from vardex.config import Settings, load_settings
+from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.extraction import ExtractionError, build_request, extract, load_extraction
 from vardex.ingest import http_client
 from vardex.llm import Answer, Conversation, Effort, ModelClient, ModelError
 from vardex.llm import ask as ask_model
 from vardex.packs import PackError, load_pack
+from vardex.postgres_warehouse import PostgresWarehouse
 from vardex.pricing import (
     PRICES,
     UnknownModelError,
@@ -27,7 +28,11 @@ from vardex.pricing import (
     price_for,
     stale_prices_warning,
 )
-from vardex.warehouse import WarehouseError, build, query, warehouse_path
+from vardex.provenance import Figure
+from vardex.semantic import check, load_knowledge
+from vardex.sql import QueryError, Result, Warehouse, format_table, format_value
+from vardex.text_to_sql import AnswerError
+from vardex.warehouse import WarehouseError, build, warehouse_path
 
 app = typer.Typer(
     help="Vardex: blocks, recipes and packs for enterprise AI apps.",
@@ -37,6 +42,14 @@ app = typer.Typer(
 ModelOption = Annotated[str | None, typer.Option(help="Use this model instead of VARDEX_MODEL.")]
 PackArgument = Annotated[Path, typer.Argument(help="A pack folder.", exists=True, file_okay=False)]
 StatsOption = Annotated[bool, typer.Option("--stats", help="Show tokens, time and cost.")]
+WarehouseOption = Annotated[
+    str | None,
+    typer.Option(
+        "--warehouse",
+        help="A PostgreSQL URL or a DuckDB file. Default: VARDEX_WAREHOUSE_URL, else the "
+        "pack's own warehouse.",
+    ),
+]
 CALL_LOG = Path("logs/calls.jsonl")
 
 
@@ -55,6 +68,16 @@ def settings_for(model: str | None) -> Settings:
 def connect(settings: Settings) -> ModelClient:
     """The model client. This is the one place that chooses a provider."""
     return AnthropicClient(settings)
+
+
+def connect_warehouse(url: str | None, pack: Path, settings: Settings) -> Warehouse:
+    """The warehouse. This is the one place that chooses a database."""
+    url = url or settings.warehouse_url
+    timeout = settings.query_timeout_seconds
+    if url and url.startswith(("postgresql://", "postgres://")):
+        return PostgresWarehouse(url, timeout_seconds=timeout)
+    path = Path(url) if url else warehouse_path(settings.data_dir, load_pack(pack).name)
+    return DuckDBWarehouse(path, timeout_seconds=timeout)
 
 
 def warn_if_prices_are_stale() -> None:
@@ -253,16 +276,135 @@ def ingest(
 def sql_command(
     pack: PackArgument,
     statement: Annotated[str, typer.Argument(help="The SQL to run, such as 'select 1'.")],
+    warehouse: WarehouseOption = None,
+    max_rows: Annotated[int, typer.Option(min=1, help="Fetch at most this many rows.")] = 1000,
 ) -> None:
     """Run SQL on a pack's warehouse, read-only, and print the result."""
     try:
-        name = load_pack(pack).name
-        result = query(warehouse_path(load_settings().data_dir, name), statement)
-        typer.echo(result)
-    except (PackError, WarehouseError) as err:
+        connection = connect_warehouse(warehouse, pack, load_settings())
+    except (PackError, QueryError) as err:
         raise fail(str(err)) from err
-    except duckdb.Error as err:
-        raise fail(f"DuckDB: {err}") from err
+    try:
+        typer.echo(format_table(connection.run(statement, max_rows=max_rows)))
+    except QueryError as err:
+        raise fail(f"{connection.name}: {err}") from err
+    finally:
+        connection.close()
+
+
+@app.command(name="check")
+def check_command(pack: PackArgument, warehouse: WarehouseOption = None) -> None:
+    """Check the pack's semantic layer against a warehouse, and print what does not hold."""
+    try:
+        knowledge = load_knowledge(pack)
+        connection = connect_warehouse(warehouse, pack, load_settings())
+    except (PackError, QueryError) as err:
+        raise fail(str(err)) from err
+    try:
+        problems = check(connection, knowledge)
+    finally:
+        connection.close()
+    if problems:
+        raise fail(f"{connection.name}:\n" + "\n".join(f"  {p}" for p in problems))
+    typer.secho(
+        f"OK  {connection.name}: {len(knowledge.tables)} models, {len(knowledge.metrics)} "
+        f"metrics, {len(knowledge.ontology.objects)} objects, "
+        f"{len(knowledge.ontology.links)} links, {len(knowledge.questions.examples)} examples",
+        fg=typer.colors.GREEN,
+    )
+
+
+def show_sources(result: Result, figures: list[Figure], err: bool = False) -> None:
+    """Print what an answer rests on: the SQL, the rows, and where each number came from."""
+    typer.echo(f"\nSQL, run on {result.warehouse} in {result.seconds:.2f} s", err=err)
+    typer.echo(result.sql.strip(), err=err)
+    typer.echo(f"\nRows\n{format_table(result)}", err=err)
+    if figures:
+        typer.echo("\nFigures", err=err)
+    shown = set()
+    for figure in figures:
+        if figure.text in shown:  # each number once, where it is first written
+            continue
+        shown.add(figure.text)
+        if figure.cells:
+            cell = figure.cells[0]
+            where = f"row {cell.row}, {cell.column} = {format_value(cell.value)}"
+            if len(figure.cells) > 1:
+                where += f" (and {len(figure.cells) - 1} more)"
+        else:
+            where = "the query" if figure.in_sql else "the question"
+        typer.echo(f"  {figure.text:<16} {where}", err=err)
+
+
+@app.command(name="answer")
+def answer_command(
+    pack: PackArgument,
+    question: Annotated[str, typer.Argument(help="A question about the pack's data.")],
+    warehouse: WarehouseOption = None,
+    model: ModelOption = None,
+    effort: Annotated[
+        Effort, typer.Option(help="How much work the model puts into the SQL.")
+    ] = "medium",
+    repairs: Annotated[
+        int, typer.Option(min=0, max=3, help="How often to ask again after a failed check.")
+    ] = 1,
+    max_rows: Annotated[
+        int, typer.Option(min=1, help="Give the model at most this many rows.")
+    ] = 100,
+    show_prompt: Annotated[
+        bool, typer.Option("--show-prompt", help="Print the request for the SQL; call nothing.")
+    ] = False,
+    stats: StatsOption = False,
+) -> None:
+    """Answer a question from the pack's warehouse, with the SQL it ran and the rows it used."""
+    settings = settings_for(model)
+    try:
+        knowledge = load_knowledge(pack)
+        connection = connect_warehouse(warehouse, pack, settings)
+    except (PackError, QueryError) as err:
+        raise fail(str(err)) from err
+    try:
+        if show_prompt:
+            request = text_to_sql.build_request(
+                knowledge, connection, question, effort=effort, max_rows=max_rows
+            )
+            typer.echo(f"=== system ===\n{request.system}\n\n=== user ===\n{question}")
+            return
+        client = connect(settings)
+        reply = text_to_sql.answer(
+            client,
+            connection,
+            knowledge,
+            question,
+            effort=effort,
+            repairs=repairs,
+            max_rows=max_rows,
+        )
+    except (ModelError, QueryError) as err:
+        raise fail(str(err)) from err
+    except AnswerError as err:
+        for call in err.answers:
+            record(call, stats)
+        if err.result:
+            show_sources(err.result, [], err=True)
+        raise fail(str(err)) from err
+    finally:
+        connection.close()
+
+    typer.echo(reply.text)
+    if reply.assumptions:
+        typer.echo("\nAssumptions")
+        for assumption in reply.assumptions:
+            typer.echo(f"- {assumption}")
+    if reply.result:
+        show_sources(reply.result, reply.figures)
+    elif reply.kind == "clarify":
+        note = "(a question back: ask again, with the answer in your question)"
+        typer.secho(note, fg="bright_black", err=True)
+    else:
+        typer.secho("(refused: no query was run)", fg="bright_black", err=True)
+    for call in reply.answers:
+        record(call, stats)
 
 
 @app.command()

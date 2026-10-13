@@ -1,0 +1,34 @@
+# The objects a question about Norwegian companies is about, and how they link. Each object is
+# a model that already exists in the warehouse; this file describes it and never creates
+# anything. Vardex checks on every ingest that every key is unique and every link finds its
+# object.
+objects:
+  - name: Company
+    description: A legal entity in the Central Coordinating Register for Legal Entities.
+    table: dim_companies
+    key: orgnr
+    label: name
+
+  - name: AnnualAccounts
+    description: >
+      One set of annual accounts for one fiscal year: a company's own, or a parent company's
+      for its whole group.
+    table: fct_accounts
+    key: accounts_key
+
+  - name: Industry
+    description: An SN2025 industry subclass, with its division and section.
+    table: dim_industries
+    key: industry_code
+    label: industry
+
+links:
+  - name: filed_by
+    description: The company that filed the accounts.
+    from: AnnualAccounts.orgnr
+    to: Company
+
+  - name: main_industry
+    description: The company's main industry. Empty for a company that has not stated one.
+    from: Company.industry_code
+    to: Industry

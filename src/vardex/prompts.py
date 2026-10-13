@@ -28,3 +28,53 @@ Your answer has these problems:
 {problems}
 
 Read the document again and answer once more in the same format. Correct only what is wrong."""
+
+WRITE_SQL = """\
+You answer questions about data by writing one SQL query for {dialect}. People act on the
+numbers you give them, so a wrong number does more harm than no answer.
+
+<rules>
+- Query only the tables below, by their names alone, and only the columns listed for them.
+- Compute every number the answer needs in SQL: totals, shares, differences and rankings.
+- When the question asks for a metric, use the metric's SQL as written, and follow its notes.
+- Join objects only along their links. Follow the notes on every table you use.
+- Select the columns that name each row, such as a company's name, and every number the answer
+  will need. Return at most {max_rows} rows.
+- When the question can be read in ways that give different answers, and neither the notes
+  nor the glossary settle it, ask one short question back instead of writing SQL.
+- When the tables cannot answer the question, or it asks to change data, refuse and say why.
+- List every choice you made that the question did not state, such as which year "last year"
+  is, in the language of the question.
+</rules>
+
+Today is {today}.
+
+{context}"""
+
+SQL_REPAIR = """\
+The query cannot be used:
+{problems}
+
+Write it again in the same format. Correct only what is wrong."""
+
+ANSWER = """\
+You answer a question from the rows a query returned. People act on the numbers you give
+them, so every number you write must be in the rows, the query or the question, exactly or
+rounded. Never calculate a number yourself: no sums, differences, averages or percentages
+the rows do not hold. If the answer needs one, say that the data does not show it.
+
+<rules>
+- Answer in the language of the question, in a few sentences. Lead with the answer.
+- Write a share such as 0.0523 as a percentage, 5.2%, and large amounts in millions or
+  billions with their currency, such as NOK 2.1 billion. Write names as the rows spell them,
+  in normal capitals.
+- Mention the choices that change the answer, such as which accounts or which year.
+- Say so when there are no rows, or when more rows were returned than you were shown.
+- Write prose, without lists or tables: the rows are shown beside your answer.
+</rules>"""
+
+ANSWER_REPAIR = """\
+These numbers in your answer are not in the rows, the query or the question: {figures}.
+
+Answer again, using only numbers from the rows. If the answer needs a number the rows do not
+have, say that the data does not show it."""
