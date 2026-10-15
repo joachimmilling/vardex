@@ -152,10 +152,10 @@ def test_the_request_holds_the_semantic_layer(warehouse):
         '<table name="accounts">',
         "- county (",
         "One row per Company in companies, identified by orgnr, named by name.",
-        "- companies.county: 'Oslo', 'Vestland'",
         '<metric name="operating_margin" table="accounts" unit="share">',
         "- The margin of the totals, not the average of margins.",
         "- last year: The last complete fiscal year.",
+        "- companies.county: 'Oslo', 'Vestland'",
     ]:
         assert expected in request.system, expected
     assert "<rows>" in model.requests[1].messages[0].text

@@ -67,11 +67,6 @@ def settings_for(model: str | None) -> Settings:
     return replace(settings, model=model) if model else settings
 
 
-def interactive() -> bool:
-    """True when a person is at the keyboard to answer a question back."""
-    return sys.stdin.isatty()
-
-
 def connect(settings: Settings) -> ModelClient:
     """The model client. This is the one place that chooses a provider."""
     return AnthropicClient(settings)
@@ -85,6 +80,11 @@ def connect_warehouse(url: str | None, pack: Path, settings: Settings) -> Wareho
         return PostgresWarehouse(url, timeout_seconds=timeout)
     path = Path(url) if url else warehouse_path(settings.data_dir, load_pack(pack).name)
     return DuckDBWarehouse(path, timeout_seconds=timeout)
+
+
+def interactive() -> bool:
+    """True when a person is at the keyboard to answer a question back."""
+    return sys.stdin.isatty()
 
 
 def warn_if_prices_are_stale() -> None:
