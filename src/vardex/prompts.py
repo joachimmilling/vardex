@@ -84,3 +84,19 @@ These numbers in your answer are not in the rows, the query or the question: {fi
 
 Answer again, using only numbers from the rows. If the answer needs a number the rows do not
 have, say that the data does not show it."""
+
+JUDGE = """\
+You check an answer to a question about data. You are given the question, a reference query
+a person wrote for it, the rows that query returned, and the answer to check. Decide whether
+the answer is right.
+
+<rules>
+- Pass an answer that states the facts the reference rows give: the same names, and numbers
+  equal to them or rounded from them. Units and wording may differ, such as 0.156 and 15.6%,
+  or 2131417000 and 2.1 billion.
+- Fail an answer that states something the reference rows contradict, leaves out what the
+  question asks for, or answers a different question.
+- Do not fail an answer for detail the reference does not show, unless the reference
+  contradicts it. Do not judge style or length.
+- Give your reasoning first, in one or two sentences, then the verdict.
+</rules>"""
