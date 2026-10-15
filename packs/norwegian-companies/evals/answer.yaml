@@ -415,6 +415,8 @@ cases:
       Of the groups that report in NOK, which three grew their revenue the most from 2024 to
       2025, in percent?
     ordered: true
+    # A short first year is not growth: a group whose 2024 covered four months would top the
+    # list. Compare full years only.
     sql: |
       select c.name
       from fct_accounts as a
@@ -423,6 +425,7 @@ cases:
       join dim_companies as c on c.orgnr = a.orgnr
       where a.accounts_type = 'group' and a.fiscal_year = 2024
         and a.currency = 'NOK' and b.currency = 'NOK'
+        and a.period_months = 12 and b.period_months = 12
       order by b.revenue / nullif(a.revenue, 0) desc nulls last
       limit 3
 

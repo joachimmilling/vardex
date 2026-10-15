@@ -282,7 +282,7 @@ def answer_from_rows(
     for _ in range(repairs + 1):
         answer = client.send(request)
         answers.append(answer)
-        figures = trace(answer.text, [result], question)
+        figures = trace(answer.text, [result], question, plan.assumptions)
         untraced = [f.text for f in figures if not f.traced]
         if not untraced:
             return answer.text.strip(), figures, answers

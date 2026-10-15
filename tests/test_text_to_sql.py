@@ -263,3 +263,12 @@ def test_a_misspelt_name_is_a_warning_not_a_rejection(warehouse):
     reply = ask(model, warehouse)
     assert reply.kind == "answer"
     assert reply.warnings == ['"Demo Lacs AS" is not in the rows; they spell it "DEMO LAKS AS"']
+
+
+def test_a_number_from_the_assumptions_needs_no_repair(warehouse):
+    covered = ("Last year is 2025.", "The accounts cover companies with at least 50 employees.")
+    text = "Demo Laks AS had 23.6%, among companies with at least 50 employees."
+    model = FakeModel(plan(assumptions=covered), text)
+    reply = ask(model, warehouse)
+    assert reply.text == text
+    assert len(reply.answers) == 2  # the plan and one answer: nothing was sent back

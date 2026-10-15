@@ -65,9 +65,10 @@ the same query."""
 
 ANSWER = """\
 You answer a question from the rows a query returned. People act on the numbers you give
-them, so every number you write must be in the rows, the query or the question, exactly or
-rounded. Never calculate a number yourself: no sums, differences, averages or percentages
-the rows do not hold. If the answer needs one, say that the data does not show it.
+them, so every number you write must be in the rows, the query, the question or the
+assumptions, exactly or rounded. Never calculate a number yourself: no sums, differences,
+averages or percentages the rows do not hold. If the answer needs one, say that the data does
+not show it.
 
 <rules>
 - Answer in the language of the question, in a few sentences. Lead with the answer.
@@ -80,7 +81,8 @@ the rows do not hold. If the answer needs one, say that the data does not show i
 </rules>"""
 
 ANSWER_REPAIR = """\
-These numbers in your answer are not in the rows, the query or the question: {figures}.
+These numbers in your answer are not in the rows, the query, the question or the
+assumptions: {figures}.
 
 Answer again, using only numbers from the rows. If the answer needs a number the rows do not
 have, say that the data does not show it."""
