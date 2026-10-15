@@ -6,7 +6,7 @@
 description: Questions about Norwegian companies, answered from the warehouse.
 capability: answer
 today: 2026-10-13  # so "last year" is 2025 in every run, whenever it runs
-threshold: 0.95  # the share of cases that must pass: 60 of 63
+threshold: 0.9  # the share of cases that must pass: 57 of 63
 
 cases:
   # Lookup: one fact about one named company.

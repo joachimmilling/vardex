@@ -18,6 +18,10 @@ glossary:
   group: >
     A parent company and its subsidiaries, reported as one business in group accounts
     (accounts_type 'group'), filed by the parent.
+  growth: >
+    The change in a figure from one fiscal year to the next, computed in SQL. Compare only
+    fiscal years of twelve months (period_months = 12): a first or changed year may be shorter
+    or longer, and its change is not growth.
 
 examples:
   - question: How many limited companies are there in each county?
