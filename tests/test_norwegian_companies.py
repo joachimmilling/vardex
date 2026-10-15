@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from vardex.duckdb_warehouse import DuckDBWarehouse
+from vardex.evals import check_suite, load_suites
 from vardex.semantic import check, load_knowledge
 from vardex.warehouse import build
 
@@ -220,3 +221,14 @@ def test_the_semantic_layer_holds_on_the_warehouse(warehouse):
         assert check(connection, knowledge) == []
     finally:
         connection.close()
+
+
+def test_every_golden_set_is_fit_to_measure_with(warehouse):
+    knowledge = load_knowledge(PACK)
+    suites = load_suites(PACK)
+    assert "answer" in suites
+    for name, suite in suites.items():
+        assert check_suite(suite, knowledge) == [], name
+        for case in suite.cases:
+            if case.sql:
+                rows(warehouse, case.sql)  # every reference query runs on the pack's tables
