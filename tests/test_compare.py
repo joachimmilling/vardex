@@ -32,7 +32,7 @@ def test_numbers_match_to_six_significant_digits_and_whole_numbers_exactly():
 @pytest.mark.parametrize(
     ("rows", "reason"),
     [
-        ([("DEMO LAKS AS",)], "1 rows, expected 2"),
+        ([("DEMO LAKS AS",)], "1 rows, expected at least 2"),
         ([("DEMO DATA AS",), ("DEMO LAKS AS",)], "the right rows, in the wrong order"),
         ([("DEMO LAKS AS",), ("DEMO FISK AS",)], "no column holds the values of name"),
     ],
@@ -40,6 +40,20 @@ def test_numbers_match_to_six_significant_digits_and_whole_numbers_exactly():
 def test_wrong_rows_say_what_is_wrong(rows, reason):
     reference = result(["name"], [("DEMO LAKS AS",), ("DEMO DATA AS",)])
     assert compare(reference, result(["name"], rows), ordered=True) == reason
+
+
+def test_more_rows_are_fine_when_the_reference_rows_come_first():
+    reference = result(["name"], [("EQUINOR ASA",)])
+    context = result(["name"], [("EQUINOR ASA",), ("Norsk Hydro ASA",), ("YARA ASA",)])
+    assert compare(reference, context, ordered=True) is None
+    second = result(["name"], [("Norsk Hydro ASA",), ("EQUINOR ASA",)])
+    assert compare(reference, second, ordered=True) == "the right rows, in the wrong order"
+    assert compare(reference, second, ordered=False) is None
+
+
+def test_an_empty_reference_leaves_the_words_to_the_judge():
+    reference = result(["revenue"], [])
+    assert compare(reference, result(["name"], [("DNB EIENDOM AS",)]), ordered=False) is None
 
 
 def test_the_order_matters_only_when_the_case_says_so():

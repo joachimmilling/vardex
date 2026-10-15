@@ -225,33 +225,35 @@ def normalise(value: Any) -> Any:
 
 
 def compare(reference: Result, result: Result, ordered: bool) -> str | None:
-    """Why a result does not give the reference's rows, or None when it does. The result may
-    have more columns than the reference, in any order and with any names; it must have the
-    same rows, and with ordered, in the same order."""
-    if len(result.rows) != len(reference.rows):
-        return f"{len(result.rows)} rows, expected {len(reference.rows)}"
+    """Why a result does not hold the reference's rows, or None when it does. The result may
+    have more columns than the reference, in any order and under any names, and more rows: a
+    query may return context, such as the next nine groups after the one asked for. Every
+    reference row must be in it, and with ordered, as its first rows, in the same order."""
+    if len(result.rows) < len(reference.rows):
+        return f"{len(result.rows)} rows, expected at least {len(reference.rows)}"
     want = [tuple(normalise(v) for v in row) for row in reference.rows]
     got = [tuple(normalise(v) for v in row) for row in result.rows]
 
-    def column(rows: list[tuple[Any, ...]], i: int) -> list[Any]:
-        return sorted((row[i] for row in rows), key=repr)
+    def holds(j: int, i: int) -> bool:
+        """True when result column j holds every value of reference column i."""
+        return not Counter(row[i] for row in want) - Counter(row[j] for row in got)
 
-    # For each reference column, the result columns holding the same values
-    candidates = [
-        [j for j in range(len(result.columns)) if column(got, j) == column(want, i)]
-        for i in range(len(reference.columns))
-    ]
+    # For each reference column, the result columns that hold all its values
+    columns = range(len(result.columns))
+    candidates = [[j for j in columns if holds(j, i)] for i in range(len(reference.columns))]
     missing = [reference.columns[i] for i, found in enumerate(candidates) if not found]
     if missing:
         return f"no column holds the values of {', '.join(missing)}"
-    in_order = False
+    in_rows = False
     for choice in itertools.product(*candidates):
         rows = [tuple(row[j] for j in choice) for row in got]
-        if Counter(rows) == Counter(want):
-            in_order = in_order or rows == want
-            if in_order or not ordered:
+        if ordered and rows[: len(want)] == want:
+            return None
+        if not Counter(want) - Counter(rows):
+            if not ordered:
                 return None
-    if ordered:
+            in_rows = True
+    if in_rows:
         return "the right rows, in the wrong order"
     return "the right values, but not in the same rows"
 
