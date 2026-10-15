@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 MILLION = Decimal(1_000_000)
-PRICES_CHECKED = "2026-09-29"  # platform.claude.com/docs/en/about-claude/pricing
+PRICES_CHECKED = "2026-10-13"  # platform.claude.com/docs/en/about-claude/pricing
 STALE_AFTER_DAYS = 90
 BATCH_DISCOUNT = Decimal("0.5")  # the Message Batches API halves every token price
 
@@ -20,7 +20,7 @@ class Price:
 
 PRICES: dict[str, Price] = {
     "claude-haiku-4-5": Price(Decimal("1"), Decimal("5"), Decimal("1.25"), Decimal("0.10")),
-    "claude-sonnet-5-5": Price(Decimal("2"), Decimal("10"), Decimal("2.50"), Decimal("0.20")),
+    "claude-sonnet-5-5": Price(Decimal("2"), Decimal("10"), Decimal("2.50"), Decimal("0.10")),
     "claude-opus-5-5": Price(Decimal("4"), Decimal("20"), Decimal("5"), Decimal("0.20")),
     "claude-fable-5-1": Price(Decimal("10"), Decimal("50"), Decimal("12.50"), Decimal("0.25")),
 }

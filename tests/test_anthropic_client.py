@@ -84,7 +84,7 @@ def test_send_returns_the_text_and_what_it_cost():
     assert answer.text.startswith("A nine-digit number")
     assert answer.thinking_tokens == 250
     assert answer.usage.cache_read_tokens == 1200
-    assert answer.cost_usd == Decimal("0.00332")  # 40 × $2 + 300 × $10 + 1,200 × $0.20
+    assert answer.cost_usd == Decimal("0.0032")  # 40 × $2 + 300 × $10 + 1,200 × $0.10
     call = messages.calls[0]
     assert call["system"] == "Be brief."
     assert call["messages"] == [{"role": "user", "content": "What is an organisation number?"}]
@@ -155,20 +155,25 @@ def test_effort_is_left_out_for_a_model_that_rejects_it():
     assert "output_config" not in messages.calls[0]
 
 
-def test_api_errors_become_model_errors():
+@pytest.mark.parametrize(
+    ("status", "retryable"), [(400, False), (401, False), (429, True), (500, True), (529, True)]
+)
+def test_api_errors_become_model_errors_that_say_whether_to_try_again(status, retryable):
     request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx2.Response(429, request=request)
-    error = anthropic.RateLimitError("Rate limited", response=response, body=None)
+    response = httpx2.Response(status, request=request)
+    error = anthropic.APIStatusError("Refused", response=response, body=None)
     client, _ = client_with(error=error)
-    with pytest.raises(ModelError, match="429"):
+    with pytest.raises(ModelError, match=str(status)) as caught:
         client.send(REQUEST)
+    assert caught.value.retryable is retryable
 
 
-def test_a_lost_connection_becomes_a_model_error():
+def test_a_lost_connection_becomes_a_model_error_worth_trying_again():
     request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
     client, _ = client_with(error=anthropic.APIConnectionError(request=request))
-    with pytest.raises(ModelError, match="Could not reach the API"):
+    with pytest.raises(ModelError, match="Could not reach the API") as caught:
         client.send(REQUEST)
+    assert caught.value.retryable
 
 
 def test_count_tokens_uses_the_configured_model():
