@@ -109,9 +109,11 @@ class Recording:
     tables: list[Table] | None = None
     answers: dict[str, list[dict[str, Any]]] = field(default_factory=dict)  # in arrival order
     queries: dict[str, dict[str, Any]] = field(default_factory=dict)  # a result or an error
+    verdicts: dict[str, dict[str, Any]] = field(default_factory=dict)  # each case's grades
 
     def save(self, path: Path) -> None:
-        """Write it as JSON lines: what was recorded first, then one line per call or query."""
+        """Write it as JSON lines: what was recorded first, then one line per call or query,
+        then one per case with its verdict."""
         head = {
             "model": self.model,
             "warehouse": self.warehouse,
@@ -124,6 +126,8 @@ class Recording:
             lines += [json.dumps({"answer": key, **a}, ensure_ascii=False) for a in answers]
         for key, query in self.queries.items():
             lines.append(json.dumps({"query": key, **query}, ensure_ascii=False))
+        for case, verdict in self.verdicts.items():
+            lines.append(json.dumps({"verdict": case, **verdict}, ensure_ascii=False))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -136,8 +140,10 @@ class Recording:
         for line in lines[1:]:
             if "answer" in line:
                 recording.answers.setdefault(line.pop("answer"), []).append(line)
-            else:
+            elif "query" in line:
                 recording.queries[line.pop("query")] = line
+            else:
+                recording.verdicts[line.pop("verdict")] = line
         return recording
 
 
