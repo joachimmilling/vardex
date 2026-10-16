@@ -5,7 +5,7 @@ import sys
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 
@@ -18,7 +18,7 @@ from vardex.extraction import ExtractionError, build_request, extract, load_extr
 from vardex.ingest import http_client
 from vardex.llm import Answer, Conversation, Effort, Ledger, Message, ModelClient, ModelError
 from vardex.llm import ask as ask_model
-from vardex.packs import PackError, load_pack
+from vardex.packs import Language, PackError, load_pack
 from vardex.postgres_warehouse import PostgresWarehouse
 from vardex.pricing import (
     PRICES,
@@ -635,6 +635,75 @@ def eval_command(
     ]
     if any(failed):
         raise typer.Exit(code=1)
+
+
+@app.command(name="add-case")
+def add_case_command(
+    pack: PackArgument,
+    suite: Annotated[str, typer.Argument(help="The suite to add to, such as answer.")],
+    question: Annotated[str, typer.Argument(help="The question, as a person asked it.")],
+    type_: Annotated[str, typer.Option("--type", help="The case's type, such as lookup.")],
+    language: Annotated[Language, typer.Option(help="The question's language.")] = "en",
+    expect: Annotated[
+        Literal["clarify", "refuse"] | None,
+        typer.Option(help="Add a case that must be asked back or refused; nothing is run."),
+    ] = None,
+    warehouse: WarehouseOption = None,
+    model: ModelOption = None,
+) -> None:
+    """Add a case to a golden set. Without --expect, the question is answered live and the
+    case is added, with the SQL as its reference, only when you confirm the answer is right."""
+    settings = settings_for(model)
+    try:
+        knowledge = load_knowledge(pack)
+        suites = evals.load_suites(pack)
+    except PackError as err:
+        raise fail(str(err)) from err
+    if suite not in suites:
+        raise fail(f"No suite {suite} in {pack}. Known: {', '.join(suites) or 'none'}")
+    taken = {case.id for case in suites[suite].cases}
+    sql = None
+    if expect is None:
+        if not interactive():
+            raise fail("Confirming an answer needs a keyboard. Nothing was added.")
+        try:
+            connection = connect_warehouse(warehouse, pack, settings)
+        except (PackError, QueryError) as err:
+            raise fail(str(err)) from err
+        try:
+            reply = text_to_sql.answer(
+                connect(settings), connection, knowledge, question, today=suites[suite].today
+            )
+        except (ModelError, QueryError, AnswerError) as err:
+            raise fail(str(err)) from err
+        finally:
+            connection.close()
+        if reply.kind != "answer" or reply.result is None:
+            raise fail(f"Vardex did not answer ({reply.kind}): {reply.text}")
+        typer.echo(reply.text)
+        show_sources(reply.result, reply.figures)
+        if not typer.confirm("\nIs this answer right?", default=False):
+            typer.echo("Nothing was added.")
+            return
+        sql = reply.result.sql
+    try:
+        case = evals.Case(
+            id=evals.new_case_id(question, taken),
+            type=type_,
+            language=language,
+            question=question,
+            expect=expect or "answer",
+            sql=sql,
+        )
+        evals.add_case(pack / "evals" / f"{suite}.yaml", case, knowledge)
+    except (ValueError, PackError) as err:
+        raise fail(str(err)) from err
+    typer.secho(f"Added case {case.id} to {suite}.", fg=typer.colors.GREEN)
+    typer.secho(
+        f"The suite changed: record it again with vardex eval {pack} {suite} --record",
+        fg="yellow",
+        err=True,
+    )
 
 
 @app.command()

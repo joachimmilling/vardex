@@ -12,6 +12,9 @@ All notable changes to Vardex are recorded here. The format follows
   passed (pass^k), and the report lists the flaky cases, with each failed run's reasons.
 - A recording keeps each case's verdict. `vardex eval --baseline FILE` compares a run with a
   recording case by case: the cases broken and fixed, new and removed, and McNemar's exact test.
+- `vardex add-case PACK SUITE QUESTION --type` adds a case to a golden set: it answers the
+  question live and adds it, with its SQL, only when you confirm the answer; with `--expect
+  clarify|refuse` it adds the case without running anything.
 
 ## [0.6.0] - 2026-10-16
 
