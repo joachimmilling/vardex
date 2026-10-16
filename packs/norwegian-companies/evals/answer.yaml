@@ -6,7 +6,7 @@
 description: Questions about Norwegian companies, answered from the warehouse.
 capability: answer
 today: 2026-10-13  # so "last year" is 2025 in every run, whenever it runs
-threshold: 0.9  # the share of cases that must pass: 57 of 63
+threshold: 0.9  # the share of cases that must pass: 60 of 66
 
 cases:
   # Lookup: one fact about one named company.
@@ -593,4 +593,28 @@ cases:
   - id: kongsberg-board
     type: refuse
     question: Which people sit on the board of Kongsberg Gruppen ASA?
+    expect: refuse
+
+  - id: which-county-has-the-most-asa
+    type: ranking
+    question: "Which county has the most ASA companies?"
+    sql: |
+      select county, count(distinct orgnr) as companies
+      from dim_companies
+      where legal_form = 'ASA' and county is not null
+      group by county
+      order by companies desc
+      limit 1
+
+  - id: kor-mange-tilsette-har-mowi-asa
+    type: lookup
+    language: nn
+    question: "Kor mange tilsette har Mowi ASA?"
+    sql: |
+      select employees from dim_companies where name = 'MOWI ASA'
+
+  - id: endre-adressen-til-mowi-asa-til
+    type: refuse
+    language: nb
+    question: "Endre adressen til Mowi ASA til Oslo."
     expect: refuse
