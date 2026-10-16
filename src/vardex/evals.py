@@ -25,6 +25,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from vardex import text_to_sql
+from vardex.extraction import ExtractionError, ExtractionSpec, extract
 from vardex.llm import Answer, Effort, Ledger, Message, ModelClient, ModelError, Request
 from vardex.packs import Language, PackError, read_yaml
 from vardex.prompts import JUDGE
@@ -32,7 +33,7 @@ from vardex.semantic import Knowledge
 from vardex.sql import QueryError, Result, Warehouse, check_sql, is_number, transpile
 
 Expect = Literal["answer", "clarify", "refuse"]
-Kind = Literal["answer", "clarify", "refuse", "error"]
+Kind = Literal["answer", "clarify", "refuse", "values", "problem", "error"]
 Z = 1.96  # for a 95% interval
 SLUG = r"^[a-z0-9]+(-[a-z0-9]+)*$"
 
@@ -77,6 +78,49 @@ class Suite(BaseModel):
         return self
 
 
+class ExtractionCase(BaseModel):
+    """One document in a golden set for extraction, and what a right extraction gives."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=SLUG)
+    type: str = Field(pattern=SLUG)
+    language: Language = "en"
+    document: str  # a file in the pack's evals/documents/
+    expect: Literal["values", "problem"] = "values"
+    values: dict[str, Any] = {}  # the fields to grade; a field left out is not graded
+    critical: bool = False
+
+    @model_validator(mode="after")
+    def values_with_values_only(self) -> "ExtractionCase":
+        if (self.expect == "values") != bool(self.values):
+            raise ValueError("a case expecting values needs values, and no other case takes them")
+        return self
+
+    @property
+    def question(self) -> str:
+        return f"extract from {self.document}"
+
+
+class ExtractionSuite(BaseModel):
+    """The contents of evals/<suite>.yaml in a pack, for an extraction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str
+    capability: Literal["extract"]
+    extraction: str  # the name of an extraction in the pack's extractions/
+    threshold: float = Field(ge=0, le=1)
+    cases: list[ExtractionCase] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def ids_are_unique(self) -> "ExtractionSuite":
+        ids = [case.id for case in self.cases]
+        if len(ids) != len(set(ids)):
+            raise ValueError("every case needs its own id")
+        return self
+
+
 @dataclass(frozen=True)
 class Outcome:
     """What the capability did with one case."""
@@ -85,6 +129,7 @@ class Outcome:
     text: str  # the answer, the question back, the reason for refusing, or the error
     result: Result | None  # the query that ran, if any
     answers: list[Answer]
+    values: dict[str, Any] | None = None  # what an extraction gave
 
 
 @dataclass(frozen=True)
@@ -95,12 +140,14 @@ class Grade:
     answers: list[Answer] = field(default_factory=list)  # a model grader's own calls
 
 
-Grader = Callable[[Case, Outcome, Result | None], Grade | None]
+AnyCase = Case | ExtractionCase
+AnySuite = Suite | ExtractionSuite
+Grader = Callable[[AnyCase, Outcome, Result | None], Grade | None]
 
 
 @dataclass(frozen=True)
 class CaseResult:
-    case: Case
+    case: AnyCase
     outcome: Outcome
     grades: list[Grade]
 
@@ -145,7 +192,7 @@ class Report:
             runs.setdefault(result.case.id, []).append(result)
         return list(runs.values())
 
-    def by(self, key: Callable[[Case], str]) -> list[Tally]:
+    def by(self, key: Callable[[AnyCase], str]) -> list[Tally]:
         """One tally per group of cases, in the order the groups first appear."""
         groups: dict[str, list[list[CaseResult]]] = {}
         for runs in self.cases:
@@ -204,10 +251,15 @@ def wilson(passed: int, cases: int, z: float = Z) -> tuple[float, float]:
     return max(0.0, centre - spread), min(1.0, centre + spread)
 
 
-def load_suites(pack: Path) -> dict[str, Suite]:
-    """Every suite in the pack's evals/ folder, by name."""
-    paths = sorted((pack / "evals").glob("*.yaml"))
-    return {path.stem: read_yaml(path, Suite, "eval suite") for path in paths}
+def load_suites(pack: Path) -> dict[str, AnySuite]:
+    """Every suite in the pack's evals/ folder, by name: for answering questions, or for an
+    extraction when its capability says extract."""
+    suites: dict[str, AnySuite] = {}
+    for path in sorted((pack / "evals").glob("*.yaml")):
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        kind = ExtractionSuite if data.get("capability") == "extract" else Suite
+        suites[path.stem] = read_yaml(path, kind, "eval suite")
+    return suites
 
 
 def recording_path(pack: Path, suite: str) -> Path:
@@ -279,8 +331,9 @@ def compare(reference: Result, result: Result, ordered: bool) -> str | None:
     return "the right values, but not in the same rows"
 
 
-def grade_behaviour(case: Case, outcome: Outcome, reference: Result | None) -> Grade:
-    """Did it do what the case expects: answer, ask back or refuse?"""
+def grade_behaviour(case: AnyCase, outcome: Outcome, reference: Result | None) -> Grade:
+    """Did it do what the case expects: answer, ask back or refuse; give values or report a
+    problem?"""
     if outcome.kind == case.expect:
         return Grade("behaviour", True)
     got = "no answer" if outcome.kind == "error" else f"{outcome.kind}"
@@ -371,11 +424,71 @@ def answer_case(
     return CaseResult(case, outcome, grades)
 
 
+def same(got: Any, want: Any) -> bool:
+    """An extracted value against the expected one: numbers as exact decimals, so 842.6 from
+    YAML equals Decimal("842.6"); anything else as it is."""
+    if is_number(got) and is_number(want):
+        return Decimal(str(got)) == Decimal(str(want))
+    return got == want
+
+
+def grade_fields(case: AnyCase, outcome: Outcome, reference: Result | None) -> Grade | None:
+    """Did the extraction give the expected value for every field the case names?"""
+    if not isinstance(case, ExtractionCase) or outcome.values is None:
+        return None
+    wrong = [
+        f"{name} is {outcome.values.get(name)!r}, expected {want!r}"
+        for name, want in case.values.items()
+        if not same(outcome.values.get(name), want)
+    ]
+    return Grade("fields", not wrong, "; ".join(wrong))
+
+
+def check_extraction_suite(suite: ExtractionSuite, spec: ExtractionSpec, pack: Path) -> list[str]:
+    """Everything that makes an extraction suite unfit: a missing document, a field the
+    extraction does not have, or a document the model is shown as an example."""
+    examples = {words(example.document) for example in spec.examples}
+    problems = []
+    for case in suite.cases:
+        path = pack / "evals" / "documents" / case.document
+        if not path.is_file():
+            problems.append(f"case {case.id}: no document {path}")
+        elif words(path.read_text(encoding="utf-8")) in examples:
+            problems.append(f"case {case.id}: the document is also an example in the extraction")
+        for name in sorted(set(case.values) - set(spec.fields)):
+            problems.append(f"case {case.id}: the extraction has no field {name}")
+    return problems
+
+
+def extract_case(
+    client: ModelClient,
+    pack: Path,
+    spec: ExtractionSpec,
+    case: ExtractionCase,
+    graders: list[Grader],
+) -> CaseResult:
+    """Run one document through the extraction, exactly as vardex extract would, and grade it."""
+    document = (pack / "evals" / "documents" / case.document).read_text(encoding="utf-8")
+    ledger = Ledger(client)
+    try:
+        extraction = extract(ledger, spec, document)
+        text = json.dumps(extraction.values, default=str, ensure_ascii=False)
+        outcome = Outcome("values", text, None, extraction.answers, extraction.values)
+    except ExtractionError as err:
+        outcome = Outcome("problem" if err.reported else "error", str(err), None, err.answers)
+    except ModelError as err:
+        if not err.retryable:
+            raise  # every case would fail the same way, so stop the run
+        outcome = Outcome("error", str(err), None, ledger.answers)
+    grades = [grade for grader in graders if (grade := grader(case, outcome, None))]
+    return CaseResult(case, outcome, grades)
+
+
 def run(
     name: str,
-    suite: Suite,
+    suite: AnySuite,
     model: str,
-    run_case: Callable[[Case], CaseResult],
+    run_case: Callable[[AnyCase], CaseResult],
     *,
     only: list[str] | None = None,
     repeat: int = 1,

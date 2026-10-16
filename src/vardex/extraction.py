@@ -110,9 +110,12 @@ class Extraction:
 class ExtractionError(Exception):
     """Raised when a document gives no usable values. The message says why."""
 
-    def __init__(self, reason: str, answers: list[Answer] | None = None) -> None:
+    def __init__(
+        self, reason: str, answers: list[Answer] | None = None, reported: bool = False
+    ) -> None:
         super().__init__(reason)
         self.answers = answers or []  # so the calls can still be logged and paid for
+        self.reported = reported  # the model itself said the document cannot be used
 
 
 def load_extraction(pack: Path, name: str) -> ExtractionSpec:
@@ -213,7 +216,7 @@ def extract(
         if not problems:
             return Extraction(values=values or {}, answers=answers)
         if values and values["problem"]:
-            break
+            raise ExtractionError("; ".join(problems), answers, reported=True)
         request = replace(
             request,
             messages=[

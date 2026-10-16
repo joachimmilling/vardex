@@ -15,6 +15,11 @@ All notable changes to Vardex are recorded here. The format follows
 - `vardex add-case PACK SUITE QUESTION --type` adds a case to a golden set: it answers the
   question live and adds it, with its SQL, only when you confirm the answer; with `--expect
   clarify|refuse` it adds the case without running anything.
+- Suites with `capability: extract` measure an extraction: cases name a document in the
+  pack's `evals/documents/` and the values a right extraction gives, or `expect: problem`,
+  graded in code by `behaviour` and `fields`. The norwegian-companies pack has `key-figures`,
+  with ten pages. `ExtractionError.reported` tells a problem the model reported from a failed
+  check.
 
 ## [0.6.0] - 2026-10-16
 
