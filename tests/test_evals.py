@@ -20,10 +20,14 @@ from vardex.evals import (
     Suite,
     answer_case,
     check_suite,
+    compare_runs,
+    format_comparison,
     format_report,
     grade_behaviour,
     grade_rows,
+    mcnemar,
     run,
+    verdicts,
     wilson,
 )
 from vardex.llm import ModelError
@@ -295,3 +299,39 @@ def test_run_repeats_each_case_in_a_row():
 
     run("answer", suite(MARGIN, REFUSE), "m", run_case, repeat=2)
     assert seen == ["best-margin", "best-margin", "delete", "delete"]
+
+
+def test_mcnemar_is_exact_for_a_few_changed_cases():
+    assert mcnemar(0, 0) == 1.0
+    assert mcnemar(3, 0) == 0.25  # 2 × (1/2)³
+    assert mcnemar(1, 1) == 1.0
+    assert round(mcnemar(8, 1), 4) == 0.0391  # 2 × (1 + 9) / 512
+
+
+def test_a_run_is_compared_with_an_earlier_one_case_by_case():
+    other = {**MARGIN, "id": "other"}
+    now = report((MARGIN, False), (REFUSE, True), (other, True))
+    changes = compare_runs({"best-margin": True, "delete": False, "gone": True}, now)
+    assert (changes.broken, changes.fixed, changes.new, changes.removed) == (
+        ["best-margin"],
+        ["delete"],
+        ["other"],
+        ["gone"],
+    )
+    assert format_comparison(changes).splitlines() == [
+        "Broken since the baseline: 1",
+        "  best-margin",
+        "Fixed since the baseline: 1",
+        "  delete",
+        "New since the baseline: 1",
+        "  other",
+        "Removed since the baseline: 1",
+        "  gone",
+        "McNemar's exact test: p = 1",
+    ]
+
+
+def test_verdicts_keep_every_grade_of_every_run():
+    kept = verdicts(report((MARGIN, True), (MARGIN, False)))
+    assert kept["best-margin"]["passed"] is False
+    assert [g["run"] for g in kept["best-margin"]["grades"]] == [1, 2]

@@ -493,6 +493,7 @@ def eval_suite(
     replay_run: bool,
     details: bool,
     repeat: int = 1,
+    baseline: Path | None = None,
 ) -> bool:
     """Run one suite and print its report. True when it fails its gate."""
     problems = evals.check_suite(suite, knowledge)
@@ -534,12 +535,19 @@ def eval_suite(
     finally:
         connection.close()
     if record_run and recording:
+        recording.verdicts = evals.verdicts(report)
         recording.save(evals.recording_path(pack, name))
 
     source = f", replayed from the recording of {recording.recorded_on}" if replay_run else ""
     times = f", {repeat} runs each" if repeat > 1 else ""
     typer.echo(f"\n{name}: {len(report.cases)} cases{times} on {report.model}{source}\n")
     typer.echo(evals.format_report(report, details))
+    if baseline:
+        before = Recording.load(baseline).verdicts
+        if not before:
+            raise fail(f"{baseline} holds no verdicts: record it again with this version.")
+        verdicts = {case: verdict["passed"] for case, verdict in before.items()}
+        typer.echo("\n" + evals.format_comparison(evals.compare_runs(verdicts, report)))
     calls = sum(len(result.answers) for result in report.results)
     cost = format_usd(report.cost_usd) if report.cost_usd is not None else "cost unknown"
     paid = " when it was recorded" if replay_run else ""
@@ -587,6 +595,10 @@ def eval_command(
         typer.Option("--details", help="Show each failure's question, SQL and reply."),
     ] = False,
     repeat: Annotated[int, typer.Option(min=1, max=10, help="Run every case this many times.")] = 1,
+    baseline: Annotated[
+        Path | None,
+        typer.Option(help="A recording to compare with, case by case.", exists=True),
+    ] = None,
 ) -> None:
     """Run the pack's golden sets and report how often Vardex gets them right. Exits with 1
     when a suite falls below its threshold or a critical case fails."""
@@ -617,6 +629,7 @@ def eval_command(
             replay_run=replay_run,
             details=details,
             repeat=repeat,
+            baseline=baseline,
         )
         for name in names
     ]

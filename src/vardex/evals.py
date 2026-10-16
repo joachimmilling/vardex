@@ -397,6 +397,73 @@ def run(
     return Report(name, model, results)
 
 
+def verdicts(report: Report) -> dict[str, dict[str, Any]]:
+    """Each case's verdict, to keep with a recording: whether it passed, and every grade of
+    every run."""
+    return {
+        runs[0].case.id: {
+            "passed": all(result.passed for result in runs),
+            "grades": [
+                {"run": number, "grader": g.grader, "passed": g.passed, "reason": g.reason}
+                for number, result in enumerate(runs, start=1)
+                for g in result.grades
+            ],
+        }
+        for runs in report.cases
+    }
+
+
+@dataclass(frozen=True)
+class Comparison:
+    """How a run differs from an earlier one, case by case."""
+
+    broken: list[str]  # passed before, fail now
+    fixed: list[str]  # failed before, pass now
+    new: list[str]  # not in the earlier run
+    removed: list[str]  # only in the earlier run
+
+    @property
+    def p_value(self) -> float:
+        return mcnemar(len(self.broken), len(self.fixed))
+
+
+def compare_runs(before: dict[str, bool], report: Report) -> Comparison:
+    """The cases that changed between an earlier run's verdicts and this report."""
+    now = {runs[0].case.id: all(r.passed for r in runs) for runs in report.cases}
+    both = [case for case in now if case in before]
+    return Comparison(
+        broken=[case for case in both if before[case] and not now[case]],
+        fixed=[case for case in both if not before[case] and now[case]],
+        new=[case for case in now if case not in before],
+        removed=[case for case in before if case not in now],
+    )
+
+
+def mcnemar(broken: int, fixed: int) -> float:
+    """McNemar's exact test: the chance of a split at least this lopsided between cases that
+    broke and cases that were fixed, if the change made no difference and each changed case
+    went either way with even odds."""
+    changed = broken + fixed
+    if changed == 0:
+        return 1.0
+    tail = sum(math.comb(changed, k) for k in range(min(broken, fixed) + 1))
+    return min(1.0, 2 * tail / 2**changed)
+
+
+def format_comparison(comparison: Comparison) -> str:
+    lines = []
+    for title, cases in [
+        ("Broken", comparison.broken),
+        ("Fixed", comparison.fixed),
+        ("New", comparison.new),
+        ("Removed", comparison.removed),
+    ]:
+        lines.append(f"{title} since the baseline: {len(cases)}")
+        lines += [f"  {case}" for case in cases]
+    lines.append(f"McNemar's exact test: p = {comparison.p_value:.2g}")
+    return "\n".join(lines)
+
+
 def format_report(report: Report, details: bool = False) -> str:
     """The report as text: the rate by type, by language and in all, then every failure and
     every flaky case. With details, each failure also shows its question, the SQL that ran and

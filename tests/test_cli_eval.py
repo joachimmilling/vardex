@@ -186,3 +186,26 @@ def test_repeated_runs_record_and_replay_and_name_the_flaky(pack, monkeypatch):
     replayed = evaluate(pack, "--replay", "--repeat", "2")
     assert "Flaky\n  best-margin: passed 1 of 2" in replayed.output
     assert evaluate(pack, "--replay", "--repeat", "3").exit_code == 1  # a third run was never made
+
+
+def test_a_run_is_compared_with_a_baseline_recording(pack, monkeypatch):
+    live(pack, monkeypatch, plan(), "Demo Laks AS: 23.6%.", VERDICT, REFUSAL, record=True)
+    path = pack / "evals" / "recordings" / "answer.jsonl"
+    baseline = pack.parent / "baseline.jsonl"
+    before = '"verdict": "delete", "passed": true'
+    baseline.write_text(path.read_text().replace(before, before.replace("true", "false")))
+    result = evaluate(pack, "--replay", "--baseline", str(baseline))
+    assert result.exit_code == 0, result.output
+    assert "Fixed since the baseline: 1\n  delete" in result.output
+    assert "McNemar's exact test: p = 1" in result.output
+
+
+def test_a_baseline_without_verdicts_must_be_recorded_again(pack, monkeypatch):
+    live(pack, monkeypatch, plan(), "Demo Laks AS: 23.6%.", VERDICT, REFUSAL, record=True)
+    path = pack / "evals" / "recordings" / "answer.jsonl"
+    old = pack.parent / "old.jsonl"
+    lines = [line for line in path.read_text().splitlines() if '"verdict"' not in line]
+    old.write_text("\n".join(lines) + "\n")
+    result = evaluate(pack, "--replay", "--baseline", str(old))
+    assert result.exit_code == 1
+    assert "holds no verdicts" in result.output
