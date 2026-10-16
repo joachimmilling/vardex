@@ -1,0 +1,596 @@
+# The golden set for vardex answer: questions people ask about Norwegian companies, each with
+# either the SQL that answers it, checked by hand against the warehouse, or what Vardex should
+# do instead: ask a question back, or refuse. The SQL selects only the columns the answer needs;
+# a query that selects more still passes. No question here may also be an example in
+# questions.yaml: a case the model has seen measures nothing.
+description: Questions about Norwegian companies, answered from the warehouse.
+capability: answer
+today: 2026-10-13  # so "last year" is 2025 in every run, whenever it runs
+threshold: 0.9  # the share of cases that must pass: 57 of 63
+
+cases:
+  # Lookup: one fact about one named company.
+  - id: equinor-employees
+    type: lookup
+    question: How many employees does Equinor ASA have?
+    sql: select employees from dim_companies where name = 'EQUINOR ASA'
+
+  - id: posten-ansatte
+    type: lookup
+    language: nb
+    question: Hvor mange ansatte har Posten Bring AS?
+    sql: select employees from dim_companies where name = 'POSTEN BRING AS'
+
+  - id: mowi-municipality
+    type: lookup
+    question: In which municipality does Mowi ASA have its business address?
+    sql: select municipality from dim_companies where name = 'MOWI ASA'
+
+  - id: hydro-group-revenue-2024
+    type: lookup
+    question: What was Norsk Hydro's group revenue in 2024?
+    sql: |
+      select a.revenue
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'Norsk Hydro ASA' and a.accounts_type = 'group' and a.fiscal_year = 2024
+
+  - id: kongsberg-stiftet
+    type: lookup
+    language: nb
+    question: Når ble Kongsberg Gruppen ASA stiftet?
+    sql: select founded_on from dim_companies where name = 'KONGSBERG GRUPPEN ASA'
+
+  - id: equinor-own-operating-profit-2025
+    type: lookup
+    question: What was Equinor ASA's operating profit in 2025 in its own accounts, not the group's?
+    sql: |
+      select a.operating_profit
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'EQUINOR ASA' and a.accounts_type = 'company' and a.fiscal_year = 2025
+
+  - id: aker-bp-county
+    type: lookup
+    question: In which county is Aker BP ASA registered?
+    sql: select county from dim_companies where name = 'AKER BP ASA'
+
+  - id: dnb-bank-revenue-2025
+    type: lookup
+    question: What was DNB Bank's revenue in 2025?
+    sql: |
+      select a.revenue
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'DNB BANK ASA' and a.fiscal_year = 2025
+
+  - id: equinor-revenue-2022
+    type: lookup
+    question: What was the Equinor group's revenue in 2022?
+    sql: |
+      select a.revenue
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'EQUINOR ASA' and a.accounts_type = 'group' and a.fiscal_year = 2022
+
+  # Count: how many companies match a few conditions.
+  - id: vestland-companies
+    type: count
+    question: How many limited companies are there in Vestland?
+    sql: |
+      select count(*) from dim_companies
+      where legal_form in ('AS', 'ASA') and county = 'Vestland'
+
+  - id: trondelag-konkurs
+    type: count
+    language: nb
+    question: Hvor mange selskaper i Trøndelag er konkurs?
+    sql: |
+      select count(*) from dim_companies
+      where legal_form in ('AS', 'ASA') and county = 'Trøndelag' and is_bankrupt
+
+  - id: nordland-sole-proprietorships
+    type: count
+    question: How many sole proprietorships are there in Nordland?
+    sql: select count(*) from dim_companies where legal_form = 'ENK' and county = 'Nordland'
+
+  - id: rogaland-asa
+    type: count
+    question: How many public limited companies (ASA) are registered in Rogaland?
+    sql: select count(*) from dim_companies where legal_form = 'ASA' and county = 'Rogaland'
+
+  - id: stiftet-2025
+    type: count
+    language: nb
+    question: Hvor mange aksjeselskaper og allmennaksjeselskaper ble stiftet i 2025?
+    sql: |
+      select count(*) from dim_companies
+      where legal_form in ('AS', 'ASA')
+        and founded_on >= date '2025-01-01' and founded_on < date '2026-01-01'
+
+  - id: thousand-employees
+    type: count
+    question: How many limited companies have at least 1,000 employees?
+    sql: |
+      select count(*) from dim_companies
+      where legal_form in ('AS', 'ASA') and employees >= 1000
+
+  - id: oslo-wound-up
+    type: count
+    question: How many limited companies in Oslo are being wound up?
+    sql: |
+      select count(*) from dim_companies
+      where legal_form in ('AS', 'ASA') and county = 'Oslo' and is_being_wound_up
+
+  - id: groups-operating-loss-2025
+    type: count
+    question: How many groups had an operating loss in 2025?
+    sql: |
+      select count(*) from fct_accounts
+      where accounts_type = 'group' and fiscal_year = 2025 and operating_profit < 0
+
+  - id: bergen-founded-this-year
+    type: count
+    question: How many limited companies in Bergen have been founded this year?
+    sql: |
+      select count(*) from dim_companies
+      where legal_form in ('AS', 'ASA') and municipality = 'BERGEN'
+        and founded_on >= date '2026-01-01'
+
+  - id: foreign-currency-groups-2025
+    type: count
+    question: How many groups filed their 2025 accounts in a currency other than NOK?
+    sql: |
+      select count(*) from fct_accounts
+      where accounts_type = 'group' and fiscal_year = 2025 and currency <> 'NOK'
+
+  - id: not-december-2025
+    type: count
+    question: How many companies had a fiscal year 2025 that did not end on 31 December?
+    sql: |
+      select count(distinct orgnr) from fct_accounts
+      where fiscal_year = 2025 and period_end <> date '2025-12-31'
+
+  # Ranking: the top or bottom few, in order.
+  - id: most-employees
+    type: ranking
+    question: Which five limited companies have the most employees?
+    ordered: true
+    sql: |
+      select name, employees from dim_companies
+      where legal_form in ('AS', 'ASA')
+      order by employees desc nulls last
+      limit 5
+
+  - id: storste-konsern-2025
+    type: ranking
+    language: nb
+    question: Hvilke tre konsern hadde størst omsetning i 2025?
+    ordered: true
+    sql: |
+      select c.name
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'group' and a.fiscal_year = 2025
+      order by a.revenue_nok desc nulls last
+      limit 3
+
+  - id: fewest-companies-counties
+    type: ranking
+    question: Which three counties have the fewest limited companies?
+    ordered: true
+    sql: |
+      select county, count(*) as companies
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and county is not null
+      group by county
+      order by companies
+      limit 3
+
+  - id: largest-seafood-company-2025
+    type: ranking
+    question: Which seafood company had the highest revenue last year, in its own accounts?
+    ordered: true
+    sql: |
+      select c.name
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      left join dim_industries as i on i.industry_code = c.industry_code
+      where a.accounts_type = 'company' and a.fiscal_year = 2025
+        and (i.division_code = '03' or c.industry_code like '10.20%'
+             or c.industry_code = '46.322')
+      order by a.revenue_nok desc nulls last
+      limit 1
+
+  - id: vestland-flest-ansatte
+    type: ranking
+    language: nb
+    question: Hvilket selskap i Vestland har flest ansatte?
+    ordered: true
+    sql: |
+      select name from dim_companies
+      where legal_form in ('AS', 'ASA') and county = 'Vestland'
+      order by employees desc nulls last
+      limit 1
+
+  - id: agder-top-revenue-2025
+    type: ranking
+    question: Which five companies in Agder had the highest revenue in 2025, in their own accounts?
+    ordered: true
+    sql: |
+      select c.name
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'company' and a.fiscal_year = 2025 and c.county = 'Agder'
+      order by a.revenue_nok desc nulls last
+      limit 5
+
+  - id: section-most-companies
+    type: ranking
+    question: Which industry section has the most limited companies?
+    ordered: true
+    sql: |
+      select i.section
+      from dim_companies as c
+      join dim_industries as i on i.industry_code = c.industry_code
+      where c.legal_form in ('AS', 'ASA')
+      group by i.section
+      order by count(*) desc
+      limit 1
+
+  - id: municipalities-most-companies
+    type: ranking
+    question: Which five municipalities have the most limited companies?
+    ordered: true
+    sql: |
+      select municipality, count(*) as companies
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and municipality is not null
+      group by municipality
+      order by companies desc
+      limit 5
+
+  - id: seafood-best-margins-2025
+    type: ranking
+    question: >
+      Among seafood companies with at least NOK 1 billion in revenue in 2025, which three had
+      the highest operating margin in their own accounts?
+    ordered: true
+    sql: |
+      select c.name
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      left join dim_industries as i on i.industry_code = c.industry_code
+      where a.accounts_type = 'company' and a.fiscal_year = 2025
+        and a.revenue_nok >= 1000000000
+        and (i.division_code = '03' or c.industry_code like '10.20%'
+             or c.industry_code = '46.322')
+      order by a.operating_profit / nullif(a.revenue, 0) desc nulls last
+      limit 3
+
+  # Metric: a ratio or total the pack defines in metrics.yaml.
+  - id: mowi-margin-2025
+    type: metric
+    question: What was Mowi's operating margin in 2025, for the group?
+    sql: |
+      select a.operating_profit / nullif(a.revenue, 0) as operating_margin
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'MOWI ASA' and a.accounts_type = 'group' and a.fiscal_year = 2025
+
+  - id: equinor-egenkapitalandel-2025
+    type: metric
+    language: nb
+    question: Hva var egenkapitalandelen i Equinor-konsernet i 2025?
+    sql: |
+      select a.equity / nullif(a.total_assets, 0) as equity_ratio
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'EQUINOR ASA' and a.accounts_type = 'group' and a.fiscal_year = 2025
+
+  - id: seafood-margin-2024
+    type: metric
+    question: >
+      What was the operating margin of all seafood companies together in 2024, from their own
+      accounts?
+    sql: |
+      select sum(a.operating_profit_nok) / nullif(sum(a.revenue_nok), 0) as operating_margin
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      left join dim_industries as i on i.industry_code = c.industry_code
+      where a.accounts_type = 'company' and a.fiscal_year = 2024
+        and (i.division_code = '03' or c.industry_code like '10.20%'
+             or c.industry_code = '46.322')
+
+  - id: big-groups-best-margin-2025
+    type: metric
+    question: >
+      Of the groups with more than NOK 50 billion in revenue in 2025, which had the highest
+      operating margin?
+    ordered: true
+    sql: |
+      select c.name
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'group' and a.fiscal_year = 2025 and a.revenue_nok > 50000000000
+      order by a.operating_profit / nullif(a.revenue, 0) desc nulls last
+      limit 1
+
+  - id: rogaland-omsetning-2024
+    type: metric
+    language: nb
+    question: >
+      Hva var samlet omsetning i NOK for selskapene i Rogaland i 2024, ifølge selskapenes egne
+      regnskap?
+    sql: |
+      select sum(a.revenue_nok)
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'company' and a.fiscal_year = 2024 and c.county = 'Rogaland'
+
+  - id: oslo-net-profit-2025
+    type: metric
+    question: >
+      What was the total profit after tax, in NOK, of the companies in Oslo in 2025, from their
+      own accounts?
+    sql: |
+      select sum(a.net_profit_nok)
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'company' and a.fiscal_year = 2025 and c.county = 'Oslo'
+
+  - id: equinor-profit-share-2025
+    type: metric
+    question: What share of the Equinor group's revenue in 2025 was operating profit?
+    sql: |
+      select a.operating_profit / nullif(a.revenue, 0) as operating_margin
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'EQUINOR ASA' and a.accounts_type = 'group' and a.fiscal_year = 2025
+
+  - id: county-margins-2025
+    type: metric
+    question: >
+      Which three counties had the highest combined operating margin in 2025, counting the
+      companies' own accounts?
+    ordered: true
+    sql: |
+      select c.county
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'company' and a.fiscal_year = 2025
+      group by c.county
+      order by sum(a.operating_profit_nok) / nullif(sum(a.revenue_nok), 0) desc nulls last
+      limit 3
+
+  - id: konkursandel-fylke
+    type: metric
+    language: nb
+    question: Hvilket fylke har høyest andel selskaper som er konkurs?
+    ordered: true
+    sql: |
+      select county
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and county is not null
+      group by county
+      order by avg(case when is_bankrupt then 1.0 else 0.0 end) desc
+      limit 1
+
+  # Trend: a change between years, computed in SQL.
+  - id: equinor-revenue-change
+    type: trend
+    question: By how much did the Equinor group's revenue in USD change from 2023 to 2025?
+    sql: |
+      select sum(case when a.fiscal_year = 2025 then a.revenue end)
+             - sum(case when a.fiscal_year = 2023 then a.revenue end) as change
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'EQUINOR ASA' and a.accounts_type = 'group'
+
+  - id: mowi-driftsresultat-endring
+    type: trend
+    language: nb
+    question: Hvor mye endret driftsresultatet til Mowi-konsernet seg fra 2024 til 2025?
+    sql: |
+      select sum(case when a.fiscal_year = 2025 then a.operating_profit end)
+             - sum(case when a.fiscal_year = 2024 then a.operating_profit end) as change
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'MOWI ASA' and a.accounts_type = 'group'
+
+  - id: accounts-per-year
+    type: trend
+    question: >
+      How many companies have their own accounts in the warehouse for each fiscal year from
+      2023 to 2025?
+    sql: |
+      select fiscal_year, count(*) as companies
+      from fct_accounts
+      where accounts_type = 'company' and fiscal_year between 2023 and 2025
+      group by fiscal_year
+
+  - id: fastest-growing-nok-groups
+    type: trend
+    question: >
+      Of the groups that report in NOK, which three grew their revenue the most from 2024 to
+      2025, in percent?
+    ordered: true
+    # A short first year is not growth: a group whose 2024 covered four months would top the
+    # list. Compare full years only.
+    sql: |
+      select c.name
+      from fct_accounts as a
+      join fct_accounts as b
+        on b.orgnr = a.orgnr and b.accounts_type = 'group' and b.fiscal_year = 2025
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'group' and a.fiscal_year = 2024
+        and a.currency = 'NOK' and b.currency = 'NOK'
+        and a.period_months = 12 and b.period_months = 12
+      order by b.revenue / nullif(a.revenue, 0) desc nulls last
+      limit 3
+
+  - id: konsern-lavere-omsetning
+    type: trend
+    language: nb
+    question: >
+      Hvor mange konsern som rapporterer i NOK hadde lavere omsetning i 2025 enn i 2024?
+    sql: |
+      select count(*)
+      from fct_accounts as a
+      join fct_accounts as b
+        on b.orgnr = a.orgnr and b.accounts_type = 'group' and b.fiscal_year = 2025
+      where a.accounts_type = 'group' and a.fiscal_year = 2024
+        and a.currency = 'NOK' and b.currency = 'NOK' and b.revenue < a.revenue
+
+  - id: seafood-revenue-by-year
+    type: trend
+    question: >
+      What was the total revenue in NOK of seafood companies in each fiscal year from 2023 to
+      2025, from their own accounts?
+    sql: |
+      select a.fiscal_year, sum(a.revenue_nok) as revenue_nok
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      left join dim_industries as i on i.industry_code = c.industry_code
+      where a.accounts_type = 'company' and a.fiscal_year between 2023 and 2025
+        and (i.division_code = '03' or c.industry_code like '10.20%'
+             or c.industry_code = '46.322')
+      group by a.fiscal_year
+
+  # Industry: questions that need the industry tables or Statistics Norway.
+  - id: fishing-aquaculture-companies
+    type: industry
+    question: How many limited companies are there in fishing and aquaculture?
+    sql: |
+      select count(*)
+      from dim_companies as c
+      join dim_industries as i on i.industry_code = c.industry_code
+      where c.legal_form in ('AS', 'ASA') and i.division_code = '03'
+
+  - id: oslo-top-subclass
+    type: industry
+    question: Which industry subclass has the most limited companies in Oslo?
+    ordered: true
+    sql: |
+      select i.industry
+      from dim_companies as c
+      join dim_industries as i on i.industry_code = c.industry_code
+      where c.legal_form in ('AS', 'ASA') and c.county = 'Oslo'
+      group by i.industry
+      order by count(*) desc
+      limit 1
+
+  - id: fish-processing-turnover-2023
+    type: industry
+    question: >
+      What was the turnover of the whole fish processing industry in Norway in 2023, according
+      to Statistics Norway?
+    sql: |
+      select turnover_nok from fct_industry_statistics
+      where sn2007_code = '10.20' and year = 2023
+
+  - id: construction-employed-2024
+    type: industry
+    question: >
+      How many people were employed in construction in Norway in 2024, according to Statistics
+      Norway?
+    sql: select employed from fct_industry_statistics where sn2007_code = 'F' and year = 2024
+
+  - id: havbruk-over-100
+    type: industry
+    language: nb
+    question: Hvor mange aksjeselskaper innen akvakultur har mer enn 100 ansatte?
+    sql: |
+      select count(*) from dim_companies
+      where legal_form in ('AS', 'ASA') and industry_code like '03.2%' and employees > 100
+
+  - id: vestland-division-employees
+    type: industry
+    question: >
+      In Vestland, which industry division employs the most people, counting limited companies?
+    ordered: true
+    sql: |
+      select i.division
+      from dim_companies as c
+      join dim_industries as i on i.industry_code = c.industry_code
+      where c.legal_form in ('AS', 'ASA') and c.county = 'Vestland'
+      group by i.division
+      order by sum(c.employees) desc nulls last
+      limit 1
+
+  - id: vestland-manufacturing
+    type: industry
+    question: How many limited companies in Vestland are in manufacturing?
+    sql: |
+      select count(*)
+      from dim_companies as c
+      join dim_industries as i on i.industry_code = c.industry_code
+      where c.legal_form in ('AS', 'ASA') and c.county = 'Vestland' and i.section_code = 'C'
+
+  # Clarify: nothing in the pack settles a choice that changes the answer, so ask back.
+  - id: average-revenue
+    type: clarify
+    question: What is the average revenue?
+    expect: clarify
+
+  - id: how-big-equinor
+    type: clarify
+    question: How big is Equinor?
+    expect: clarify
+
+  - id: hvem-gjor-det-best
+    type: clarify
+    language: nb
+    question: Hvilke selskaper gjør det best?
+    expect: clarify
+
+  - id: compare-the-two
+    type: clarify
+    question: Compare the two companies.
+    expect: clarify
+
+  - id: revenue-of-aker
+    type: clarify
+    question: What was the revenue of Aker last year?
+    expect: clarify
+
+  - id: hva-tjente-selskapet
+    type: clarify
+    language: nb
+    question: Hvor mye tjente selskapet i fjor?
+    expect: clarify
+
+  # Refuse: the tables cannot answer, or the question asks to change data.
+  - id: delete-bankrupt
+    type: refuse
+    question: Delete all bankrupt companies from the register.
+    expect: refuse
+    critical: true  # a request to change data must always be refused
+
+  - id: set-employees
+    type: refuse
+    language: nb
+    question: Sett antall ansatte i Equinor ASA til 30 000.
+    expect: refuse
+    critical: true
+
+  - id: mowi-revenue-2027
+    type: refuse
+    question: What will Mowi's revenue be in 2027?
+    expect: refuse
+
+  - id: aksjekurs-equinor
+    type: refuse
+    language: nb
+    question: Hva er aksjekursen til Equinor i dag?
+    expect: refuse
+
+  - id: orkla-ceo
+    type: refuse
+    question: Who is the chief executive of Orkla ASA?
+    expect: refuse
+
+  - id: kongsberg-board
+    type: refuse
+    question: Which people sit on the board of Kongsberg Gruppen ASA?
+    expect: refuse

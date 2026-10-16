@@ -23,7 +23,15 @@ StopReason = Literal["end", "max_tokens", "tool_use", "refusal", "other"]
 
 
 class ModelError(Exception):
-    """Raised when a model call fails: no key, a refused request or no connection."""
+    """Raised when a model call fails: no key, a refused request or no connection.
+
+    `retryable` is True when the same request may well succeed later: the provider was
+    overloaded, limited the rate or could not be reached. False means it will fail again.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class MissingAPIKeyError(ModelError):
@@ -82,6 +90,27 @@ class ModelClient(Protocol):
     def count_tokens(self, text: str) -> int:
         """Count the tokens a text uses when sent as a question."""
         ...
+
+
+@dataclass
+class Ledger:
+    """A ModelClient that passes each request on and keeps every answer that comes back, so the
+    calls a run made are still known, and paid for, when a later call fails."""
+
+    client: ModelClient
+    answers: list[Answer] = field(default_factory=list)
+
+    @property
+    def model(self) -> str:
+        return self.client.model
+
+    def send(self, request: Request, on_text: Callable[[str], None] | None = None) -> Answer:
+        answer = self.client.send(request, on_text)
+        self.answers.append(answer)
+        return answer
+
+    def count_tokens(self, text: str) -> int:
+        return self.client.count_tokens(text)
 
 
 def ask(

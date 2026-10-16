@@ -23,6 +23,10 @@ STOP_REASONS: dict[str, StopReason] = {  # Anthropic's stop_reason → Vardex's 
     "refusal": "refusal",
 }
 
+# Statuses that say "not now" rather than "not this request": timeout, conflict, rate limit.
+# Every 5xx, including 529 (overloaded), is retryable too.
+RETRYABLE_STATUSES = (408, 409, 429)
+
 
 class AnthropicClient:
     """Sends Vardex requests to Claude, with timeouts and retries set from Settings."""
@@ -58,10 +62,11 @@ class AnthropicClient:
                     response = stream.get_final_message()
         except anthropic.APIStatusError as err:
             raise ModelError(
-                f"The API refused the request ({err.status_code}): {err.message}"
+                f"The API refused the request ({err.status_code}): {err.message}",
+                retryable=err.status_code in RETRYABLE_STATUSES or err.status_code >= 500,
             ) from err
         except anthropic.APIConnectionError as err:  # also covers timeouts
-            raise ModelError(f"Could not reach the API: {err}") from err
+            raise ModelError(f"Could not reach the API: {err}", retryable=True) from err
         seconds = time.perf_counter() - started
         return self.to_answer(response, seconds, first_text_seconds)
 

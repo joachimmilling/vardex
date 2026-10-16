@@ -56,6 +56,27 @@ def test_a_number_traces_to_its_cell_exactly_or_rounded(text, row, column):
     assert (found_row, found_column) == (row, column)
 
 
+@pytest.mark.parametrize("written", ["NOK 1,1 billioner", "NOK 1,106 billioner", "1.1 trillion"])
+def test_a_norwegian_billion_is_a_million_million(written):
+    equinor = Result("select …", ["revenue_nok"], [(Decimal("1106267934400"),)], False, "", 0.0)
+    [figure] = trace(f"Equinor ligger øverst med {written}.", [equinor], "Hvem er størst?")
+    assert figure.cells and figure.text == written.removeprefix("NOK ")
+
+
+def test_a_number_from_the_assumptions_is_traced_to_them():
+    assumptions = ["The accounts cover companies with at least 50 employees."]
+    text = "Demo Laks AS, among companies with at least 50 employees."
+    [figure] = trace(text, [RESULT], "Which company?", assumptions)
+    assert (figure.text, figure.cells, figure.in_assumptions) == ("50", [], True)
+    assert not trace(text, [RESULT], "Which company?")[0].traced
+
+
+def test_a_scaled_number_in_the_question_is_traced_to_it():
+    question = "Which groups had more than NOK 50 billion in revenue, and a margin above 7%?"
+    found = where("Two groups had more than NOK 50 billion and a margin above 7%.", question)
+    assert found == [("50 billion", False, True), ("7%", False, True)]
+
+
 def test_numbers_in_the_query_and_the_question_are_traced_too():
     assert where("In 2025, more than 200 had it.", "Who had more than 200 employees?") == [
         ("2025", True, False),

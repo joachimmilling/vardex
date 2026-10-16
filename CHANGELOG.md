@@ -6,6 +6,41 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-16
+
+### Added
+
+- `vardex eval PACK [SUITE]` runs a pack's golden sets through text-to-SQL, exactly as
+  `vardex answer` would, grades each case with code (behaviour and rows) and a model as judge,
+  and prints the pass rate by type and language with 95% Wilson intervals, every failure, the
+  answers a check sent back, and the cost. It exits with 1 when a suite falls below its
+  threshold or a critical case fails.
+- `--record` saves every model answer and query result of a run to the pack's
+  `evals/recordings/`, and `--replay` plays it back with no API key and no warehouse. A request
+  that was not recorded stops the replay.
+- `--details` shows each failure's question, SQL and reply; `--case` runs only some cases.
+- Packs may keep golden sets in `evals/<suite>.yaml`: cases with reference SQL, or that must be
+  asked back or refused, a fixed `today`, a threshold and critical cases. The
+  norwegian-companies pack has 63 cases in English and Norwegian.
+- The engine prompt `JUDGE`.
+- `ModelError.retryable` says whether the same request may work later: true for an overloaded
+  or rate-limited provider, a timeout or a lost connection. `Ledger` is a model client that
+  keeps every answer, so calls made before a failure can still be logged.
+- CI replays the evals on every push and pull request.
+- Decision records 0013 to 0016.
+
+### Changed
+
+- The trace accepts a number from the plan's assumptions, which are shown beside every answer;
+  reads the Norwegian *billioner* (10¹²); and reads numbers with a scale word in the question
+  and SQL. `ANSWER` and `ANSWER_REPAIR` name the assumptions.
+- A cache read on Claude Sonnet 5.5 costs $0.10 per million tokens, not $0.20. Prices checked
+  13 October 2026.
+- An eval case that meets a retryable model error fails instead of stopping the run.
+  `vardex answer` and `vardex extract` log the calls already made when a model error stops them.
+- norwegian-companies: `fct_accounts` leaves out companies that have left the register, so
+  every row has its company.
+
 ## [0.5.1] - 2026-10-13
 
 ### Added

@@ -3,19 +3,20 @@
 import json
 import sys
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from vardex import __version__, text_to_sql
+from vardex import __version__, evals, text_to_sql
 from vardex.anthropic_client import AnthropicClient
 from vardex.calllog import log_call
 from vardex.config import Settings, load_settings
 from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.extraction import ExtractionError, build_request, extract, load_extraction
 from vardex.ingest import http_client
-from vardex.llm import Answer, Conversation, Effort, Message, ModelClient, ModelError
+from vardex.llm import Answer, Conversation, Effort, Ledger, Message, ModelClient, ModelError
 from vardex.llm import ask as ask_model
 from vardex.packs import PackError, load_pack
 from vardex.postgres_warehouse import PostgresWarehouse
@@ -30,7 +31,15 @@ from vardex.pricing import (
     stale_prices_warning,
 )
 from vardex.provenance import Figure
-from vardex.semantic import check, load_knowledge
+from vardex.replay import (
+    NotRecorded,
+    Recording,
+    RecordingClient,
+    RecordingWarehouse,
+    ReplayClient,
+    ReplayWarehouse,
+)
+from vardex.semantic import Knowledge, check, load_knowledge
 from vardex.sql import QueryError, Result, Warehouse, format_table, format_value
 from vardex.text_to_sql import AnswerError
 from vardex.warehouse import WarehouseError, build, warehouse_path
@@ -67,11 +76,6 @@ def settings_for(model: str | None) -> Settings:
     return replace(settings, model=model) if model else settings
 
 
-def interactive() -> bool:
-    """True when a person is at the keyboard to answer a question back."""
-    return sys.stdin.isatty()
-
-
 def connect(settings: Settings) -> ModelClient:
     """The model client. This is the one place that chooses a provider."""
     return AnthropicClient(settings)
@@ -85,6 +89,11 @@ def connect_warehouse(url: str | None, pack: Path, settings: Settings) -> Wareho
         return PostgresWarehouse(url, timeout_seconds=timeout)
     path = Path(url) if url else warehouse_path(settings.data_dir, load_pack(pack).name)
     return DuckDBWarehouse(path, timeout_seconds=timeout)
+
+
+def interactive() -> bool:
+    """True when a person is at the keyboard to answer a question back."""
+    return sys.stdin.isatty()
 
 
 def warn_if_prices_are_stale() -> None:
@@ -231,15 +240,18 @@ def extract_command(
 
     failed = 0
     for file in files:
+        ledger = Ledger(client)  # the calls for this file, still logged if one fails
         try:
             result = extract(
-                client, spec, file.read_text(encoding="utf-8"), effort=effort, repairs=repairs
+                ledger, spec, file.read_text(encoding="utf-8"), effort=effort, repairs=repairs
             )
         except ExtractionError as err:
             failed += 1
             typer.secho(f"{file.name}: {err}", fg=typer.colors.RED, err=True)
             answers = err.answers
         except ModelError as err:
+            for answer in ledger.answers:
+                record(answer, stats)
             raise fail(f"{file.name}: {err}") from err
         else:
             # default=str writes amounts as exact strings, never as floats
@@ -339,7 +351,13 @@ def show_sources(result: Result, figures: list[Figure], err: bool = False) -> No
             if len(figure.cells) > 1:
                 where += f" (and {len(figure.cells) - 1} more)"
         else:
-            where = "the query" if figure.in_sql else "the question"
+            where = (
+                "the query"
+                if figure.in_sql
+                else "the question"
+                if figure.in_question
+                else "the assumptions"
+            )
         typer.echo(f"  {figure.text:<16} {where}", err=err)
 
 
@@ -375,6 +393,7 @@ def answer_command(
         connection = connect_warehouse(warehouse, pack, settings)
     except (PackError, QueryError) as err:
         raise fail(str(err)) from err
+    spent: list[Answer] = []  # the calls for the question in hand, still logged if one fails
     try:
         if show_prompt:
             request = text_to_sql.build_request(
@@ -385,8 +404,9 @@ def answer_command(
         client = connect(settings)
         earlier: list[Message] = []
         while True:
+            spent.clear()
             reply = text_to_sql.answer(
-                client,
+                Ledger(client, spent),
                 connection,
                 knowledge,
                 question,
@@ -406,6 +426,8 @@ def answer_command(
             earlier += [Message("user", question), Message("assistant", reply.answers[-1].text)]
             question = typer.prompt(">", prompt_suffix=" ")
     except (ModelError, QueryError) as err:
+        for call in spent:
+            record(call, stats)
         raise fail(str(err)) from err
     except AnswerError as err:
         for call in err.answers:
@@ -431,6 +453,169 @@ def answer_command(
         raise typer.Exit(code=2)
     else:
         typer.secho("(refused: no query was run)", fg="bright_black", err=True)
+
+
+def eval_connections(
+    pack: Path, suite: str, settings: Settings, url: str | None, record: bool, replay: bool
+) -> tuple[ModelClient, Warehouse, Recording | None]:
+    """The model and warehouse an eval runs on: live, live and recorded, or replayed."""
+    path = evals.recording_path(pack, suite)
+    if replay:
+        if not path.is_file():
+            raise PackError(f"No recording at {path}. Make one with --record.")
+        recording = Recording.load(path)
+        return ReplayClient(recording), ReplayWarehouse(recording), recording
+    connection = connect_warehouse(url, pack, settings)
+    try:
+        client = connect(settings)
+    except ModelError:
+        connection.close()
+        raise
+    if not record:
+        return client, connection, None
+    recording = Recording(
+        client.model, connection.name, connection.dialect, date.today().isoformat()
+    )
+    return RecordingClient(client, recording), RecordingWarehouse(connection, recording), recording
+
+
+def eval_suite(
+    pack: Path,
+    name: str,
+    suite: evals.Suite,
+    knowledge: Knowledge,
+    settings: Settings,
+    *,
+    warehouse: str | None,
+    effort: Effort,
+    only: list[str] | None,
+    record_run: bool,
+    replay_run: bool,
+    details: bool,
+) -> bool:
+    """Run one suite and print its report. True when it fails its gate."""
+    problems = evals.check_suite(suite, knowledge)
+    if problems:
+        raise fail(f"Suite {name} cannot be used:\n" + "\n".join(f"  {p}" for p in problems))
+    try:
+        client, connection, recording = eval_connections(
+            pack, name, settings, warehouse, record_run, replay_run
+        )
+    except (PackError, QueryError, ModelError) as err:
+        raise fail(str(err)) from err
+    graders: list[evals.Grader] = [evals.grade_behaviour, evals.grade_rows, evals.Judge(client)]
+
+    started: list[str] = []  # the ids of the cases run so far, to name one that stops the run
+
+    def run_case(case: evals.Case) -> evals.CaseResult:
+        started.append(case.id)
+        return evals.answer_case(client, connection, knowledge, suite, case, graders, effort=effort)
+
+    def show(result: evals.CaseResult) -> None:
+        mark, colour = ("ok", "green") if result.passed else ("FAIL", "red")
+        typer.secho(f"{mark:<5}{result.case.id}", fg=colour, err=True)
+        if not replay_run:
+            for call in result.answers:
+                record(call, stats=False)
+
+    try:
+        report = evals.run(name, suite, client.model, run_case, only=only, on_result=show)
+    except NotRecorded as err:
+        recorded_on = recording.recorded_on if recording else "?"
+        raise fail(
+            f"{name}, case {started[-1]}: {err}. A prompt, the pack, the code or the model has "
+            f"changed since the recording of {recorded_on}: record it again with --record."
+        ) from err
+    except (PackError, QueryError, ModelError) as err:
+        raise fail(f"{name}: {err}") from err
+    finally:
+        connection.close()
+    if record_run and recording:
+        recording.save(evals.recording_path(pack, name))
+
+    source = f", replayed from the recording of {recording.recorded_on}" if replay_run else ""
+    typer.echo(f"\n{name}: {len(report.results)} cases on {report.model}{source}\n")
+    typer.echo(evals.format_report(report, details))
+    calls = sum(len(result.answers) for result in report.results)
+    cost = format_usd(report.cost_usd) if report.cost_usd is not None else "cost unknown"
+    paid = " when it was recorded" if replay_run else ""
+    typer.secho(f"\n{calls} model calls · {cost}{paid}", fg="bright_black", err=True)
+    if only:
+        typer.secho("Only some cases ran, so the gate was not applied.", fg="yellow", err=True)
+        return False
+    problems = report.gate(suite.threshold)
+    for problem in problems:
+        typer.secho(f"FAILED: {problem}", fg=typer.colors.RED, err=True)
+    if not problems:
+        typer.secho(
+            f"Passed: at least {suite.threshold:.0%}, and every critical case.",
+            fg=typer.colors.GREEN,
+            err=True,
+        )
+    return bool(problems)
+
+
+@app.command(name="eval")
+def eval_command(
+    pack: PackArgument,
+    suites: Annotated[
+        list[str] | None,
+        typer.Argument(help="Suites to run, such as answer. Default: every suite in the pack."),
+    ] = None,
+    warehouse: WarehouseOption = None,
+    model: ModelOption = None,
+    effort: Annotated[
+        Effort, typer.Option(help="How much work the model puts into the SQL.")
+    ] = "medium",
+    case: Annotated[
+        list[str] | None, typer.Option("--case", help="Run only this case. Repeat for more.")
+    ] = None,
+    record_run: Annotated[
+        bool,
+        typer.Option("--record", help="Save every model answer and query result, to replay."),
+    ] = False,
+    replay_run: Annotated[
+        bool,
+        typer.Option("--replay", help="Answer from the recording: no API key, no warehouse."),
+    ] = False,
+    details: Annotated[
+        bool,
+        typer.Option("--details", help="Show each failure's question, SQL and reply."),
+    ] = False,
+) -> None:
+    """Run the pack's golden sets and report how often Vardex gets them right. Exits with 1
+    when a suite falls below its threshold or a critical case fails."""
+    if record_run and (replay_run or case):
+        raise fail("--record records whole suites, live: leave out --replay and --case.")
+    settings = settings_for(model)
+    try:
+        knowledge = load_knowledge(pack)
+        found = evals.load_suites(pack)
+    except PackError as err:
+        raise fail(str(err)) from err
+    names = suites or list(found)
+    unknown = [name for name in names if name not in found]
+    if unknown or not names:
+        known = ", ".join(found) or "none"
+        raise fail(f"No suite {', '.join(unknown)} in {pack}. Known: {known}")
+    failed = [
+        eval_suite(
+            pack,
+            name,
+            found[name],
+            knowledge,
+            settings,
+            warehouse=warehouse,
+            effort=effort,
+            only=case,
+            record_run=record_run,
+            replay_run=replay_run,
+            details=details,
+        )
+        for name in names
+    ]
+    if any(failed):
+        raise typer.Exit(code=1)
 
 
 @app.command()

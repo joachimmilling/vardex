@@ -2,8 +2,9 @@
 
 A Cell is one value in a query's result: a row and a column of the rows a warehouse returned.
 A Figure is one number written in an answer, with every place it can be traced to: cells, the
-SQL that ran, or the question itself. A number that traces to none of them came from the
-model, not the data, and an answer that holds one is not shown.
+SQL that ran, the question itself, or the assumptions shown beside the answer. A number that
+traces to none of them came from the model, not the data, and an answer that holds one is not
+shown.
 """
 
 import difflib
@@ -26,6 +27,7 @@ SCALES = {
     "thousand": 3, "tusen": 3, "k": 3,
     "million": 6, "millions": 6, "millioner": 6, "mill.": 6, "mill": 6, "mn": 6, "m": 6,
     "billion": 9, "billions": 9, "milliard": 9, "milliarder": 9, "mrd.": 9, "mrd": 9, "bn": 9,
+    "trillion": 12, "billioner": 12,  # a Norwegian billion is a million million
 }  # fmt: skip
 SUFFIX = re.compile(
     r"\s?(" + "|".join(re.escape(s) for s in sorted(SCALES, key=len, reverse=True)) + r")(?!\w)",
@@ -59,10 +61,11 @@ class Figure:
     cells: list[Cell]
     in_sql: bool  # the query itself holds it, such as the year in where fiscal_year = 2025
     in_question: bool
+    in_assumptions: bool = False  # such as "at least 50 employees", from the pack's notes
 
     @property
     def traced(self) -> bool:
-        return bool(self.cells) or self.in_sql or self.in_question
+        return bool(self.cells) or self.in_sql or self.in_question or self.in_assumptions
 
 
 def readings(token: str) -> set[tuple[Decimal, int]]:
@@ -136,10 +139,36 @@ def targets(
     return found
 
 
-def trace(text: str, results: list[Result], question: str) -> list[Figure]:
-    """Every number in an answer, with the cells, query and question it can be traced to."""
-    in_question = exact_values(question)
-    in_sql = {v for result in results for v in exact_values(result.sql)}
+def amounts(text: str) -> set[Decimal]:
+    """Every value the numbers in a text can stand for: as written, and scaled by the word
+    after them, so "NOK 50 billion" in a question holds both 50 and 50,000,000,000."""
+    found = set()
+    for _, values, word in numbers_in(text):
+        power = SCALES.get(word) if word else None
+        for value, _ in values:
+            found.add(value)
+            if power:
+                found.add(value * Decimal(10) ** power)
+    return found
+
+
+def mentions(
+    found: set[Decimal], exact: set[Decimal], scaled: list[tuple[Decimal, Decimal, int]]
+) -> bool:
+    """True when a text's numbers hold a written number: one of its exact values, or a value
+    a scaled number such as 50 billion or 5% can be rounded from."""
+    return bool(exact & found) or any(abs(v - t) <= d for v in found for t, d, _ in scaled)
+
+
+def trace(
+    text: str, results: list[Result], question: str, assumptions: list[str] | None = None
+) -> list[Figure]:
+    """Every number in an answer, with the cells, query, question and assumptions it can be
+    traced to. The assumptions are shown to the person beside the answer, so a number taken
+    from one, such as a coverage limit from the pack's notes, has a visible source."""
+    in_question = amounts(question)
+    in_assumptions = amounts("\n".join(assumptions or []))
+    in_sql = {v for result in results for v in amounts(result.sql)}
     cells = [
         (Cell(result, row, column), atom, rounded)
         for result in results
@@ -151,6 +180,7 @@ def trace(text: str, results: list[Result], question: str) -> list[Figure]:
     for written, values, word in numbers_in(text):
         exact = {value for value, _ in values} if word is None else set()
         near = targets(values, word)
+        scaled = near if word else []  # 50 billion or 5%: compare with what it rounds from
         found: dict[tuple[int, int, str], tuple[tuple[int, Decimal], Cell]] = {}
         for cell, atom, rounded in cells:
             if rounded:  # the best reading, then how far off in units of the rounding allowed
@@ -169,8 +199,9 @@ def trace(text: str, results: list[Result], question: str) -> list[Figure]:
             Figure(
                 text=written.strip(),
                 cells=[cell for _, cell in sorted(found.values(), key=lambda m: m[0])],
-                in_sql=bool(exact & in_sql),
-                in_question=bool(exact & in_question),
+                in_sql=mentions(in_sql, exact, scaled),
+                in_question=mentions(in_question, exact, scaled),
+                in_assumptions=mentions(in_assumptions, exact, scaled),
             )
         )
     return figures

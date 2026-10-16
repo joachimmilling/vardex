@@ -7,6 +7,7 @@ from fakes import FakeModel
 from typer.testing import CliRunner
 
 from vardex.cli import app
+from vardex.llm import ModelError
 from vardex.semantic import Knowledge, Metric, ModelDoc, Ontology, Questions
 from vardex.warehouse import Build, WarehouseError
 
@@ -95,6 +96,22 @@ def test_answer_shows_the_answer_the_sql_the_rows_and_where_each_number_came_fro
     assert SQL in result.stdout
     assert "DEMO LAKS AS        120" in lines
     assert "  120              row 1, employees = 120" in lines
+    assert result.stderr == ""
+
+
+def test_answer_warns_about_a_name_spelt_unlike_the_rows(data, monkeypatch):
+    make_warehouse(data)
+    plan = {"action": "query", "sql": SQL, "message": None, "assumptions": []}
+    model = FakeModel(json.dumps(plan), "Demo Lacs AS has the most employees: 120.")
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+
+    result = runner.invoke(app, ["answer", PACK, "Who has the most employees?"])
+
+    assert result.exit_code == 0
+    assert 'Warning: "Demo Lacs AS" is not in the rows; they spell it "DEMO LAKS AS"' in (
+        result.stderr
+    )
 
 
 def test_answer_that_fails_its_checks_is_red_and_shows_the_sql(data, monkeypatch):
@@ -111,6 +128,27 @@ def test_answer_that_fails_its_checks_is_red_and_shows_the_sql(data, monkeypatch
     assert result.stdout == ""
     assert "the answer has numbers no query returned: 150" in result.stderr
     assert SQL in result.stderr
+
+
+def test_a_model_error_still_logs_the_calls_already_made(data, monkeypatch):
+    make_warehouse(data)
+    plan = {"action": "query", "sql": SQL, "message": None, "assumptions": []}
+    model = FakeModel(json.dumps(plan))
+
+    def overloaded(request, on_text=None):
+        if model.replies:
+            return FakeModel.send(model, request, on_text)
+        raise ModelError("The API refused the request (529)", retryable=True)
+
+    model.send = overloaded
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+
+    result = runner.invoke(app, ["answer", PACK, "Who has the most employees?", "--stats"])
+
+    assert result.exit_code == 1
+    assert "The API refused the request (529)" in result.stderr
+    assert "1,000 in" in result.stderr  # the plan's call, logged and costed
 
 
 def test_answer_show_prompt_calls_nothing(data, monkeypatch):
@@ -141,7 +179,9 @@ def knowledge() -> Knowledge:
         sql="sum(employees)",
         unit="persons",
     )
-    return Knowledge({"dim_companies": doc}, [metric], Ontology(), Questions())
+    company = {"name": "Company", "description": "A company.", "table": "dim_companies"}
+    ontology = Ontology.model_validate({"objects": [{**company, "key": "name", "label": "name"}]})
+    return Knowledge({"dim_companies": doc}, [metric], ontology, Questions())
 
 
 def test_ingest_prints_the_warehouse_and_fails_when_data_is_stale(data, monkeypatch):

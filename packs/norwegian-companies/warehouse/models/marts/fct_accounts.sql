@@ -1,7 +1,8 @@
 -- One row per company, fiscal year and kind of accounts (company or group). When a company
 -- files again for the same year, the newest filing wins. first_seen_at is when Vardex first
 -- fetched the filing that won, which shows how late it came. Results are also converted to
--- NOK at Norges Bank's average rate for the calendar year the fiscal year ends in.
+-- NOK at Norges Bank's average rate for the calendar year the fiscal year ends in. Companies
+-- that have left the register are left out; their filings stay in raw.accounts.
 with filings as (
     select
         *,
@@ -24,6 +25,7 @@ converted as (
     left join {{ ref('stg_exchange_rates') }} as rates
         on rates.currency = filings.currency and rates.year = year(filings.period_end)
     where filings.newest = 1
+        and filings.orgnr in (select orgnr from {{ ref('dim_companies') }})
 )
 
 select

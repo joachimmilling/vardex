@@ -1,0 +1,2 @@
+# Recordings of eval runs are generated: fold them in diffs on GitHub.
+packs/*/evals/recordings/*.jsonl linguist-generated=true
