@@ -6,6 +6,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-16
+
 ### Added
 
 - `vardex eval --repeat N` runs every case N times in a row. A case passes only when every run
