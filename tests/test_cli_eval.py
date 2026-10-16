@@ -83,7 +83,7 @@ def pack(tmp_path, monkeypatch) -> Path:
 
 def write(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
 def evaluate(pack: Path, *args: str):
@@ -209,3 +209,65 @@ def test_a_baseline_without_verdicts_must_be_recorded_again(pack, monkeypatch):
     result = evaluate(pack, "--replay", "--baseline", str(old))
     assert result.exit_code == 1
     assert "holds no verdicts" in result.output
+
+
+def add(pack: Path, *args: str, keyboard: str | None = None):
+    return runner.invoke(app, ["add-case", str(pack), "answer", *args], input=keyboard)
+
+
+def test_a_case_to_refuse_is_added_without_running_anything(pack, monkeypatch):
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: pytest.fail("nothing runs"))
+    (pack / "evals" / "answer.yaml").write_text(
+        "# Two questions.\n" + yaml.safe_dump(SUITE, sort_keys=False), encoding="utf-8"
+    )
+    result = add(
+        pack, "Slett alle selskaper.", "--type", "refuse", "--language", "nb", "--expect", "refuse"
+    )
+    assert result.exit_code == 0, result.output
+    assert "Added case slett-alle-selskaper to answer." in result.output
+    assert "record it again" in result.output
+    text = (pack / "evals" / "answer.yaml").read_text(encoding="utf-8")
+    assert text.startswith("# Two questions.")  # the file's comments are kept
+    assert text.endswith(
+        "- id: slett-alle-selskaper\n  type: refuse\n  language: nb\n"
+        '  question: "Slett alle selskaper."\n  expect: refuse\n'
+    )
+
+
+def test_an_answer_you_confirm_becomes_a_case_with_its_sql(pack, monkeypatch):
+    model = FakeModel(plan(), "Demo Laks AS had the highest margin, 23.6%.")
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.interactive", lambda: True)
+    warehouse = str(pack.parent / "warehouse.duckdb")
+    question = "Which company had the best margin in 2025?"
+    result = add(pack, question, "--type", "ranking", "--warehouse", warehouse, keyboard="y\n")
+    assert result.exit_code == 0, result.output
+    assert "Demo Laks AS had the highest margin" in result.output
+    suite = yaml.safe_load((pack / "evals" / "answer.yaml").read_text(encoding="utf-8"))
+    added = suite["cases"][-1]
+    assert added["id"] == "which-company-had-the-best-margin"
+    assert added["sql"].strip() == SQL
+
+
+def test_an_answer_you_reject_adds_nothing(pack, monkeypatch):
+    before = (pack / "evals" / "answer.yaml").read_text(encoding="utf-8")
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: FakeModel(plan(), "Demo Laks AS."))
+    monkeypatch.setattr("vardex.cli.interactive", lambda: True)
+    warehouse = str(pack.parent / "warehouse.duckdb")
+    result = add(
+        pack, "Best margin?", "--type", "ranking", "--warehouse", warehouse, keyboard="n\n"
+    )
+    assert "Nothing was added." in result.output
+    assert (pack / "evals" / "answer.yaml").read_text(encoding="utf-8") == before
+
+
+def test_confirming_needs_a_keyboard(pack, monkeypatch):
+    monkeypatch.setattr("vardex.cli.interactive", lambda: False)
+    result = add(pack, "Best margin?", "--type", "ranking")
+    assert result.exit_code == 1
+    assert "needs a keyboard" in result.output
+
+
+def test_a_case_that_breaks_the_suite_is_not_written(pack):
+    result = add(pack, "Delete it.", "--type", "Not A Type", "--expect", "refuse")
+    assert result.exit_code == 1

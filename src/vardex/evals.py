@@ -10,6 +10,7 @@ returns a Grade, or None when it does not apply. Most are code; the judge is a m
 """
 
 import itertools
+import json
 import math
 import re
 from collections import Counter
@@ -20,7 +21,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from vardex import text_to_sql
 from vardex.llm import Answer, Effort, Ledger, Message, ModelClient, ModelError, Request
@@ -395,6 +397,51 @@ def run(
             if on_result:
                 on_result(result)
     return Report(name, model, results)
+
+
+def new_case_id(question: str, taken: set[str]) -> str:
+    """An id for a case, from the first six words of its question, made unique: How many
+    employees does Mowi ASA have? becomes how-many-employees-does-mowi-asa."""
+    text = question.lower().translate(str.maketrans({"æ": "ae", "ø": "o", "å": "a"}))
+    slug = "-".join(re.findall(r"[a-z0-9]+", text)[:6]) or "case"
+    found, number = slug, 2
+    while found in taken:
+        found, number = f"{slug}-{number}", number + 1
+    return found
+
+
+def case_text(case: Case, indent: str = "  ") -> str:
+    """A case as it is written in a suite file, under cases:, its dash after `indent`."""
+    lines = [f"- id: {case.id}", f"  type: {case.type}"]
+    if case.language != "en":
+        lines.append(f"  language: {case.language}")
+    lines.append(f"  question: {json.dumps(case.question, ensure_ascii=False)}")
+    if case.expect != "answer":
+        lines.append(f"  expect: {case.expect}")
+    if case.ordered:
+        lines.append("  ordered: true")
+    if case.critical:
+        lines.append("  critical: true")
+    if case.sql:
+        lines.append("  sql: |")
+        lines += [f"    {line}".rstrip() for line in case.sql.strip().splitlines()]
+    return "".join(f"{indent}{line}\n" for line in lines)
+
+
+def add_case(path: Path, case: Case, knowledge: Knowledge) -> None:
+    """Add a case to the end of a suite file, as text, so its comments stay. The file must
+    still load and pass check_suite, or nothing is written."""
+    text = path.read_text(encoding="utf-8").rstrip("\n")
+    dash = re.search(r"^( *)- id:", text, re.MULTILINE)  # follow the file's own indentation
+    text += "\n\n" + case_text(case, dash.group(1) if dash else "  ")
+    try:
+        suite = Suite.model_validate(yaml.safe_load(text))
+    except (yaml.YAMLError, ValidationError) as err:
+        raise PackError(f"the case does not fit {path}: {err}") from err
+    problems = check_suite(suite, knowledge)
+    if problems:
+        raise PackError("; ".join(problems))
+    path.write_text(text, encoding="utf-8")
 
 
 def verdicts(report: Report) -> dict[str, dict[str, Any]]:

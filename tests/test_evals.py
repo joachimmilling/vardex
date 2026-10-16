@@ -5,6 +5,7 @@ from datetime import date
 
 import duckdb
 import pytest
+import yaml
 from fakes import FakeModel
 from pydantic import ValidationError
 from test_text_to_sql import KNOWLEDGE, SQL, TABLES, plan
@@ -19,6 +20,7 @@ from vardex.evals import (
     Report,
     Suite,
     answer_case,
+    case_text,
     check_suite,
     compare_runs,
     format_comparison,
@@ -26,6 +28,7 @@ from vardex.evals import (
     grade_behaviour,
     grade_rows,
     mcnemar,
+    new_case_id,
     run,
     verdicts,
     wilson,
@@ -335,3 +338,24 @@ def test_verdicts_keep_every_grade_of_every_run():
     kept = verdicts(report((MARGIN, True), (MARGIN, False)))
     assert kept["best-margin"]["passed"] is False
     assert [g["run"] for g in kept["best-margin"]["grades"]] == [1, 2]
+
+
+def test_a_new_case_gets_an_id_from_its_question():
+    taken = {"how-many-employees-does-mowi-asa"}
+    question = "How many employees does Mowi ASA have?"
+    assert new_case_id(question, set()) == "how-many-employees-does-mowi-asa"
+    assert new_case_id(question, taken) == "how-many-employees-does-mowi-asa-2"
+    assert new_case_id("Hvor mange ansatte har Lerøy?", set()) == "hvor-mange-ansatte-har-leroy"
+
+
+def test_a_case_is_written_as_the_suite_file_writes_it():
+    case = Case.model_validate({**MARGIN, "question": 'The "best" margin?', "language": "nb"})
+    written = case_text(case)
+    assert written.splitlines()[:4] == [
+        "  - id: best-margin",
+        "    type: ranking",
+        "    language: nb",
+        '    question: "The \\"best\\" margin?"',
+    ]
+    [read] = yaml.safe_load("cases:\n" + written)["cases"]
+    assert Case.model_validate(read) == case.model_copy(update={"sql": REFERENCE + "\n"})
