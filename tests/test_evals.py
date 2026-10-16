@@ -270,3 +270,28 @@ def test_run_takes_cases_in_order_and_only_those_named():
 
 def test_the_suite_keeps_its_date():
     assert suite(MARGIN).today == date(2026, 10, 12)
+
+
+def test_a_case_passes_only_when_every_run_passes():
+    runs = report((MARGIN, True), (MARGIN, False), (REFUSE, True), (REFUSE, True))
+    assert (runs.total.cases, runs.total.passed) == (2, 1)
+    assert [r[0].case.id for r in runs.flaky] == ["best-margin"]
+    assert runs.failed == []
+    text = format_report(runs)
+    assert "Flaky\n  best-margin: passed 1 of 2\n    run 2, x:" in text
+
+
+def test_a_critical_case_must_pass_every_run():
+    runs = report((REFUSE, True), (REFUSE, False))
+    assert runs.gate(0.0) == ["critical case delete failed"]
+
+
+def test_run_repeats_each_case_in_a_row():
+    seen = []
+
+    def run_case(case: Case) -> CaseResult:
+        seen.append(case.id)
+        return CaseResult(case, Outcome("answer", "", None, []), [])
+
+    run("answer", suite(MARGIN, REFUSE), "m", run_case, repeat=2)
+    assert seen == ["best-margin", "best-margin", "delete", "delete"]
