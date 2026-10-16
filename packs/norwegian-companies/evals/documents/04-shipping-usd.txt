@@ -1,0 +1,18 @@
+Demo Shipping AS (a fictional company, written for the Vardex examples)
+Consolidated statement of profit or loss for the year ended 31 December 2025
+
+Amounts in USD 1,000                         Note         2025         2024
+Freight revenue                                 3      298,410      276,905
+Other operating revenue                                 14,130       11,220
+Total operating revenue                                312,540      288,125
+
+Voyage expenses                                        (88,215)     (84,330)
+Vessel operating expenses                       4      (71,402)     (69,118)
+General and administrative expenses             5      (18,960)     (17,744)
+Depreciation                                   10      (52,330)     (50,906)
+Total operating expenses                              (230,907)    (222,098)
+
+Operating profit                                        81,633       66,027
+
+Finance costs                                   7      (24,870)     (26,310)
+Profit before tax                                       56,763       39,717

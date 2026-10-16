@@ -456,33 +456,42 @@ def answer_command(
 
 
 def eval_connections(
-    pack: Path, suite: str, settings: Settings, url: str | None, record: bool, replay: bool
-) -> tuple[ModelClient, Warehouse, Recording | None]:
-    """The model and warehouse an eval runs on: live, live and recorded, or replayed."""
+    pack: Path,
+    suite: str,
+    settings: Settings,
+    url: str | None,
+    record: bool,
+    replay: bool,
+    data: bool = True,
+) -> tuple[ModelClient, Warehouse | None, Recording | None]:
+    """The model and warehouse an eval runs on: live, live and recorded, or replayed. Without
+    data, as for an extraction, there is no warehouse."""
     path = evals.recording_path(pack, suite)
     if replay:
         if not path.is_file():
             raise PackError(f"No recording at {path}. Make one with --record.")
         recording = Recording.load(path)
-        return ReplayClient(recording), ReplayWarehouse(recording), recording
-    connection = connect_warehouse(url, pack, settings)
+        return ReplayClient(recording), ReplayWarehouse(recording) if data else None, recording
+    connection = connect_warehouse(url, pack, settings) if data else None
     try:
         client = connect(settings)
     except ModelError:
-        connection.close()
+        if connection:
+            connection.close()
         raise
     if not record:
         return client, connection, None
-    recording = Recording(
-        client.model, connection.name, connection.dialect, date.today().isoformat()
-    )
-    return RecordingClient(client, recording), RecordingWarehouse(connection, recording), recording
+    name, dialect = (connection.name, connection.dialect) if connection else ("", "")
+    recording = Recording(client.model, name, dialect, date.today().isoformat())
+    if connection:
+        connection = RecordingWarehouse(connection, recording)
+    return RecordingClient(client, recording), connection, recording
 
 
 def eval_suite(
     pack: Path,
     name: str,
-    suite: evals.Suite,
+    suite: evals.AnySuite,
     knowledge: Knowledge,
     settings: Settings,
     *,
@@ -496,21 +505,35 @@ def eval_suite(
     baseline: Path | None = None,
 ) -> bool:
     """Run one suite and print its report. True when it fails its gate."""
-    problems = evals.check_suite(suite, knowledge)
+    extracting = isinstance(suite, evals.ExtractionSuite)
+    try:
+        if isinstance(suite, evals.ExtractionSuite):
+            spec = load_extraction(pack, suite.extraction)
+            problems = evals.check_extraction_suite(suite, spec, pack)
+        else:
+            problems = evals.check_suite(suite, knowledge)
+    except PackError as err:
+        raise fail(str(err)) from err
     if problems:
         raise fail(f"Suite {name} cannot be used:\n" + "\n".join(f"  {p}" for p in problems))
     try:
         client, connection, recording = eval_connections(
-            pack, name, settings, warehouse, record_run, replay_run
+            pack, name, settings, warehouse, record_run, replay_run, data=not extracting
         )
     except (PackError, QueryError, ModelError) as err:
         raise fail(str(err)) from err
-    graders: list[evals.Grader] = [evals.grade_behaviour, evals.grade_rows, evals.Judge(client)]
+    graders: list[evals.Grader] = (
+        [evals.grade_behaviour, evals.grade_fields]
+        if extracting
+        else [evals.grade_behaviour, evals.grade_rows, evals.Judge(client)]
+    )
 
     started: list[str] = []  # the ids of the cases run so far, to name one that stops the run
 
-    def run_case(case: evals.Case) -> evals.CaseResult:
+    def run_case(case: evals.AnyCase) -> evals.CaseResult:
         started.append(case.id)
+        if isinstance(case, evals.ExtractionCase):
+            return evals.extract_case(client, pack, spec, case, graders)
         return evals.answer_case(client, connection, knowledge, suite, case, graders, effort=effort)
 
     def show(result: evals.CaseResult) -> None:
@@ -533,7 +556,8 @@ def eval_suite(
     except (PackError, QueryError, ModelError) as err:
         raise fail(f"{name}: {err}") from err
     finally:
-        connection.close()
+        if connection:
+            connection.close()
     if record_run and recording:
         recording.verdicts = evals.verdicts(report)
         recording.save(evals.recording_path(pack, name))

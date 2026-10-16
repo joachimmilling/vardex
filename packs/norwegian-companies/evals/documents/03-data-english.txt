@@ -1,0 +1,14 @@
+Demo Data AS (a fictional company, written for the Vardex examples)
+Annual report 2025: Key figures
+
+All figures in NOK million unless otherwise stated
+
+                                        2025       2024       2023
+Revenue                                842.6      771.3      702.9
+EBITDA                                  98.4       90.2       81.0
+Operating profit (EBIT)                 61.3       58.7       49.6
+Profit before tax                       57.9       55.0       47.1
+Operating margin                        7.3%       7.6%       7.1%
+Employees at year end                    612        574        540
+
+Revenue grew by 9.2 per cent, driven by new public sector contracts in Oslo and Trøndelag.

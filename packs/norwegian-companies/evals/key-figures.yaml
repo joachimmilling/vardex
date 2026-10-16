@@ -1,0 +1,130 @@
+# The golden set for the key-figures extraction: ten pages from annual reports of fictional
+# companies, each with the values a right extraction gives, read off the page by a person, or
+# expect: problem for a page that holds no figures. Quotes are not graded: the extraction
+# checks them itself.
+description: Key figures from one page of a Norwegian annual report.
+capability: extract
+extraction: key-figures
+threshold: 0.9
+
+cases:
+  - id: laks-thousands
+    type: income-statement
+    language: nb
+    document: 01-laks-resultat.txt
+    values:
+      company_name: Demo Laks AS
+      fiscal_year: 2025
+      accounts: company
+      currency: NOK
+      unit: thousands
+      revenue: 1480312
+      operating_profit: 353655
+
+  - id: bygg-nynorsk
+    type: income-statement
+    language: nn
+    document: 02-bygg-nynorsk.txt
+    values:
+      company_name: Demo Bygg AS
+      fiscal_year: 2025
+      accounts: company
+      currency: NOK
+      unit: thousands
+      revenue: 214908
+      operating_profit: 5927
+
+  - id: data-millions
+    type: key-figures
+    document: 03-data-english.txt
+    values:
+      company_name: Demo Data AS
+      fiscal_year: 2025
+      accounts: company
+      currency: NOK
+      unit: millions
+      revenue: 842.6
+      operating_profit: 61.3
+
+  - id: shipping-usd
+    type: income-statement
+    document: 04-shipping-usd.txt
+    values:
+      company_name: Demo Shipping AS
+      fiscal_year: 2025
+      accounts: group
+      currency: USD
+      unit: thousands
+      revenue: 312540
+      operating_profit: 81633
+
+  - id: kraft-group-millions
+    type: key-figures
+    language: nb
+    document: 05-kraft-mnok.txt
+    values:
+      company_name: Demo Kraft AS
+      fiscal_year: 2025
+      accounts: group
+      currency: NOK
+      unit: millions
+      revenue: 2315.4
+      operating_profit: 611.2
+
+  - id: handel-ones
+    type: income-statement
+    language: nb
+    document: 06-handel-hele-kroner.txt
+    values:
+      company_name: Demo Handel AS
+      fiscal_year: 2025
+      accounts: company
+      currency: NOK
+      unit: ones
+      revenue: 12845330
+      operating_profit: 627784
+
+  - id: fisk-board-text
+    type: income-statement
+    language: nb
+    document: 07-fisk-trap.txt
+    values:
+      company_name: Demo Fisk AS
+      fiscal_year: 2025
+      accounts: company
+      currency: NOK
+      unit: thousands
+      revenue: 1506200
+      operating_profit: 96088
+
+  - id: holding-no-revenue
+    type: income-statement
+    language: nb
+    document: 08-holding-negativ.txt
+    values:
+      company_name: Demo Holding AS
+      fiscal_year: 2025
+      accounts: company
+      currency: NOK
+      unit: thousands
+      revenue: null
+      operating_profit: -1234
+
+  - id: letter-without-figures
+    type: no-figures
+    language: nb
+    document: 09-styreleders-brev.txt
+    expect: problem
+
+  - id: eiendom-group-column
+    type: income-statement
+    language: nb
+    document: 10-eiendom-konsern.txt
+    values:
+      company_name: Demo Eiendom AS
+      fiscal_year: 2025
+      accounts: group
+      currency: NOK
+      unit: thousands
+      revenue: 413788
+      operating_profit: 231244

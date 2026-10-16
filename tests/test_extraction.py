@@ -69,8 +69,9 @@ def test_good_values_pass_and_amounts_stay_exact():
 
 
 def test_a_problem_reported_by_the_model_is_a_failure():
-    with pytest.raises(ExtractionError, match="no figures on this page"):
+    with pytest.raises(ExtractionError, match="no figures on this page") as caught:
         extract(FakeModel(reply(problem="There are no figures on this page.")), SPEC, PAGE)
+    assert caught.value.reported  # the model said so; not a failed check
 
 
 def test_a_missing_required_value_is_a_failure():
