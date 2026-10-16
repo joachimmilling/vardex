@@ -11,6 +11,9 @@ main design choice in docs/decisions/.
 - Run the CLI: `uv run vardex --help`
 - Build a pack's warehouse: `uv run vardex ingest packs/norwegian-companies`
 - Answer a question from it: `uv run vardex answer packs/norwegian-companies "…"`
+- Run the evals offline, as CI does: `uv run vardex eval packs/norwegian-companies --replay`
+- Run and record them live (needs a key and the warehouse; costs about a dollar):
+  `uv run vardex eval packs/norwegian-companies --record`
 - Tests against PostgreSQL run when `VARDEX_TEST_POSTGRES_URL` is set, as in CI
 
 ## Rules
@@ -25,6 +28,12 @@ main design choice in docs/decisions/.
   connection. Never loosen either to make a question work; fix the pack's semantic layer.
 - Prompts are code. Engine prompts live in src/vardex/prompts.py, domain prompts in packs.
   Describe every prompt change in CHANGELOG.md.
+- A change to anything a model is sent (a prompt, the semantic layer, a suite, the code that
+  builds a request) makes the eval recordings stale, and CI fails. Record again with
+  `--record` and commit the new recordings with the change; never edit a recording by hand.
+- Golden sets live in a pack's evals/ folder. Never change a case to make it pass. Change a
+  case only when the case itself is wrong, and say why in the pull request. A case's question
+  is never also an example in questions.yaml.
 - A pack's sources, SQL models, tests, metrics, ontology and example questions live in its
   warehouse/ folder. Every column of a model in models/marts is described;
   tests/test_norwegian_companies.py checks it.

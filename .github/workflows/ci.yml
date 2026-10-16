@@ -1,4 +1,4 @@
-# Lint and test on every push and pull request.
+# Lint, test and replay the evals on every push and pull request.
 name: CI
 
 on:
@@ -31,3 +31,7 @@ jobs:
         run: uv run ruff format --check
       - name: Test
         run: uv run pytest
+      - name: Evals, replayed from the recordings
+        # No API key and no warehouse: the answers and rows come from evals/recordings/.
+        # Fails when a recording is stale, below a suite's threshold, or on a critical case.
+        run: uv run vardex eval packs/norwegian-companies --replay
