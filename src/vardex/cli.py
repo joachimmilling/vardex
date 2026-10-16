@@ -492,6 +492,7 @@ def eval_suite(
     record_run: bool,
     replay_run: bool,
     details: bool,
+    repeat: int = 1,
 ) -> bool:
     """Run one suite and print its report. True when it fails its gate."""
     problems = evals.check_suite(suite, knowledge)
@@ -519,7 +520,9 @@ def eval_suite(
                 record(call, stats=False)
 
     try:
-        report = evals.run(name, suite, client.model, run_case, only=only, on_result=show)
+        report = evals.run(
+            name, suite, client.model, run_case, only=only, repeat=repeat, on_result=show
+        )
     except NotRecorded as err:
         recorded_on = recording.recorded_on if recording else "?"
         raise fail(
@@ -534,7 +537,8 @@ def eval_suite(
         recording.save(evals.recording_path(pack, name))
 
     source = f", replayed from the recording of {recording.recorded_on}" if replay_run else ""
-    typer.echo(f"\n{name}: {len(report.results)} cases on {report.model}{source}\n")
+    times = f", {repeat} runs each" if repeat > 1 else ""
+    typer.echo(f"\n{name}: {len(report.cases)} cases{times} on {report.model}{source}\n")
     typer.echo(evals.format_report(report, details))
     calls = sum(len(result.answers) for result in report.results)
     cost = format_usd(report.cost_usd) if report.cost_usd is not None else "cost unknown"
@@ -582,6 +586,7 @@ def eval_command(
         bool,
         typer.Option("--details", help="Show each failure's question, SQL and reply."),
     ] = False,
+    repeat: Annotated[int, typer.Option(min=1, max=10, help="Run every case this many times.")] = 1,
 ) -> None:
     """Run the pack's golden sets and report how often Vardex gets them right. Exits with 1
     when a suite falls below its threshold or a critical case fails."""
@@ -611,6 +616,7 @@ def eval_command(
             record_run=record_run,
             replay_run=replay_run,
             details=details,
+            repeat=repeat,
         )
         for name in names
     ]

@@ -166,3 +166,23 @@ def test_record_runs_whole_suites_only(pack):
     result = evaluate(pack, "--record", "--case", "delete")
     assert result.exit_code == 1
     assert "--record records whole suites" in result.output
+
+
+def test_repeated_runs_record_and_replay_and_name_the_flaky(pack, monkeypatch):
+    wrong = "Demo Data AS: 5.0%."  # the judge fails it the second time
+    failed = json.dumps({"reasoning": "Wrong company.", "passed": False})
+    replies = [
+        *[plan(), "Demo Laks AS: 23.6%.", VERDICT, plan(), wrong, failed],
+        *[REFUSAL, REFUSAL],
+    ]
+    model = FakeModel(*replies)
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    warehouse = str(pack.parent / "warehouse.duckdb")
+    recorded = evaluate(pack, "--warehouse", warehouse, "--repeat", "2", "--record")
+    assert "answer: 2 cases, 2 runs each" in recorded.output
+    assert "Flaky\n  best-margin: passed 1 of 2" in recorded.output
+    assert "all                2       1    50%" in recorded.output
+
+    replayed = evaluate(pack, "--replay", "--repeat", "2")
+    assert "Flaky\n  best-margin: passed 1 of 2" in replayed.output
+    assert evaluate(pack, "--replay", "--repeat", "3").exit_code == 1  # a third run was never made

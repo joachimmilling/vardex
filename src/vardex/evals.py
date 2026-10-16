@@ -133,22 +133,36 @@ class Tally:
 class Report:
     suite: str
     model: str
-    results: list[CaseResult]
+    results: list[CaseResult]  # every run of every case, each case's runs together
+
+    @property
+    def cases(self) -> list[list[CaseResult]]:
+        """The runs of each case, one list per case, in order."""
+        runs: dict[str, list[CaseResult]] = {}
+        for result in self.results:
+            runs.setdefault(result.case.id, []).append(result)
+        return list(runs.values())
 
     def by(self, key: Callable[[Case], str]) -> list[Tally]:
         """One tally per group of cases, in the order the groups first appear."""
-        groups: dict[str, list[CaseResult]] = {}
-        for result in self.results:
-            groups.setdefault(key(result.case), []).append(result)
-        return [tally(name, results) for name, results in groups.items()]
+        groups: dict[str, list[list[CaseResult]]] = {}
+        for runs in self.cases:
+            groups.setdefault(key(runs[0].case), []).append(runs)
+        return [tally(name, cases) for name, cases in groups.items()]
 
     @property
     def total(self) -> Tally:
-        return tally("all", self.results)
+        return tally("all", self.cases)
 
     @property
-    def failed(self) -> list[CaseResult]:
-        return [result for result in self.results if not result.passed]
+    def failed(self) -> list[list[CaseResult]]:
+        """The cases that failed every run."""
+        return [runs for runs in self.cases if not any(r.passed for r in runs)]
+
+    @property
+    def flaky(self) -> list[list[CaseResult]]:
+        """The cases that passed some runs but not all."""
+        return [runs for runs in self.cases if 0 < sum(r.passed for r in runs) < len(runs)]
 
     @property
     def cost_usd(self) -> Decimal | None:
@@ -158,16 +172,21 @@ class Report:
 
     def gate(self, threshold: float) -> list[str]:
         """Why the run fails its suite's gate: too few cases passed, or a critical case
-        failed. Empty means it passes."""
+        failed in any run. Empty means it passes."""
         problems = []
         if self.total.rate < threshold:
             problems.append(f"{self.total.rate:.0%} passed, below the threshold of {threshold:.0%}")
-        problems += [f"critical case {r.case.id} failed" for r in self.failed if r.case.critical]
+        problems += [
+            f"critical case {runs[0].case.id} failed"
+            for runs in self.cases
+            if runs[0].case.critical and not all(r.passed for r in runs)
+        ]
         return problems
 
 
-def tally(group: str, results: list[CaseResult]) -> Tally:
-    return Tally(group, len(results), sum(result.passed for result in results))
+def tally(group: str, cases: list[list[CaseResult]]) -> Tally:
+    """A case passes only when every one of its runs passed."""
+    return Tally(group, len(cases), sum(all(r.passed for r in runs) for runs in cases))
 
 
 def wilson(passed: int, cases: int, z: float = Z) -> tuple[float, float]:
@@ -357,10 +376,11 @@ def run(
     run_case: Callable[[Case], CaseResult],
     *,
     only: list[str] | None = None,
+    repeat: int = 1,
     on_result: Callable[[CaseResult], None] | None = None,
 ) -> Report:
-    """Run a suite's cases, or only those named, one after another: in order, so a recording
-    replays in the same order and the prompt cache stays warm."""
+    """Run a suite's cases, or only those named, one after another, each `repeat` times in a
+    row: in order, so a recording replays in the same order and the prompt cache stays warm."""
     if only:
         unknown = sorted(set(only) - {case.id for case in suite.cases})
         if unknown:
@@ -369,16 +389,18 @@ def run(
     for case in suite.cases:
         if only and case.id not in only:
             continue
-        result = run_case(case)
-        results.append(result)
-        if on_result:
-            on_result(result)
+        for _ in range(repeat):
+            result = run_case(case)
+            results.append(result)
+            if on_result:
+                on_result(result)
     return Report(name, model, results)
 
 
 def format_report(report: Report, details: bool = False) -> str:
-    """The report as text: the rate by type, by language and in all, then every failure. With
-    details, each failure also shows its question, the SQL that ran and the answer."""
+    """The report as text: the rate by type, by language and in all, then every failure and
+    every flaky case. With details, each failure also shows its question, the SQL that ran and
+    the answer."""
 
     def table(title: str, tallies: list[Tally]) -> list[str]:
         w = max([14, *(len(t.group) + 2 for t in tallies)])  # the first column's width
@@ -388,6 +410,24 @@ def format_report(report: Report, details: bool = False) -> str:
             lines.append(
                 f"{t.group:<{w}}{t.cases:>6}{t.passed:>8}{t.rate:>7.0%}   {low:.0%} to {high:.0%}"
             )
+        return lines
+
+    def failures(runs: list[CaseResult]) -> list[str]:
+        lines = []
+        for number, result in enumerate(runs, start=1):
+            if result.passed:
+                continue
+            run = f"run {number}, " if len(runs) > 1 else ""
+            for grade in result.grades:
+                if not grade.passed:
+                    reason = " ".join(grade.reason.split())
+                    lines.append(f"    {run}{grade.grader}: {reason}".rstrip())
+            if details:
+                lines.append(f"    question: {' '.join(result.case.question.split())}")
+                if result.outcome.result:
+                    sql = result.outcome.result.sql.strip().replace("\n", "\n      ")
+                    lines.append(f"    sql: {sql}")
+                lines.append(f"    reply: {' '.join(result.outcome.text.split())}")
         return lines
 
     lines = table("type", [*report.by(lambda c: c.type), report.total])
@@ -405,15 +445,11 @@ def format_report(report: Report, details: bool = False) -> str:
         lines.append(f"  {result.case.id}: before: {before}")
     if report.failed:
         lines += ["", "Failed"]
-    for result in report.failed:
-        lines.append(f"  {result.case.id}")
-        for grade in result.grades:
-            if not grade.passed:
-                lines.append(f"    {grade.grader}: {' '.join(grade.reason.split())}".rstrip())
-        if details:
-            lines.append(f"    question: {' '.join(result.case.question.split())}")
-            if result.outcome.result:
-                sql = result.outcome.result.sql.strip().replace("\n", "\n      ")
-                lines.append(f"    sql: {sql}")
-            lines.append(f"    reply: {' '.join(result.outcome.text.split())}")
+    for runs in report.failed:
+        lines += [f"  {runs[0].case.id}", *failures(runs)]
+    if report.flaky:
+        lines += ["", "Flaky"]
+    for runs in report.flaky:
+        passes = sum(result.passed for result in runs)
+        lines += [f"  {runs[0].case.id}: passed {passes} of {len(runs)}", *failures(runs)]
     return "\n".join(lines)

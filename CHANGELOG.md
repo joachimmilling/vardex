@@ -6,6 +6,11 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `vardex eval --repeat N` runs every case N times in a row. A case passes only when every run
+  passed (pass^k), and the report lists the flaky cases, with each failed run's reasons.
+
 ## [0.6.0] - 2026-10-16
 
 ### Added
