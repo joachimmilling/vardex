@@ -6,12 +6,12 @@ from datetime import date
 import duckdb
 import pytest
 from conftest import create_tables
-from fakes import FakeModel
+from fakes import FakeEmbedder, FakeModel
 
 from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.postgres_warehouse import PostgresWarehouse
-from vardex.semantic import Knowledge, Metric, ModelDoc, Ontology, Questions, check
-from vardex.text_to_sql import AnswerError, Plan, answer
+from vardex.semantic import Example, Knowledge, Metric, ModelDoc, Ontology, Questions, check
+from vardex.text_to_sql import ANSWER, AnswerError, Plan, answer, answer_prompt, choose_examples
 
 TABLES = """
 create table companies (orgnr varchar(9), name varchar(100), county varchar(30));
@@ -235,11 +235,12 @@ def test_the_packs_sql_is_rewritten_for_the_warehouse(warehouse):
     assert check(warehouse, KNOWLEDGE) == []
     model = FakeModel(plan(), "Demo Laks AS: 23.6%.")
     ask(model, warehouse)
+    system, examples = model.requests[0].system, model.requests[0].system_tail
     if warehouse.dialect == "postgres":
-        assert "EXTRACT(YEAR FROM period_end)" in model.requests[0].system
-        assert "SQL: CAST(SUM(operating_profit) AS DOUBLE PRECISION)" in model.requests[0].system
+        assert "EXTRACT(YEAR FROM period_end)" in examples
+        assert "SQL: CAST(SUM(operating_profit) AS DOUBLE PRECISION)" in system  # a metric
     else:
-        assert "year(period_end)" in model.requests[0].system
+        assert "year(period_end)" in examples
 
 
 def test_no_rows_gets_a_second_look(warehouse):
@@ -272,3 +273,56 @@ def test_a_number_from_the_assumptions_needs_no_repair(warehouse):
     reply = ask(model, warehouse)
     assert reply.text == text
     assert len(reply.answers) == 2  # the plan and one answer: nothing was sent back
+
+
+POOL = [
+    Example(question=q, sql="select 1")
+    for q in [
+        "How much oil and gas did we produce?",
+        "Which salmon farmer harvested most?",
+        "What dividend did the bank pay?",
+        "How much laks was exported?",
+    ]
+]
+
+
+def test_the_examples_most_like_the_question_are_shown():
+    questions = Questions(examples=POOL, show_examples=2)
+    chosen = choose_examples(questions, "Which salmon farmer had the best harvest?", FakeEmbedder())
+    # in the pool's order, not by score
+    assert [e.question for e in chosen] == [POOL[1].question, POOL[3].question]
+
+
+def test_the_first_examples_are_shown_when_the_pack_asks_or_nothing_can_embed():
+    questions = Questions(examples=POOL, show_examples=2, choose_examples="first")
+    assert choose_examples(questions, "salmon", FakeEmbedder()) == POOL[:2]
+    assert choose_examples(Questions(examples=POOL, show_examples=2), "salmon", None) == POOL[:2]
+
+
+def test_a_pool_no_larger_than_the_number_shown_is_shown_whole():
+    embedder = FakeEmbedder()
+    assert choose_examples(Questions(examples=POOL), "salmon", embedder) == POOL
+    assert choose_examples(Questions(examples=POOL, show_examples=4), "x", embedder) == POOL
+    assert embedder.calls == []  # nothing was embedded
+
+
+def test_the_prompt_shows_only_the_chosen_examples(warehouse):
+    pool = [*KNOWLEDGE.questions.examples, Example(question="Which county?", sql="select 1")]
+    questions = KNOWLEDGE.questions.model_copy(update={"examples": pool, "show_examples": 1})
+    knowledge = Knowledge(KNOWLEDGE.tables, KNOWLEDGE.metrics, KNOWLEDGE.ontology, questions)
+    model = FakeModel(plan(action="refuse", sql=None, message="No."))
+    answer(model, warehouse, knowledge, "Which county has most?", embedder=FakeEmbedder())
+    request = model.requests[0]
+    assert "<example>" not in request.system  # the cached part is the same for every question
+    assert request.system_tail.count("<example>") == 1
+    assert request.messages[0].text == "Which county has most?"
+
+
+def test_the_packs_style_follows_the_engines_rules():
+    assert answer_prompt([]) == ANSWER
+    prompt = answer_prompt(["Write amounts in NOK, such as NOK 2.1 billion."])
+    assert prompt.endswith("<style>\n- Write amounts in NOK, such as NOK 2.1 billion.\n</style>")
+
+
+def test_the_engines_answer_prompt_names_no_currency():
+    assert "NOK" not in ANSWER

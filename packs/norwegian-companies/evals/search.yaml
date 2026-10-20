@@ -1,0 +1,247 @@
+# The golden set for vardex search: questions an analyst asks about the pack's documents, each
+# with every page that answers it, found and checked by a person reading the page. A case
+# passes when one of its pages is among the ten passages the search returns. No model is
+# called: a run costs nothing and gives the same result every time.
+description: Questions about Norwegian companies' reports, and the pages that answer them.
+capability: search
+k: 10
+threshold: 0.8
+
+cases:
+  - id: mowi-dividend-policy
+    type: policy
+    language: nb
+    question: "Hva sier utbyttepolitikken til Mowi om det ordinære kvartalsutbyttet?"
+    pages: [mowi-annual-report-2025:66, mowi-annual-report-2025:209, mowi-annual-report-2025:248]
+  - id: mowi-employees-end-2025
+    type: people
+    language: en
+    question: "How many employees did Mowi have at the end of 2025?"
+    pages: [mowi-annual-report-2025:151, mowi-annual-report-2025:152, mowi-annual-report-2025:264]
+  - id: mowi-climate-roadmap-cost
+    type: figure
+    language: nb
+    question: "Hvor mye regner Mowi med å investere i klimaveikartet sitt i perioden 2025–2030?"
+    pages: [mowi-annual-report-2025:96]
+  - id: mowi-canada-east-volume-cut
+    type: reason
+    language: en
+    question: "Why does Mowi expect lower harvest volumes in Canada East in 2026?"
+    pages: [mowi-annual-report-2025:12, mowi-annual-report-2025:26, mowi-annual-report-2025:55]
+  - id: mowi-canada-west-ban
+    type: risk
+    language: nb
+    question: "Hvilken regulatorisk risiko står Mowi overfor i Canada West?"
+    pages: [mowi-annual-report-2025:12, mowi-annual-report-2025:26, mowi-annual-report-2025:54]
+  - id: mowi-interest-rate-hedging
+    type: policy
+    language: en
+    question: "How much of its long-term interest-bearing debt does Mowi aim to hedge at fixed interest rates?"
+    pages: [mowi-annual-report-2025:59, mowi-annual-report-2025:211]
+  - id: mowi-chile-q2-earnings
+    type: reason
+    language: nb
+    question: "Hvorfor falt Mowis driftsresultat for laks fra Chile i andre kvartal 2026?"
+    pages: [mowi-q2-2026:11]
+  - id: mowi-brand-countries-q2
+    type: figure
+    language: en
+    question: "In how many countries was the MOWI brand present in the second quarter of 2026?"
+    pages: [mowi-q2-2026:7]
+  - id: mowi-scotland-q3-cost
+    type: outlook
+    language: nb
+    question: "Hvordan venter Mowi at kostnadene i Skottland utvikler seg i tredje kvartal 2026?"
+    pages: [mowi-q2-2026:10]
+  - id: equinor-capex-2026
+    type: outlook
+    language: nb
+    question: "Hvor store organiske investeringer venter Equinor for 2026?"
+    pages: [equinor-q2-2026:10]
+  - id: equinor-production-guidance-risks
+    type: risk
+    language: en
+    question: "What does Equinor see as the most significant risks to its production guidance for 2026?"
+    pages: [equinor-q2-2026:10]
+  - id: equinor-ncs-production-drivers
+    type: reason
+    language: en
+    question: "What drove the increase in Equinor's production on the Norwegian continental shelf in the second quarter of 2026?"
+    pages: [equinor-q2-2026:5, equinor-q2-2026:8, equinor-q2-2026:13]
+  - id: equinor-brent-q2
+    type: table
+    language: en
+    question: "What was the average Brent oil price in the second quarter of 2026, as reported by Equinor?"
+    pages: [equinor-q2-2026:8, equinor-q2-2026:11]
+  - id: hydro-slovalco-restart
+    type: outlook
+    language: nb
+    question: "Hvor mye kapasitet skal Hydro starte opp igjen ved Slovalco?"
+    pages: [hydro-q2-2026:2, hydro-q2-2026:3]
+  - id: hydro-q2-ebitda-drivers
+    type: reason
+    language: en
+    question: "Why was Hydro's adjusted EBITDA higher in the second quarter of 2026 than a year earlier?"
+    pages: [hydro-q2-2026:3, hydro-q2-2026:5]
+  - id: hydro-lme-hedge-2027
+    type: figure
+    language: en
+    question: "How much aluminium had Hydro hedged on the LME for 2027 as of 30 June 2026?"
+    pages: [hydro-q2-2026:19]
+  - id: veidekke-financial-targets
+    type: outlook
+    language: en
+    question: "What financial targets has Veidekke set for its new strategy period?"
+    pages: [veidekke-arsrapport-2025:13]
+  - id: veidekke-dividend-policy
+    type: policy
+    language: nb
+    question: "Hva er utbyttepolitikken til Veidekke?"
+    pages: [veidekke-arsrapport-2025:13, veidekke-arsrapport-2025:18, veidekke-arsrapport-2025:200]
+  - id: veidekke-apprentices-2025
+    type: people
+    language: en
+    question: "How many apprentices did Veidekke have at the end of 2025?"
+    pages: [veidekke-arsrapport-2025:15]
+  - id: veidekke-oslofjord-contract
+    type: figure
+    language: en
+    question: "What is Veidekke's contract for the E134 Oslofjord connection worth?"
+    pages: [veidekke-q2-2026:5]
+  - id: veidekke-asphalt-q2-profit
+    type: reason
+    language: nb
+    question: "Hvorfor økte resultatet i Veidekkes asfaltvirksomhet i andre kvartal 2026?"
+    pages: [veidekke-q2-2026:3, veidekke-q2-2026:5]
+  - id: veidekke-infra-norway-backlog
+    type: table
+    language: en
+    question: "What was the order backlog of Veidekke's Norwegian infrastructure business at the end of June 2026?"
+    pages: [veidekke-q2-2026:5]
+  - id: bouvet-rogaland-headcount
+    type: people
+    language: en
+    question: "How many employees did Bouvet have in its Rogaland region at the end of 2025?"
+    pages: [bouvet-arsrapport-2025:4]
+  - id: bouvet-dividend-policy
+    type: policy
+    language: nb
+    question: "Hva er Bouvets utbyttepolitikk?"
+    pages: [bouvet-arsrapport-2025:54, bouvet-arsrapport-2025:58]
+  - id: bouvet-operational-risks
+    type: risk
+    language: en
+    question: "What does Bouvet consider its most important operational risk factors?"
+    pages: [bouvet-arsrapport-2025:10]
+  - id: bouvet-revenue-per-employee
+    type: table
+    language: en
+    question: "What was Bouvet's operating revenue per employee in 2025?"
+    pages: [bouvet-arsrapport-2025:3]
+  - id: bouvet-q2-headcount
+    type: people
+    language: en
+    question: "How many employees did Bouvet have at the end of the second quarter of 2026?"
+    pages: [bouvet-q2-2026:2, bouvet-q2-2026:8, bouvet-q2-2026:17]
+  - id: bouvet-oil-gas-share-q2
+    type: figure
+    language: nb
+    question: "Hvor stor andel av Bouvets omsetning kom fra olje, gass og fornybart i andre kvartal 2026?"
+    pages: [bouvet-q2-2026:5, bouvet-q2-2026:6]
+  - id: bouvet-q2-credit-risk
+    type: risk
+    language: nb
+    question: "Hvordan vurderer Bouvet kredittrisikoen sin i andre kvartal 2026?"
+    pages: [bouvet-q2-2026:5]
+  - id: smn-roe-target
+    type: outlook
+    language: en
+    question: "What return on equity does SpareBank 1 SMN aim to deliver over time?"
+    pages: [smn-q2-2026:13]
+  - id: smn-cost-target
+    type: policy
+    language: nb
+    question: "Hvilke kostnadsmål har SpareBank 1 SMN for banken og datterselskapene?"
+    pages: [smn-q2-2026:9]
+  - id: smn-it-costs-q2
+    type: table
+    language: en
+    question: "What were SpareBank 1 SMN's IT costs in the second quarter of 2026?"
+    pages: [smn-q2-2026:9, smn-q2-2026:52]
+  - id: smn-q2-profit-rise
+    type: reason
+    language: nb
+    question: "Hvorfor økte resultatet til SpareBank 1 SMN fra første til andre kvartal 2026?"
+    pages: [smn-q2-2026:7, smn-q2-2026:13]
+  - id: europris-oob-2028-ambition
+    type: outlook
+    language: nb
+    question: "Hvilken ambisjon har Europris for ÖoB innen utgangen av 2028?"
+    pages: [europris-q2-2026:10]
+  - id: europris-q2-sales-decline
+    type: reason
+    language: en
+    question: "Why did Europris' group sales fall in the second quarter of 2026?"
+    pages: [europris-q2-2026:3, europris-q2-2026:5]
+  - id: europris-store-count
+    type: table
+    language: en
+    question: "How many stores did the Europris chain have at 30 June 2026?"
+    pages: [europris-q2-2026:7, europris-q2-2026:8, europris-q2-2026:17]
+  - id: austevoll-mab-reduction
+    type: risk
+    language: nb
+    question: "Hvor mye maksimalt tillatt biomasse kan Austevoll-konsernet miste etter regjeringens forslag om kutt i produksjonsområde 3 i juni 2026?"
+    pages: [austevoll-q2-2026:16]
+  - id: austevoll-q2-earnings-decline
+    type: reason
+    language: en
+    question: "Why did Austevoll's revenue and earnings fall in the second quarter of 2026?"
+    pages: [austevoll-q2-2026:4, austevoll-q2-2026:6]
+  - id: austevoll-wild-catch-outlook
+    type: outlook
+    language: nb
+    question: "Hvilket justert driftsresultat venter Austevoll for villfangstsegmentet i Lerøy i 2026?"
+    pages: [austevoll-q2-2026:18]
+  - id: kongsberg-revenue-ambition
+    type: outlook
+    language: en
+    question: "What revenue does Kongsberg aim to reach in 2029 and 2033?"
+    pages: [kongsberg-q2-2026:3, kongsberg-q2-2026:10]
+  - id: kongsberg-jsm-contracts
+    type: figure
+    language: nb
+    question: "Hva var JSM-kontraktene Kongsberg signerte i andre kvartal 2026 verdt?"
+    pages: [kongsberg-q2-2026:5]
+  - id: kongsberg-equity-ratio
+    type: table
+    language: en
+    question: "What was Kongsberg's equity ratio at 30 June 2026?"
+    pages: [kongsberg-q2-2026:6, kongsberg-q2-2026:14]
+  - id: orkla-new-chair
+    type: people
+    language: nb
+    question: "Hvem ble ny styreleder i Orkla etter at Stein Erik Hagen gikk bort?"
+    pages: [orkla-q2-2026:3, orkla-q2-2026:16, orkla-q2-2026:17]
+  - id: orkla-jotun-margin-risk
+    type: risk
+    language: en
+    question: "What risk does Orkla see for Jotun's margins if the Middle East conflict persists?"
+    pages: [orkla-q2-2026:7]
+  - id: orkla-net-debt-june-2026
+    type: table
+    language: en
+    question: "What were Orkla's net interest-bearing liabilities at 30 June 2026?"
+    pages: [orkla-q2-2026:6, orkla-q2-2026:26]
+
+  - id: austbygde-utbytte-2000
+    type: table
+    language: nb
+    question: "Hvor mye satte Austbygde Bakeri av til utbytte for 2000?"
+    pages: [austbygde-arsregnskap-2000:2]
+
+  - id: austbygde-sales-2025
+    type: table
+    language: en
+    question: "What were Austbygde Bakeri's sales revenues in 2025?"
+    pages: [austbygde-arsregnskap-2025:2, austbygde-arsregnskap-2025:7]

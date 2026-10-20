@@ -39,11 +39,20 @@ class MissingAPIKeyError(ModelError):
 
 
 @dataclass(frozen=True)
+class Image:
+    """A picture sent with a message, such as a scanned page."""
+
+    data: bytes
+    media_type: Literal["image/png", "image/jpeg"] = "image/png"
+
+
+@dataclass(frozen=True)
 class Message:
-    """One turn of a conversation."""
+    """One turn of a conversation: text, and any pictures to read with it."""
 
     role: Role
     text: str
+    images: tuple[Image, ...] = ()  # shown to the model before the text
 
 
 @dataclass(frozen=True)
@@ -56,6 +65,9 @@ class Request:
     effort: Effort | None = None  # None means the model's default
     output_schema: type[BaseModel] | None = None  # set it to get JSON of this shape back
     cache_system: bool = False  # keep the system prompt in the prompt cache between calls
+    # More of the system prompt that changes from call to call, such as examples chosen for
+    # this question: it comes after the cached part, so the cached part stays the same
+    system_tail: str = ""
     cache_conversation: bool = False  # keep everything up to the last message in the cache
 
 

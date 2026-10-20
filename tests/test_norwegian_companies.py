@@ -13,8 +13,17 @@ import httpx2
 import pytest
 import yaml
 
+from vardex.documents import load_documents
 from vardex.duckdb_warehouse import DuckDBWarehouse
-from vardex.evals import ExtractionSuite, check_extraction_suite, check_suite, load_suites
+from vardex.evals import (
+    CiteSuite,
+    ExtractionSuite,
+    SearchSuite,
+    check_document_suite,
+    check_extraction_suite,
+    check_suite,
+    load_suites,
+)
 from vardex.extraction import load_extraction
 from vardex.semantic import check, load_knowledge
 from vardex.warehouse import build
@@ -227,8 +236,11 @@ def test_the_semantic_layer_holds_on_the_warehouse(warehouse):
 def test_every_golden_set_is_fit_to_measure_with(warehouse):
     knowledge = load_knowledge(PACK)
     suites = load_suites(PACK)
-    assert {"answer", "key-figures"} <= set(suites)
+    assert {"answer", "key-figures", "search", "cite"} <= set(suites)
     for name, suite in suites.items():
+        if isinstance(suite, SearchSuite | CiteSuite):
+            assert check_document_suite(suite, load_documents(PACK)) == [], name
+            continue
         if isinstance(suite, ExtractionSuite):
             spec = load_extraction(PACK, suite.extraction)
             assert check_extraction_suite(suite, spec, PACK) == [], name
@@ -237,3 +249,11 @@ def test_every_golden_set_is_fit_to_measure_with(warehouse):
         for case in suite.cases:
             if case.sql:
                 rows(warehouse, case.sql)  # every reference query runs on the pack's tables
+
+
+def test_every_document_is_about_a_company_by_its_organisation_number():
+    documents = load_documents(PACK)
+    assert documents.about == "Company"
+    for document in documents.documents:
+        assert len(document.about) == 9 and document.about.isdigit(), document.id
+        assert document.url.startswith("https://"), document.id

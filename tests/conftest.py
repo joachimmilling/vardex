@@ -4,6 +4,9 @@ import os
 
 import psycopg
 import pytest
+from fakes import FakeEmbedder
+
+from vardex import cli
 
 SCHEMA = "vardex_test"
 
@@ -25,3 +28,11 @@ def create_tables(url: str, sql: str) -> None:
     """Run setup SQL, several statements at once, as the account in the URL."""
     with psycopg.connect(url, autocommit=True) as con:
         con.execute(sql)
+
+
+@pytest.fixture(autouse=True)
+def no_real_models(monkeypatch):
+    """Every command embeds with the fake embedder and reranks with none, so no test ever
+    loads an embedding model. A test that needs a reranker sets its own."""
+    monkeypatch.setattr(cli, "connect_embedder", lambda settings: FakeEmbedder())
+    monkeypatch.setattr(cli, "connect_reranker", lambda settings, rerank=True: None)

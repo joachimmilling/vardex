@@ -1,4 +1,5 @@
-"""The engine must never depend on a specific pack, a model provider or a database."""
+"""The engine must never depend on a specific pack, a model provider, a database or a library
+that reads documents or runs embedding models."""
 
 import ast
 from pathlib import Path
@@ -9,10 +10,12 @@ PACKS = ROOT / "packs"
 
 
 def test_engine_knows_no_pack_by_name():
-    pack_names = [folder.name for folder in PACKS.iterdir() if folder.is_dir()]
+    folders = [folder.name for folder in PACKS.iterdir() if folder.is_dir()]
+    # A pack's name as it is written, and as it is written in code: norwegian_companies too
+    names = {spelling for name in folders for spelling in (name, name.replace("-", "_"))}
     for file in ENGINE.rglob("*.py"):
         text = file.read_text(encoding="utf-8")
-        for name in pack_names:
+        for name in names:
             assert name not in text, f"{file.name} mentions the pack {name!r}"
 
 
@@ -43,11 +46,14 @@ def test_only_the_anthropic_client_imports_anthropic():
             assert module.split(".")[0] != "anthropic", f"{file.name} imports {module!r}"
 
 
-# Each database driver, and the only engine modules that may import it. warehouse.py builds a
-# pack's DuckDB file; every query goes through a Warehouse.
+# Each database driver or library, and the only engine modules that may import it.
+# warehouse.py builds a pack's DuckDB file; every query goes through a Warehouse, every search
+# through an Index, every embedding through an Embedder, and only documents.py reads a PDF.
 DRIVERS = {
     "duckdb": {"duckdb_warehouse.py", "warehouse.py"},
-    "psycopg": {"postgres_warehouse.py"},
+    "psycopg": {"postgres_warehouse.py", "pgvector_index.py"},
+    "fastembed": {"fastembed_models.py"},
+    "pypdfium2": {"documents.py"},
 }
 
 

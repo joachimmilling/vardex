@@ -14,6 +14,7 @@ built or in one a company runs, and `check` tests every claim they make against 
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -144,7 +145,10 @@ class Questions(BaseModel):
 
     dialect: str = "duckdb"  # the SQL dialect of the pack's metrics and examples
     glossary: dict[str, str] = {}  # the pack's words, and what each means in the tables
-    examples: list[Example] = []
+    style: list[str] = []  # how answers are written for this pack, such as amounts and units
+    examples: list[Example] = []  # the pool of worked examples
+    show_examples: int | None = Field(default=None, ge=1)  # per question; None shows them all
+    choose_examples: Literal["similar", "first"] = "similar"  # the most like it, or the first
 
 
 @dataclass(frozen=True)

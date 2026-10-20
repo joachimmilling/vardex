@@ -8,7 +8,7 @@ trail red, and planned blocks are dashed. After a minor release, set RELEASED an
 
 from pathlib import Path
 
-RELEASED = "0.6"
+RELEASED = "0.7"
 
 THEMES = {
     "light": {

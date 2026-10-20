@@ -44,7 +44,7 @@ KEYED_COLUMNS = "{'key': 'VARCHAR', 'status': 'INTEGER', 'body': 'JSON', 'error'
 class NodeResult(BaseModel):
     """dbt's result for one model, test or source, from run_results.json or sources.json."""
 
-    unique_id: str  # such as test.norwegian_companies.currency_is_a_known_code
+    unique_id: str  # such as test.my_pack.currency_is_a_known_code
     status: str  # success, error, pass, warn, fail, skipped or runtime error
     message: str | None = None
     failures: int | None = None  # for a test: the rows that broke it

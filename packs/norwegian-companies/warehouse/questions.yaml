@@ -1,7 +1,8 @@
 # What a model writing SQL for this pack should know beyond the tables: the pack's own words,
-# and worked examples. Every example is checked on every ingest: it must pass Vardex's SQL
-# checks and run on the warehouse. On a warehouse with another dialect, the metrics and
-# examples are rewritten for it.
+# how its answers are written, and a pool of worked examples. Every example is checked on every
+# ingest: it must pass Vardex's SQL checks and run on the warehouse. On a warehouse with
+# another dialect, the metrics and examples are rewritten for it. No example may be a question
+# in the golden set, evals/answer.yaml: vardex eval refuses a suite that has one.
 dialect: duckdb  # the SQL dialect of the pack's metrics and examples
 
 glossary:
@@ -22,6 +23,14 @@ glossary:
     The change in a figure from one fiscal year to the next, computed in SQL. Compare only
     fiscal years of twelve months (period_months = 12): a first or changed year may be shorter
     or longer, and its change is not growth.
+
+style:
+  - Write amounts with their currency, such as NOK 2.1 billion or USD 103.8 billion. Most
+    accounts are in kroner, but some groups report in US dollars or euros.
+
+# The prompt shows the four examples whose questions mean the most like the one asked.
+show_examples: 4
+choose_examples: similar
 
 examples:
   - question: How many limited companies are there in each county?
@@ -71,3 +80,164 @@ examples:
       where legal_form in ('AS', 'ASA') and founded_on >= date '2020-01-01'
       group by year(founded_on)
       order by year
+
+  - question: Hvor mange ansatte har Telenor ASA?
+    sql: |
+      select name, employees
+      from dim_companies
+      where name = 'TELENOR ASA'
+
+  - question: What was Orkla's operating profit in 2024, for the group?
+    sql: |
+      select c.name, a.currency, a.operating_profit
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'ORKLA ASA' and a.accounts_type = 'group' and a.fiscal_year = 2024
+
+  - question: In which municipality and county is Telenor ASA registered?
+    sql: |
+      select name, municipality, county
+      from dim_companies
+      where name = 'TELENOR ASA'
+
+  - question: How many limited companies are there in Innlandet?
+    sql: |
+      select count(distinct orgnr) as companies
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and county = 'Innlandet'
+
+  - question: Hvor mange aksjeselskaper i Finnmark er konkurs?
+    sql: |
+      select count(distinct orgnr) as companies
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and county = 'Finnmark' and is_bankrupt
+
+  - question: Which ten limited companies in Rogaland have the most employees?
+    sql: |
+      select name, employees
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and county = 'Rogaland'
+      order by employees desc nulls last
+      limit 10
+
+  - question: Which three groups had the highest net profit in 2024, in kroner?
+    sql: |
+      select c.name, a.currency, a.net_profit_nok
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'group' and a.fiscal_year = 2024
+      order by a.net_profit_nok desc nulls last
+      limit 3
+
+  - question: What was the Telenor group's equity ratio in 2024?
+    sql: |
+      select c.name, a.equity / nullif(a.total_assets, 0) as equity_ratio
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'TELENOR ASA' and a.accounts_type = 'group' and a.fiscal_year = 2024
+
+  - question: >
+      Hvilke fem konsern hadde høyest driftsmargin i 2024, blant dem med over 10 milliarder
+      kroner i omsetning?
+    sql: |
+      select c.name, a.revenue_nok,
+             a.operating_profit_nok / nullif(a.revenue_nok, 0) as operating_margin_nok
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'group' and a.fiscal_year = 2024
+        and a.revenue_nok > 10000000000
+      order by operating_margin_nok desc nulls last
+      limit 5
+
+  - question: By how much did the Orkla group's revenue grow from 2023 to 2024?
+    sql: |
+      select c.name, a.currency,
+             max(case when a.fiscal_year = 2024 then a.revenue end)
+             - max(case when a.fiscal_year = 2023 then a.revenue end) as revenue_change,
+             max(case when a.fiscal_year = 2024 then a.revenue end)
+             / nullif(max(case when a.fiscal_year = 2023 then a.revenue end), 0) - 1
+             as revenue_growth
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'ORKLA ASA' and a.accounts_type = 'group'
+        and a.fiscal_year in (2023, 2024) and a.period_months = 12
+      group by c.name, a.currency
+
+  - question: >
+      Which industries had the most people employed in Norway in 2024, according to
+      Statistics Norway?
+    sql: |
+      select s.sn2007_code, s.employed
+      from fct_industry_statistics as s
+      where s.year = 2024 and s.level = 'division'
+      order by s.employed desc nulls last
+      limit 10
+
+  - question: How many limited companies are there in construction?
+    sql: |
+      select count(distinct c.orgnr) as companies
+      from dim_companies as c
+      join dim_industries as i on i.industry_code = c.industry_code
+      where c.legal_form in ('AS', 'ASA') and i.section_code = 'F'
+
+  - question: Hvor mange aksjeselskaper i Oslo ble stiftet i 2024?
+    sql: |
+      select count(distinct orgnr) as companies
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and county = 'Oslo' and year(founded_on) = 2024
+
+  - question: Which counties have the most limited companies being wound up?
+    sql: |
+      select county, count(distinct orgnr) as companies
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and is_being_wound_up and county is not null
+      group by county
+      order by companies desc
+
+  - question: Which groups filed their 2024 accounts in US dollars?
+    sql: |
+      select c.name, a.revenue
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'group' and a.fiscal_year = 2024 and a.currency = 'USD'
+      order by a.revenue desc nulls last
+
+  - question: >
+      What was the total revenue of seafood companies in 2024, in their own accounts, in
+      kroner?
+    sql: |
+      select sum(a.revenue_nok) as revenue_nok, count(distinct a.orgnr) as companies
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'company' and a.fiscal_year = 2024
+        and (c.industry_code like '03%' or c.industry_code like '10.20%'
+             or c.industry_code = '46.322')
+
+  - question: Hvor mange ansatte har aksjeselskapene i Troms til sammen?
+    sql: |
+      select sum(employees) as employees, count(distinct orgnr) as companies
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and county = 'Troms'
+
+  - question: Which limited companies with more than 500 employees were founded after 2015?
+    sql: |
+      select name, employees, founded_on
+      from dim_companies
+      where legal_form in ('AS', 'ASA') and employees > 500 and founded_on > date '2015-12-31'
+      order by employees desc
+
+  - question: Which company had the largest operating loss in 2024, in its own accounts?
+    sql: |
+      select c.name, a.currency, a.operating_profit_nok
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where a.accounts_type = 'company' and a.fiscal_year = 2024
+      order by a.operating_profit_nok asc nulls last
+      limit 1
+
+  - question: Hva var omsetningen til Telenor-konsernet i 2024, i norske kroner?
+    sql: |
+      select c.name, a.currency, a.revenue_nok
+      from fct_accounts as a
+      join dim_companies as c on c.orgnr = a.orgnr
+      where c.name = 'TELENOR ASA' and a.accounts_type = 'group' and a.fiscal_year = 2024
