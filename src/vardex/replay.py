@@ -1,16 +1,19 @@
-"""Record and replay: a run's model answers and query results, saved and played back.
+"""Record and replay: a run's model answers, query results and searches, saved and played back.
 
-A recording is taken at Vardex's own two interfaces, ModelClient and Warehouse, so it holds
-Vardex's words only: no API key, no provider's wire format, no database driver. A replay
-needs neither a key nor a warehouse, costs nothing and gives the same answers every time.
+A recording is taken at Vardex's own interfaces: ModelClient and Warehouse, and for documents
+Embedder, Reranker and Index. It holds Vardex's words only: no API key, no provider's wire
+format, no database driver. A replay needs no key, no warehouse, no index and no embedding
+model, costs nothing and gives the same answers every time.
 
 A replayed request must match a recorded one exactly. Anything else means a prompt, the pack,
 the code that builds a request or the model has changed since the recording, and the run must
 be recorded again.
 """
 
+import base64
 import hashlib
 import json
+from array import array
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
@@ -18,8 +21,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from vardex.documents import DocumentSpec
+from vardex.embeddings import Embedder, Reranker, Vector
 from vardex.llm import Answer, ModelClient, Request
 from vardex.pricing import Usage
+from vardex.retrieval import Filters, Index, Passage
 from vardex.sql import Column, QueryError, Result, Table, Warehouse
 
 
@@ -39,17 +45,41 @@ def request_key(model: str, request: Request) -> str:
         {
             "model": model,
             "system": request.system,
-            "messages": [[m.role, m.text] for m in request.messages],
+            # A picture counts by its fingerprint; a message without one keeps its old key
+            "messages": [
+                [m.role, m.text, *([digest([i.media_type, i.data.hex()]) for i in m.images])]
+                for m in request.messages
+            ],
             "max_tokens": request.max_tokens,
             "effort": request.effort,
             "schema": schema,
             "cache": [request.cache_system, request.cache_conversation],
+            # A request without a tail keeps the key it had before tails existed
+            **({"system_tail": request.system_tail} if request.system_tail else {}),
         }
     )
 
 
 def query_key(sql: str, max_rows: int) -> str:
     return digest([sql, max_rows])
+
+
+def pack_vector(vector: Vector) -> str:
+    """A vector as text, exactly: its 32-bit numbers, as embedding models give them, in
+    base64. A quarter of the size of the numbers written out."""
+    return base64.b64encode(array("f", vector).tobytes()).decode("ascii")
+
+
+def unpack_vector(text: str) -> Vector:
+    return array("f", base64.b64decode(text)).tolist()
+
+
+def vector_key(model: str, kind: str, text: str) -> str:
+    return digest([model, kind, text])
+
+
+def search_key(how: str, what: str, filters: Filters, limit: int) -> str:
+    return digest([how, what, asdict(filters), limit])
 
 
 def to_json(value: Any) -> Any:
@@ -110,6 +140,12 @@ class Recording:
     answers: dict[str, list[dict[str, Any]]] = field(default_factory=dict)  # in arrival order
     queries: dict[str, dict[str, Any]] = field(default_factory=dict)  # a result or an error
     verdicts: dict[str, dict[str, Any]] = field(default_factory=dict)  # each case's grades
+    embedder: str = ""  # the embedding model, when one was used
+    reranker: str = ""  # the reranker, when one was used
+    vectors: dict[str, str] = field(default_factory=dict)  # by text: a packed vector
+    scores: dict[str, list[float]] = field(default_factory=dict)  # by query and texts
+    searches: dict[str, list[int]] = field(default_factory=dict)  # by search: passage ids
+    passages: dict[int, dict[str, Any]] = field(default_factory=dict)  # each passage once
 
     def save(self, path: Path) -> None:
         """Write it as JSON lines: what was recorded first, then one line per call or query,
@@ -120,12 +156,19 @@ class Recording:
             "dialect": self.dialect,
             "recorded_on": self.recorded_on,
             "tables": [asdict(table) for table in self.tables or []],
+            "embedder": self.embedder,
+            "reranker": self.reranker,
         }
         lines = [json.dumps(head, ensure_ascii=False)]
         for key, answers in self.answers.items():
             lines += [json.dumps({"answer": key, **a}, ensure_ascii=False) for a in answers]
         for key, query in self.queries.items():
             lines.append(json.dumps({"query": key, **query}, ensure_ascii=False))
+        lines += [json.dumps({"vector": k, "values": v}) for k, v in self.vectors.items()]
+        lines += [json.dumps({"scores": k, "values": v}) for k, v in self.scores.items()]
+        lines += [json.dumps({"search": k, "passages": v}) for k, v in self.searches.items()]
+        for pid, passage in self.passages.items():
+            lines.append(json.dumps({"passage": pid, **passage}, ensure_ascii=False))
         for case, verdict in self.verdicts.items():
             lines.append(json.dumps({"verdict": case, **verdict}, ensure_ascii=False))
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,6 +185,14 @@ class Recording:
                 recording.answers.setdefault(line.pop("answer"), []).append(line)
             elif "query" in line:
                 recording.queries[line.pop("query")] = line
+            elif "vector" in line:
+                recording.vectors[line["vector"]] = line["values"]
+            elif "scores" in line:
+                recording.scores[line["scores"]] = line["values"]
+            elif "search" in line:
+                recording.searches[line["search"]] = line["passages"]
+            elif "passage" in line:
+                recording.passages[line.pop("passage")] = line
             else:
                 recording.verdicts[line.pop("verdict")] = line
         return recording
@@ -233,6 +284,154 @@ class ReplayWarehouse:
         if "error" in recorded:
             raise QueryError(recorded["error"])
         return load_result(recorded["result"])
+
+    def close(self) -> None:
+        pass
+
+
+class RecordingEmbedder:
+    """An Embedder that passes every text on, and records its vector."""
+
+    def __init__(self, embedder: Embedder, recording: Recording) -> None:
+        self.embedder = embedder
+        self.model = embedder.model
+        self.dimensions = embedder.dimensions
+        self.recording = recording
+        recording.embedder = embedder.model
+
+    def embed_documents(self, texts: list[str]) -> list[Vector]:
+        vectors = self.embedder.embed_documents(texts)
+        for text, vector in zip(texts, vectors, strict=True):
+            self.recording.vectors[vector_key(self.model, "document", text)] = pack_vector(vector)
+        return vectors
+
+    def embed_query(self, text: str) -> Vector:
+        vector = self.embedder.embed_query(text)
+        self.recording.vectors[vector_key(self.model, "query", text)] = pack_vector(vector)
+        return vector
+
+
+class ReplayEmbedder:
+    """An Embedder that gives back the vectors of a recording: no model is loaded."""
+
+    def __init__(self, recording: Recording) -> None:
+        self.model = recording.embedder
+        self.dimensions = 0  # not known, and not needed: nothing is stored
+        self.recording = recording
+
+    def vector(self, kind: str, text: str) -> Vector:
+        packed = self.recording.vectors.get(vector_key(self.model, kind, text))
+        if packed is None:
+            raise NotRecorded(f"a text that was not embedded: {' '.join(text.split())[:80]}")
+        return unpack_vector(packed)
+
+    def embed_documents(self, texts: list[str]) -> list[Vector]:
+        return [self.vector("document", text) for text in texts]
+
+    def embed_query(self, text: str) -> Vector:
+        return self.vector("query", text)
+
+
+class RecordingReranker:
+    """A Reranker that passes every question on, and records its scores."""
+
+    def __init__(self, reranker: Reranker, recording: Recording) -> None:
+        self.reranker = reranker
+        self.model = reranker.model
+        self.recording = recording
+        recording.reranker = reranker.model
+
+    def score(self, query: str, texts: list[str]) -> list[float]:
+        scores = self.reranker.score(query, texts)
+        self.recording.scores[digest([self.model, query, texts])] = scores
+        return scores
+
+
+class ReplayReranker:
+    """A Reranker that gives back the scores of a recording."""
+
+    def __init__(self, recording: Recording) -> None:
+        self.model = recording.reranker
+        self.recording = recording
+
+    def score(self, query: str, texts: list[str]) -> list[float]:
+        scores = self.recording.scores.get(digest([self.model, query, texts]))
+        if scores is None:
+            raise NotRecorded(f"a rerank that was not recorded: {query[:80]}")
+        return scores
+
+
+def dump_passage(passage: Passage) -> dict[str, Any]:
+    return {"document": passage.document.model_dump(), "page": passage.page, "text": passage.text}
+
+
+class RecordingIndex:
+    """An Index that passes every search on, and records the passages it found. Each passage
+    is kept once, however many searches find it."""
+
+    def __init__(self, index: Index, recording: Recording) -> None:
+        self.index = index
+        self.name = index.name
+        self.recording = recording
+
+    def keep(self, key: str, passages: list[Passage]) -> list[Passage]:
+        self.recording.searches[key] = [p.id for p in passages]
+        for p in passages:
+            self.recording.passages[p.id] = dump_passage(p)
+        return passages
+
+    def documents(self) -> dict[str, str]:
+        return self.index.documents()
+
+    def put(self, *args: Any) -> None:
+        raise NotImplementedError("a recording only searches")
+
+    def remove(self, document: str) -> None:
+        raise NotImplementedError("a recording only searches")
+
+    def by_meaning(self, vector: Vector, filters: Filters, limit: int) -> list[Passage]:
+        found = self.index.by_meaning(vector, filters, limit)
+        return self.keep(search_key("meaning", pack_vector(vector), filters, limit), found)
+
+    def by_words(self, query: str, filters: Filters, limit: int) -> list[Passage]:
+        found = self.index.by_words(query, filters, limit)
+        return self.keep(search_key("words", query, filters, limit), found)
+
+    def close(self) -> None:
+        self.index.close()
+
+
+class ReplayIndex:
+    """An Index that answers searches from a recording."""
+
+    def __init__(self, recording: Recording) -> None:
+        self.name = "a recording"
+        self.recording = recording
+
+    def found(self, key: str, what: str) -> list[Passage]:
+        ids = self.recording.searches.get(key)
+        if ids is None:
+            raise NotRecorded(f"a search that was not recorded: {what[:80]}")
+        return [self.passage(int(pid)) for pid in ids]
+
+    def passage(self, pid: int) -> Passage:
+        data = self.recording.passages[pid]
+        return Passage(pid, DocumentSpec(**data["document"]), data["page"], data["text"])
+
+    def documents(self) -> dict[str, str]:
+        return {}
+
+    def put(self, *args: Any) -> None:
+        raise NotImplementedError("a replay only searches")
+
+    def remove(self, document: str) -> None:
+        raise NotImplementedError("a replay only searches")
+
+    def by_meaning(self, vector: Vector, filters: Filters, limit: int) -> list[Passage]:
+        return self.found(search_key("meaning", pack_vector(vector), filters, limit), "by meaning")
+
+    def by_words(self, query: str, filters: Filters, limit: int) -> list[Passage]:
+        return self.found(search_key("words", query, filters, limit), query)
 
     def close(self) -> None:
         pass

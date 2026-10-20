@@ -1,0 +1,118 @@
+# The golden set for vardex cite: questions answered from the pack's documents, each with the
+# pages a right answer cites, checked by a person; or expect: not_found for a question the
+# documents do not answer. Answers are graded in code (did it answer, does it cite one of the
+# pages) and by a judge (is every claim in the passages it cites).
+description: Questions answered from Norwegian companies' reports, with citations.
+capability: cite
+threshold: 0.8
+
+cases:
+  - id: europris-dividend-paid-q2
+    type: figure
+    language: nb
+    question: "Hvor mye utbytte betalte Europris i andre kvartal 2026?"
+    expect: answer
+    pages: [europris-q2-2026:5, europris-q2-2026:16]
+  - id: bouvet-extra-dividend-nov-2025
+    type: policy
+    language: en
+    question: "What additional dividend per share did Bouvet's board decide on in November 2025?"
+    expect: answer
+    pages: [bouvet-arsrapport-2025:58, bouvet-arsrapport-2025:78, bouvet-arsrapport-2025:88]
+  - id: bouvet-q2-fee-revenue-growth
+    type: reason
+    language: en
+    question: "Why did Bouvet's fee revenue from its own employees grow in the second quarter of 2026?"
+    expect: answer
+    pages: [bouvet-q2-2026:4]
+  - id: veidekke-q2-strong-cash-flow
+    type: reason
+    language: nb
+    question: "Hvorfor var Veidekkes kontantstrøm fra driften så sterk i andre kvartal 2026?"
+    expect: answer
+    pages: [veidekke-q2-2026:9]
+  - id: veidekke-project-committee-threshold
+    type: policy
+    language: en
+    question: "Above what contract value must a Veidekke bid be reviewed by the board's project committee?"
+    expect: answer
+    pages: [veidekke-arsrapport-2025:30, veidekke-arsrapport-2025:40, veidekke-arsrapport-2025:42]
+  - id: smn-staff-replacement-target
+    type: people
+    language: nb
+    question: "Hvor stor andel av dem som slutter, vil SpareBank 1 SMN erstatte?"
+    expect: answer
+    pages: [smn-q2-2026:9, smn-q2-2026:13]
+  - id: kongsberg-malaysia-nsm-licence
+    type: risk
+    language: en
+    question: "What happened to Kongsberg's export licence for NSM missiles to Malaysia?"
+    expect: answer
+    pages: [kongsberg-q2-2026:28]
+  - id: austevoll-dividend-q2
+    type: figure
+    language: en
+    question: "What dividend per share did Austevoll pay in the second quarter of 2026?"
+    expect: answer
+    pages: [austevoll-q2-2026:4, austevoll-q2-2026:16]
+  - id: orkla-new-auditor
+    type: people
+    language: en
+    question: "Who will be Orkla's external auditor from 2027?"
+    expect: answer
+    pages: [orkla-q2-2026:16]
+  - id: hydro-norway-power-coverage
+    type: policy
+    language: nb
+    question: "Hvor stor del av Hydros kraftbehov i Norge på 2030-tallet er dekket?"
+    expect: answer
+    pages: [hydro-q2-2026:3]
+  - id: equinor-eirin-gina-krog
+    type: outlook
+    language: en
+    question: "How much longer is the Eirin field expected to extend production from Equinor's Gina Krog platform?"
+    expect: answer
+    pages: [equinor-q2-2026:5]
+  - id: mowi-us-tariff-rate
+    type: figure
+    language: en
+    question: "What is the weighted average US tariff rate on salmon Mowi imports to the US from August 2026?"
+    expect: answer
+    pages: [mowi-q2-2026:20]
+  - id: mowi-aarskog-ceo-years
+    type: people
+    language: nb
+    question: "Hvilke år ledet Alf-Helge Aarskog Mowi?"
+    expect: answer
+    pages: [mowi-annual-report-2025:47]
+  - id: equinor-q3-2026-production
+    type: absent
+    language: en
+    question: "What was Equinor's total equity production in the third quarter of 2026?"
+    expect: not_found
+  - id: veidekke-share-price-september
+    type: absent
+    language: nb
+    question: "Hva var Veidekkes aksjekurs 30. september 2026?"
+    expect: not_found
+  - id: europris-employees-end-2025
+    type: absent
+    language: nb
+    question: "Hvor mange ansatte hadde Europris ved utgangen av 2025?"
+    expect: not_found
+  - id: orkla-december-cmd-targets
+    type: absent
+    language: en
+    question: "What financial targets did Orkla announce at its Capital Markets Day in December 2026?"
+    expect: not_found
+  - id: hydro-ceo-pay-2025
+    type: absent
+    language: en
+    question: "How much was Hydro's chief executive paid in 2025?"
+    expect: not_found
+
+  - id: austbygde-dividend-2000-cited
+    type: table
+    language: en
+    question: "How much did Austbygde Bakeri set aside for dividends for 2000, according to its filed accounts?"
+    pages: [austbygde-arsregnskap-2000:2]

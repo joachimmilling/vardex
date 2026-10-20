@@ -1,5 +1,6 @@
 """Record a run with a fake model and a real DuckDB file, then replay it with neither."""
 
+from array import array
 from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -14,13 +15,23 @@ from vardex.replay import (
     NotRecorded,
     Recording,
     RecordingClient,
+    RecordingEmbedder,
+    RecordingIndex,
+    RecordingReranker,
     RecordingWarehouse,
     ReplayClient,
+    ReplayEmbedder,
+    ReplayIndex,
+    ReplayReranker,
     ReplayWarehouse,
+    digest,
     from_json,
+    pack_vector,
     request_key,
     to_json,
+    unpack_vector,
 )
+from vardex.retrieval import search
 from vardex.sql import QueryError
 from vardex.text_to_sql import answer, build_request
 
@@ -114,3 +125,63 @@ def test_a_recording_holds_no_key_and_no_provider_format(recorded, tmp_path):
     text = (tmp_path / "recording.jsonl").read_text(encoding="utf-8")
     assert "api_key" not in text and "x-api-key" not in text
     assert '"stop_reason": "end"' in text  # Vardex's words, not end_turn
+
+
+def test_a_picture_changes_the_key_but_a_message_without_one_keeps_its_key():
+    from vardex.llm import Image, Message, Request
+
+    plain = Request(system="s", messages=[Message("user", "Write out this page.")])
+    with_picture = Request(
+        system="s", messages=[Message("user", "Write out this page.", (Image(b"\x89PNG1"),))]
+    )
+    other_picture = Request(
+        system="s", messages=[Message("user", "Write out this page.", (Image(b"\x89PNG2"),))]
+    )
+    keys = {request_key("m", r) for r in (plain, with_picture, other_picture)}
+    assert len(keys) == 3
+    assert request_key("m", plain) == digest(
+        {
+            "model": "m",
+            "system": "s",
+            "messages": [["user", "Write out this page."]],
+            "max_tokens": 4096,
+            "effort": None,
+            "schema": None,
+            "cache": [False, False],
+        }
+    )
+
+
+def test_a_vector_is_kept_exactly():
+    vector = [0.1, -2.5, 1 / 3]
+    assert unpack_vector(pack_vector(vector)) == array("f", vector).tolist()
+
+
+def test_a_search_is_recorded_and_replayed_with_no_index_and_no_model(tmp_path):
+    from fakes import FakeEmbedder, FakeReranker, MemoryIndex
+    from test_retrieval import document
+
+    index, embedder = MemoryIndex(), FakeEmbedder()
+    texts = [(1, "Salmon harvest rose"), (2, "Gas fell"), (3, "Salmon prices fell")]
+    index.put(document(), "f", texts, embedder.embed_documents([t for _, t in texts]))
+    recording = Recording("", "", "", "2026-10-16")
+    live = search(
+        RecordingIndex(index, recording),
+        RecordingEmbedder(embedder, recording),
+        "salmon harvest",
+        reranker=RecordingReranker(FakeReranker(), recording),
+    )
+    recording.save(tmp_path / "search.jsonl")
+    loaded = Recording.load(tmp_path / "search.jsonl")
+    assert (loaded.embedder, loaded.reranker) == ("fake-embedder", "fake-reranker")
+    replayed = search(
+        ReplayIndex(loaded),
+        ReplayEmbedder(loaded),
+        "salmon harvest",
+        reranker=ReplayReranker(loaded),
+    )
+    assert replayed == live
+    lines = (tmp_path / "search.jsonl").read_text().splitlines()
+    assert sum('"passage":' in line for line in lines) == 3  # each passage once
+    with pytest.raises(NotRecorded, match="not embedded"):
+        search(ReplayIndex(loaded), ReplayEmbedder(loaded), "gas")

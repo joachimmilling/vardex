@@ -1,15 +1,15 @@
 """Provenance: where each number in an answer came from.
 
 A Cell is one value in a query's result: a row and a column of the rows a warehouse returned.
-A Figure is one number written in an answer, with every place it can be traced to: cells, the
-SQL that ran, the question itself, or the assumptions shown beside the answer. A number that
-traces to none of them came from the model, not the data, and an answer that holds one is not
-shown.
+A Quote is words copied from one page of a document. A Figure is one number written in an
+answer, with every place it can be traced to: cells or quotes, the SQL that ran, the question
+itself, or the assumptions shown beside the answer. A number that traces to none of them came
+from the model, not the data, and an answer that holds one is not shown.
 """
 
 import difflib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -54,6 +54,17 @@ class Cell:
 
 
 @dataclass(frozen=True)
+class Quote:
+    """Words copied from one page of a document, and where a person can read them."""
+
+    document: str  # the document's id
+    title: str
+    page: int  # the first page is 1, as a PDF viewer counts
+    text: str
+    link: str  # the document's address, opened at the page
+
+
+@dataclass(frozen=True)
 class Figure:
     """A number written in an answer, and everywhere it can be traced to."""
 
@@ -62,10 +73,16 @@ class Figure:
     in_sql: bool  # the query itself holds it, such as the year in where fiscal_year = 2025
     in_question: bool
     in_assumptions: bool = False  # such as "at least 50 employees", from the pack's notes
+    quotes: list[Quote] = field(default_factory=list)  # quotes from documents that hold it
 
     @property
     def traced(self) -> bool:
-        return bool(self.cells) or self.in_sql or self.in_question or self.in_assumptions
+        return (
+            bool(self.cells or self.quotes)
+            or self.in_sql
+            or self.in_question
+            or self.in_assumptions
+        )
 
 
 def readings(token: str) -> set[tuple[Decimal, int]]:
@@ -205,6 +222,34 @@ def trace(
             )
         )
     return figures
+
+
+def trace_quotes(text: str, quotes: list[Quote], question: str) -> list[Figure]:
+    """Every number in an answer from documents, with the quotes and question it can be traced
+    to. A number in an answer must be in the words it cites, as written or rounded, or in the
+    question: 197.3 million may be written 197 million, but never worked out from two others.
+    Something that reads as no number at all, such as the date 18.04.18, must be copied as
+    written."""
+    in_question = amounts(question)
+    in_quotes = [(quote, amounts(quote.text)) for quote in quotes]
+    figures = []
+    for written, values, word in numbers_in(text):
+        token = written.strip()
+        if values:
+            exact = {value for value, _ in values} if word is None else set()
+            scaled = targets(values, word) if word else []
+            asked = mentions(in_question, exact, scaled)
+            cited = [quote for quote, found in in_quotes if mentions(found, exact, scaled)]
+        else:  # it reads as no number, such as a date: it must be copied as written
+            asked = written_in(token, question)
+            cited = [quote for quote, _ in in_quotes if written_in(token, quote.text)]
+        figures.append(Figure(token, [], in_sql=False, in_question=asked, quotes=cited))
+    return figures
+
+
+def written_in(token: str, text: str) -> bool:
+    """True when a text holds a token as written, not inside a longer word or number."""
+    return re.search(rf"(?<![\w.,]){re.escape(token)}(?![\w])", text) is not None
 
 
 def misspelt(text: str, names: list[str]) -> list[tuple[str, str]]:

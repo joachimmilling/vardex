@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from vardex.anthropic_client import AnthropicClient
 from vardex.config import Settings
-from vardex.llm import Message, MissingAPIKeyError, ModelError, Request
+from vardex.llm import Image, Message, MissingAPIKeyError, ModelError, Request
 
 SETTINGS = Settings(anthropic_api_key="test", model="claude-sonnet-5-5")
 REQUEST = Request(system="Be brief.", messages=[Message("user", "What is an organisation number?")])
@@ -185,3 +185,29 @@ def test_count_tokens_uses_the_configured_model():
 def test_no_key_is_a_clear_error():
     with pytest.raises(MissingAPIKeyError):
         AnthropicClient(Settings(anthropic_api_key=None, model="claude-sonnet-5-5"))
+
+
+def test_a_picture_is_sent_before_the_text_as_an_image_block():
+    client, messages = client_with()
+    page = Message("user", "Write out this page.", images=(Image(b"\x89PNG\r\n"),))
+    client.send(Request(system="Be exact.", messages=[page]))
+    content = messages.calls[0]["messages"][0]["content"]
+    assert content == [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0K"},
+        },
+        {"type": "text", "text": "Write out this page."},
+    ]
+
+
+def test_a_system_tail_comes_after_the_cache_breakpoint():
+    client, messages = client_with()
+    request = Request(
+        system="Tables.", messages=REQUEST.messages, cache_system=True, system_tail="Examples."
+    )
+    client.send(request)
+    assert messages.calls[0]["system"] == [
+        {"type": "text", "text": "Tables.", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "Examples."},
+    ]

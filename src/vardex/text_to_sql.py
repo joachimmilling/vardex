@@ -11,11 +11,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from vardex.embeddings import Embedder, nearest
 from vardex.llm import Answer, Effort, Message, ModelClient, Request
 from vardex.packs import describe_problem
 from vardex.prompts import ANSWER, ANSWER_REPAIR, NO_ROWS, SQL_REPAIR, WRITE_SQL
 from vardex.provenance import Figure, misspelt, trace
-from vardex.semantic import Knowledge
+from vardex.semantic import Example, Knowledge, Questions
 from vardex.sql import QueryError, Result, Table, Warehouse, check_sql, format_value, transpile
 
 DIALECTS = {"duckdb": "DuckDB", "postgres": "PostgreSQL", "snowflake": "Snowflake"}
@@ -133,26 +134,49 @@ def describe_metrics(knowledge: Knowledge, dialect: str) -> str:
     return "<metrics>\n" + "\n".join(parts) + "\n</metrics>"
 
 
-def describe_questions(knowledge: Knowledge, dialect: str) -> str:
-    """The pack's glossary, and its worked examples in the warehouse's dialect."""
-    questions = knowledge.questions
-    parts = []
-    if questions.glossary:
-        terms = "\n".join(
-            f"- {term}: {' '.join(meaning.split())}" for term, meaning in questions.glossary.items()
-        )
-        parts.append(f"<glossary>\n{terms}\n</glossary>")
-    for example in questions.examples:
-        sql = transpile(example.sql.strip(), questions.dialect, dialect)
-        parts.append(
-            f"<example>\n<question>{' '.join(example.question.split())}</question>\n"
-            f"<sql>\n{sql}\n</sql>\n</example>"
-        )
-    return "\n".join(parts)
+def choose_examples(
+    questions: Questions, question: str, embedder: Embedder | None
+) -> list[Example]:
+    """The worked examples to show for a question: all of them when the pool is no larger
+    than show_examples; otherwise the ones whose questions mean the most like this one, in the
+    pool's order, or the first ones when the pack asks for them, or there is no embedder."""
+    pool = questions.examples
+    n = questions.show_examples or len(pool)
+    if n >= len(pool):
+        return pool
+    if questions.choose_examples == "first" or embedder is None:
+        return pool[:n]
+    # Two questions are compared as two questions, so both are embedded as queries
+    vectors = [embedder.embed_query(" ".join(example.question.split())) for example in pool]
+    chosen = nearest(embedder.embed_query(question), vectors, n)
+    return [pool[i] for i in sorted(chosen)]
+
+
+def describe_glossary(knowledge: Knowledge) -> str:
+    """The pack's own words, and what each means in the tables."""
+    glossary = knowledge.questions.glossary
+    if not glossary:
+        return ""
+    terms = "\n".join(
+        f"- {term}: {' '.join(meaning.split())}" for term, meaning in glossary.items()
+    )
+    return f"<glossary>\n{terms}\n</glossary>"
+
+
+def describe_examples(knowledge: Knowledge, dialect: str, examples: list[Example]) -> str:
+    """Worked examples, each a question and its SQL in the warehouse's dialect."""
+    parts = [
+        f"<example>\n<question>{' '.join(example.question.split())}</question>\n"
+        f"<sql>\n{transpile(example.sql.strip(), knowledge.questions.dialect, dialect)}\n</sql>\n"
+        "</example>"
+        for example in examples
+    ]
+    return "<examples>\n" + "\n".join(parts) + "\n</examples>" if parts else ""
 
 
 def system_prompt(knowledge: Knowledge, warehouse: Warehouse, today: date, max_rows: int) -> str:
-    """The engine's text-to-SQL prompt, with the pack's semantic layer filled in."""
+    """The engine's text-to-SQL prompt, with the pack's semantic layer filled in: the same for
+    every question, so the prompt cache can keep it."""
     context = "\n\n".join(
         part
         for part in (
@@ -160,7 +184,7 @@ def system_prompt(knowledge: Knowledge, warehouse: Warehouse, today: date, max_r
             describe_ontology(knowledge),
             describe_values(knowledge, warehouse),
             describe_metrics(knowledge, warehouse.dialect),
-            describe_questions(knowledge, warehouse.dialect),
+            describe_glossary(knowledge),
         )
         if part
     )
@@ -181,15 +205,21 @@ def build_request(
     max_rows: int = 100,
     today: date | None = None,
     earlier: list[Message] | None = None,
+    embedder: Embedder | None = None,
 ) -> Request:
     """The request that asks a model to write SQL for one question, after any earlier turns:
-    a question the model asked back, and the person's answer to it."""
+    a question the model asked back, and the person's answer to it. The worked examples are
+    chosen for the question the conversation began with."""
+    turns = [*(earlier or []), Message("user", question)]
+    examples = choose_examples(knowledge.questions, turns[0].text, embedder)
     return Request(
         system=system_prompt(knowledge, warehouse, today or date.today(), max_rows),
-        messages=[*(earlier or []), Message("user", question)],
+        messages=turns,
         effort=effort,
         output_schema=Plan,
         cache_system=True,  # the same tables and metrics for every question
+        # The examples differ from question to question, so they come after the cached part
+        system_tail=describe_examples(knowledge, warehouse.dialect, examples),
     )
 
 
@@ -257,6 +287,13 @@ def plan_and_run(
         request = with_reply(request, answer.text, SQL_REPAIR.format(problems=problems_text))
 
 
+def answer_prompt(style: list[str]) -> str:
+    """The engine's answer prompt, with the pack's own rules for writing answers after it."""
+    if not style:
+        return ANSWER
+    return ANSWER + "\n\n<style>\n" + "\n".join(f"- {rule}" for rule in style) + "\n</style>"
+
+
 def answer_from_rows(
     client: ModelClient,
     question: str,
@@ -264,11 +301,12 @@ def answer_from_rows(
     result: Result,
     *,
     repairs: int,
+    style: list[str] | None = None,
 ) -> tuple[str, list[Figure], list[Answer]]:
     """Ask the model to answer from the rows, and trace every number in what it writes."""
     assumptions = "\n".join(f"- {a}" for a in plan.assumptions) or "- none"
     request = Request(
-        system=ANSWER,
+        system=answer_prompt(style or []),
         messages=[
             Message(
                 "user",
@@ -311,9 +349,11 @@ def answer(
     max_rows: int = 100,
     today: date | None = None,
     earlier: list[Message] | None = None,
+    embedder: Embedder | None = None,
 ) -> Reply:
     """Answer one question from a warehouse: plan a query, run it, answer from its rows.
-    `earlier` holds the turns before it, when the model asked a question back."""
+    `earlier` holds the turns before it, when the model asked a question back. With an
+    embedder, the prompt shows the pack's examples most like the question."""
     request = build_request(
         knowledge,
         warehouse,
@@ -322,6 +362,7 @@ def answer(
         max_rows=max_rows,
         today=today,
         earlier=earlier,
+        embedder=embedder,
     )
     # What the person asked, in all their turns, for the answer and for tracing its numbers
     question = "\n".join([*(m.text for m in earlier or [] if m.role == "user"), question])
@@ -332,7 +373,9 @@ def answer(
         kind: Kind = "clarify" if plan.action == "clarify" else "refuse"
         return Reply(kind, plan.message or "", plan.assumptions, None, [], answers)
     try:
-        text, figures, more = answer_from_rows(client, question, plan, result, repairs=repairs)
+        text, figures, more = answer_from_rows(
+            client, question, plan, result, repairs=repairs, style=knowledge.questions.style
+        )
     except AnswerError as err:
         raise AnswerError(str(err), answers + err.answers, result) from err
     warnings = [

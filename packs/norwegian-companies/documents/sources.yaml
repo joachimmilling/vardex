@@ -1,0 +1,126 @@
+# The documents Vardex answers from for this pack: reports from companies listed on Oslo Børs,
+# in English and Norwegian, and annual accounts filed in the Register of Company Accounts.
+# The register sends every filed copy as pictures of its pages, with no text: those pages are
+# read by a model, and checked by OCR. Run: uv run vardex index packs/norwegian-companies
+about: Company  # every document is about one company, by its organisation number
+
+documents:
+  - id: mowi-annual-report-2025
+    title: Mowi Integrated Annual Report 2025
+    about: "964118191"
+    kind: annual-report
+    period: "2025"
+    language: en
+    url: https://mowi.com/wp-content/uploads/2025/05/Mowi-Annual-Report-2025.pdf
+
+  - id: mowi-q2-2026
+    title: Mowi Q2 2026 Report
+    about: "964118191"
+    kind: quarterly-report
+    period: 2026-Q2
+    language: en
+    url: https://mowi.com/wp-content/uploads/2026/08/Mowi_Q2_2026_Report.pdf
+
+  - id: equinor-q2-2026
+    title: Equinor Second Quarter 2026 Financial Statements and Review
+    about: "923609016"
+    kind: quarterly-report
+    period: 2026-Q2
+    language: en
+    url: https://cdn.equinor.com/files/h61q9gi9/global/c0440c05d52a88d521781730b795e0bb635703ba.pdf
+
+  - id: hydro-q2-2026
+    title: Norsk Hydro Second Quarter Report 2026
+    about: "914778271"
+    kind: quarterly-report
+    period: 2026-Q2
+    language: en
+    url: https://www.hydro.com/globalassets/06-investors/reports-and-presentations/quarterly-reports/2026/q2k9pev/second-quarter-report-2026.pdf
+
+  - id: veidekke-arsrapport-2025
+    title: Veidekke Års- og bærekraftsrapport 2025
+    about: "917103801"
+    kind: annual-report
+    period: "2025"
+    language: nb
+    url: https://mb.cision.com/Main/17348/4328056/4012367.pdf
+
+  - id: veidekke-q2-2026
+    title: Veidekke Rapport 2. kvartal 2026
+    about: "917103801"
+    kind: quarterly-report
+    period: 2026-Q2
+    language: nb
+    url: https://storage.mfn.se/c/aHR0cHM6Ly9hcGkzLm9zbG8ub3Nsb2JvcnMubm8vdjEvbmV3c3JlYWRlci9hdHRhY2htZW50P21lc3NhZ2VJZD02Nzk3NzgmYXR0YWNobWVudElkPTMzMTExNg/rapport_2_kvartal_2026.pdf
+
+  - id: bouvet-arsrapport-2025
+    title: Bouvet Årsrapport 2025
+    about: "974442167"
+    kind: annual-report
+    period: "2025"
+    language: nb
+    url: https://storage.mfn.se/f2b96f49-fedb-401f-bfcd-e2de573afc03/bouvet-annual-report-2025-no.pdf
+
+  - id: bouvet-q2-2026
+    title: Bouvet Kvartalsrapport Q2 2026
+    about: "974442167"
+    kind: quarterly-report
+    period: 2026-Q2
+    language: nb
+    url: https://storage.mfn.se/dbc67f7e-6681-4f31-a4f3-c2126f65d170/bouvet-q2-report-2026-no-web.pdf
+
+  - id: smn-q2-2026
+    title: SpareBank 1 SMN Regnskap 2. kvartal 2026
+    about: "937901003"
+    kind: quarterly-report
+    period: 2026-Q2
+    language: nb
+    url: https://storage.mfn.se/c/aHR0cHM6Ly9hcGkzLm9zbG8ub3Nsb2JvcnMubm8vdjEvbmV3c3JlYWRlci9hdHRhY2htZW50P21lc3NhZ2VJZD02Nzk1NTMmYXR0YWNobWVudElkPTMzMDg3OA/kvartalsrapport-q2-2026-norsk.pdf
+
+  - id: europris-q2-2026
+    title: Europris ASA Q2 2026 Report
+    about: "997639588"
+    kind: quarterly-report
+    period: 2026-Q2
+    language: en
+    url: https://storage.mfn.se/c/aHR0cHM6Ly9hcGkzLm9zbG8ub3Nsb2JvcnMubm8vdjEvbmV3c3JlYWRlci9hdHRhY2htZW50P21lc3NhZ2VJZD02Nzc4NjgmYXR0YWNobWVudElkPTMyOTM4OA/europris_asa_q2_2026_report.pdf
+
+  - id: austevoll-q2-2026
+    title: Austevoll Seafood Financial Report Q2 and H1 2026
+    about: "929975200"
+    kind: quarterly-report
+    period: 2026-Q2
+    language: en
+    url: https://storage.mfn.se/c/aHR0cHM6Ly9hcGkzLm9zbG8ub3Nsb2JvcnMubm8vdjEvbmV3c3JlYWRlci9hdHRhY2htZW50P21lc3NhZ2VJZD02ODAxMzUmYXR0YWNobWVudElkPTMzMTM4Mw/financial-report-q2-and-h1-2026-auss.pdf
+
+  - id: kongsberg-q2-2026
+    title: Kongsberg Gruppen 2. kvartal og 1. halvår 2026
+    about: "943753709"
+    kind: quarterly-report
+    period: 2026-Q2
+    language: nb
+    url: https://storage.mfn.se/c/aHR0cHM6Ly9hcGkzLm9zbG8ub3Nsb2JvcnMubm8vdjEvbmV3c3JlYWRlci9hdHRhY2htZW50P21lc3NhZ2VJZD02NzgwNDAmYXR0YWNobWVudElkPTMyOTU0NQ/kog-kvartalsrapport-norsk.pdf
+
+  - id: orkla-q2-2026
+    title: Orkla Second Quarter and First Half Year 2026
+    about: "910747711"
+    kind: quarterly-report
+    period: 2026-Q2
+    language: en
+    url: https://storage.mfn.se/2c7d1d83-39fb-48de-93ba-1d881e5d13dc/q2-2026-external-report-final.pdf
+
+  - id: austbygde-arsregnskap-2000
+    title: Austbygde Bakeri AS Årsregnskap 2000
+    about: "937104863"
+    kind: annual-accounts
+    period: "2000"
+    language: nb
+    url: https://data.brreg.no/regnskapsregisteret/regnskap/aarsregnskap/kopi/937104863/2000
+
+  - id: austbygde-arsregnskap-2025
+    title: Austbygde Bakeri AS Årsregnskap 2025
+    about: "937104863"
+    kind: annual-accounts
+    period: "2025"
+    language: nb
+    url: https://data.brreg.no/regnskapsregisteret/regnskap/aarsregnskap/kopi/937104863/2025

@@ -271,3 +271,73 @@ def test_confirming_needs_a_keyboard(pack, monkeypatch):
 def test_a_case_that_breaks_the_suite_is_not_written(pack):
     result = add(pack, "Delete it.", "--type", "Not A Type", "--expect", "refuse")
     assert result.exit_code == 1
+
+
+def document_pack(tmp_path, monkeypatch) -> Path:
+    """A pack with one document, a search suite and a cite suite, and its index in memory."""
+    from fakes import FakeEmbedder, MemoryIndex
+    from test_rag import PASSAGES, REPORT
+
+    monkeypatch.chdir(tmp_path)
+    folder = tmp_path / "docs"
+    write(folder / "pack.yaml", {"name": "docs", "description": "Docs.", "recipes": ["analyst"]})
+    write(folder / "warehouse" / "metrics.yaml", METRICS)
+    write(
+        folder / "documents" / "sources.yaml",
+        {"about": "Company", "documents": [REPORT.model_dump()]},
+    )
+    page = "demo-laks-annual-report-2025:40"
+    write(
+        folder / "evals" / "search.yaml",
+        {
+            "description": "Search.",
+            "capability": "search",
+            "k": 1,
+            "threshold": 1.0,
+            "cases": [
+                {"id": "dividend", "type": "lookup", "question": "dividend", "pages": [page]}
+            ],
+        },
+    )
+    write(
+        folder / "evals" / "cite.yaml",
+        {
+            "description": "Cite.",
+            "capability": "cite",
+            "threshold": 1.0,
+            "cases": [
+                {"id": "dividend", "type": "lookup", "question": "dividend?", "pages": [page]}
+            ],
+        },
+    )
+    index = MemoryIndex()
+    texts = [(p.page, p.text) for p in PASSAGES]
+    index.put(REPORT, "f", texts, FakeEmbedder().embed_documents([t for _, t in texts]))
+    monkeypatch.setattr("vardex.cli.connect_index", lambda settings, pack, embedder: index)
+    return folder
+
+
+def test_a_search_suite_needs_no_model_and_reports_recall(tmp_path, monkeypatch):
+    pack = document_pack(tmp_path, monkeypatch)
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: pytest.fail("search needs no model"))
+    result = evaluate(pack, "search", "--record")
+    assert result.exit_code == 0, result.output
+    assert "Mean reciprocal rank: 1.00" in result.output
+    monkeypatch.setattr("vardex.cli.connect_index", lambda *a: pytest.fail("no index in replay"))
+    replayed = evaluate(pack, "search", "--replay")
+    assert replayed.exit_code == 0, replayed.output
+
+
+def test_a_cite_suite_is_graded_recorded_and_replayed(tmp_path, monkeypatch):
+    from test_rag import reply
+
+    pack = document_pack(tmp_path, monkeypatch)
+    answer = reply(True, "NOK 4.20 per share [1].", [(1, "NOK 4.20")])
+    model = FakeModel(answer, VERDICT)
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    result = evaluate(pack, "cite", "--record")
+    assert result.exit_code == 0, result.output
+    assert "2 model calls" in result.output
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: pytest.fail("no model in replay"))
+    replayed = evaluate(pack, "cite", "--replay")
+    assert replayed.exit_code == 0, replayed.output

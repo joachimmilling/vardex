@@ -2,23 +2,35 @@
 
 import json
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
 import typer
 
-from vardex import __version__, evals, text_to_sql
+from vardex import __version__, evals, rag, text_to_sql
 from vardex.anthropic_client import AnthropicClient
 from vardex.calllog import log_call
 from vardex.config import Settings, load_settings
+from vardex.documents import (
+    find_page,
+    load_documents,
+    page_numbers,
+    pages_text,
+    read_document,
+    tesseract,
+)
 from vardex.duckdb_warehouse import DuckDBWarehouse
+from vardex.embeddings import Embedder, Reranker
 from vardex.extraction import ExtractionError, build_request, extract, load_extraction
+from vardex.fastembed_models import FastEmbedder, FastReranker
+from vardex.indexing import index_pack
 from vardex.ingest import http_client
 from vardex.llm import Answer, Conversation, Effort, Ledger, Message, ModelClient, ModelError
 from vardex.llm import ask as ask_model
 from vardex.packs import Language, PackError, load_pack
+from vardex.pgvector_index import PostgresIndex
 from vardex.postgres_warehouse import PostgresWarehouse
 from vardex.pricing import (
     PRICES,
@@ -35,10 +47,17 @@ from vardex.replay import (
     NotRecorded,
     Recording,
     RecordingClient,
+    RecordingEmbedder,
+    RecordingIndex,
+    RecordingReranker,
     RecordingWarehouse,
     ReplayClient,
+    ReplayEmbedder,
+    ReplayIndex,
+    ReplayReranker,
     ReplayWarehouse,
 )
+from vardex.retrieval import Filters, Index, Search, SearchError, search
 from vardex.semantic import Knowledge, check, load_knowledge
 from vardex.sql import QueryError, Result, Warehouse, format_table, format_value
 from vardex.text_to_sql import AnswerError
@@ -89,6 +108,28 @@ def connect_warehouse(url: str | None, pack: Path, settings: Settings) -> Wareho
         return PostgresWarehouse(url, timeout_seconds=timeout)
     path = Path(url) if url else warehouse_path(settings.data_dir, load_pack(pack).name)
     return DuckDBWarehouse(path, timeout_seconds=timeout)
+
+
+def connect_embedder(settings: Settings) -> Embedder:
+    """The embedding model. This is the one place that chooses one."""
+    return FastEmbedder(settings.embedding_model, settings.data_dir / "models")
+
+
+def connect_reranker(settings: Settings, rerank: bool = True) -> Reranker | None:
+    """The reranker, or None when it is turned off. The one place that chooses one."""
+    if not rerank or settings.rerank_model is None:
+        return None
+    return FastReranker(settings.rerank_model, settings.data_dir / "models")
+
+
+def connect_index(settings: Settings, pack: Path, embedder: Embedder) -> Index:
+    """The index of the pack's documents. This is the one place that chooses where it is."""
+    if not settings.index_url:
+        raise SearchError(
+            "VARDEX_INDEX_URL is not set: it must name a PostgreSQL database with pgvector"
+        )
+    name = load_pack(pack).name
+    return PostgresIndex(settings.index_url, name, embedder.model, embedder.dimensions)
 
 
 def interactive() -> bool:
@@ -205,8 +246,13 @@ def extract_command(
     pack: PackArgument,
     name: Annotated[str, typer.Argument(help="An extraction in the pack, such as key-figures.")],
     files: Annotated[
-        list[Path], typer.Argument(help="Text files to extract from.", exists=True, dir_okay=False)
+        list[Path],
+        typer.Argument(help="Text or PDF files to extract from.", exists=True, dir_okay=False),
     ],
+    pages: Annotated[
+        str | None,
+        typer.Option(help="In a PDF, read only these pages, such as 4 or 4-6. Default: all."),
+    ] = None,
     model: ModelOption = None,
     effort: Annotated[
         Effort, typer.Option(help="How much work the model puts in. Ignored on Haiku 4.5.")
@@ -220,10 +266,12 @@ def extract_command(
     ] = False,
     stats: StatsOption = False,
 ) -> None:
-    """Extract values from documents. Prints one JSON line per document that passes the checks."""
+    """Extract values from documents. Prints one JSON line per document that passes the checks.
+    From a PDF, each quoted value also gets the page its quote is on."""
     try:
         spec = load_extraction(pack, name)
-    except PackError as err:
+        wanted = page_numbers(pages) if pages else None
+    except (PackError, ValueError) as err:
         raise fail(str(err)) from err
     if show_prompt:
         request = build_request(spec, files[0].read_text(encoding="utf-8"), effort)
@@ -241,25 +289,30 @@ def extract_command(
     failed = 0
     for file in files:
         ledger = Ledger(client)  # the calls for this file, still logged if one fails
+        read = None
         try:
-            result = extract(
-                ledger, spec, file.read_text(encoding="utf-8"), effort=effort, repairs=repairs
-            )
+            if file.suffix.lower() == ".pdf":
+                read = read_document(file, ledger, tesseract, wanted).pages
+                document = pages_text(read)
+            else:
+                document = file.read_text(encoding="utf-8")
+            result = extract(ledger, spec, document, effort=effort, repairs=repairs)
         except ExtractionError as err:
             failed += 1
             typer.secho(f"{file.name}: {err}", fg=typer.colors.RED, err=True)
-            answers = err.answers
-        except ModelError as err:
+        except (ModelError, PackError) as err:
             for answer in ledger.answers:
                 record(answer, stats)
             raise fail(f"{file.name}: {err}") from err
         else:
+            values = {"file": file.name, **result.values}
+            for field, spec_field in spec.fields.items():
+                quote = result.values.get(f"{field}_quote")
+                if read is not None and spec_field.quote and quote:
+                    values[f"{field}_page"] = find_page(read, quote)
             # default=str writes amounts as exact strings, never as floats
-            typer.echo(
-                json.dumps({"file": file.name, **result.values}, default=str, ensure_ascii=False)
-            )
-            answers = result.answers
-        for answer in answers:
+            typer.echo(json.dumps(values, default=str, ensure_ascii=False))
+        for answer in ledger.answers:  # the pages read from pictures, and the extraction
             record(answer, stats)
     if failed:
         raise fail(f"{failed} of {len(files)} documents failed.")
@@ -397,11 +450,18 @@ def answer_command(
     try:
         if show_prompt:
             request = text_to_sql.build_request(
-                knowledge, connection, question, effort=effort, max_rows=max_rows
+                knowledge,
+                connection,
+                question,
+                effort=effort,
+                max_rows=max_rows,
+                embedder=connect_embedder(settings),
             )
-            typer.echo(f"=== system ===\n{request.system}\n\n=== user ===\n{question}")
+            system = "\n\n".join(part for part in (request.system, request.system_tail) if part)
+            typer.echo(f"=== system ===\n{system}\n\n=== user ===\n{question}")
             return
         client = connect(settings)
+        embedder = connect_embedder(settings)
         earlier: list[Message] = []
         while True:
             spent.clear()
@@ -414,6 +474,7 @@ def answer_command(
                 repairs=repairs,
                 max_rows=max_rows,
                 earlier=earlier,
+                embedder=embedder,
             )
             for call in reply.answers:
                 record(call, stats)
@@ -455,44 +516,283 @@ def answer_command(
         typer.secho("(refused: no query was run)", fg="bright_black", err=True)
 
 
+AboutOption = Annotated[
+    str | None, typer.Option(help="Only documents about this, such as an organisation number.")
+]
+KindOption = Annotated[str | None, typer.Option(help="Only this kind, such as annual-report.")]
+PeriodOption = Annotated[str | None, typer.Option(help="Only this period, such as 2025.")]
+LanguageOption = Annotated[Language | None, typer.Option(help="Only documents in this language.")]
+DocumentOption = Annotated[str | None, typer.Option(help="Only this document, by its id.")]
+RerankOption = Annotated[
+    bool, typer.Option("--rerank/--no-rerank", help="Reorder the passages with the reranker.")
+]
+
+
+@app.command(name="index")
+def index_command(
+    pack: PackArgument,
+    rebuild: Annotated[
+        bool, typer.Option("--rebuild", help="Read and index every document, changed or not.")
+    ] = False,
+    model: ModelOption = None,
+    stats: StatsOption = False,
+) -> None:
+    """Fetch the pack's documents, read them page by page, and index their passages. Only new
+    or changed documents are read. A scanned page is read by the model, and checked by OCR."""
+
+    def say(line: str) -> None:
+        typer.echo(line, err=True)
+
+    settings = settings_for(model)
+    try:
+        load_documents(pack)
+        embedder = connect_embedder(settings)
+        index = connect_index(settings, pack, embedder)
+    except (PackError, SearchError) as err:
+        raise fail(str(err)) from err
+    try:
+        client: ModelClient | None = connect(settings)
+    except ModelError:
+        client = None  # scanned pages are left unread, and the user is warned
+    try:
+        with http_client() as http:
+            done = index_pack(
+                pack,
+                settings.data_dir,
+                http,
+                index,
+                embedder,
+                client,
+                tesseract,
+                rebuild=rebuild,
+                say=say,
+            )
+    except (PackError, SearchError, ModelError) as err:
+        raise fail(str(err)) from err
+    finally:
+        index.close()
+    for answer in done.answers:
+        record(answer, stats)
+    for warning in done.warnings:
+        typer.secho(f"Warning: {warning}", fg="yellow", err=True)
+    typer.echo(
+        f"{done.documents} indexed, {done.unchanged} unchanged, {done.removed} removed: "
+        f"{done.pages:,} pages ({done.scanned} read from a picture), {done.passages:,} passages"
+    )
+
+
+def show_search(found: Search) -> None:
+    """Print a search's passages, best first, each with how it was ranked and where to read it."""
+    for rank, hit in enumerate(found.hits, start=1):
+        p = hit.passage
+        how = [
+            f"meaning {hit.meaning_rank or '-'}",
+            f"words {hit.words_rank or '-'}",
+            *([f"rerank {hit.rerank:.2f}"] if hit.rerank is not None else []),
+        ]
+        typer.echo(f"{rank:>2}  {p.document.title}, page {p.page}   ({' · '.join(how)})")
+        typer.echo(f"    {p.link}")
+        snippet = " ".join(p.text.split())
+        typer.echo(f"    {snippet[:200]}{'…' if len(snippet) > 200 else ''}\n")
+
+
+@app.command(name="search")
+def search_command(
+    pack: PackArgument,
+    query: Annotated[str, typer.Argument(help="What to look for, in any words.")],
+    about: AboutOption = None,
+    kind: KindOption = None,
+    period: PeriodOption = None,
+    language: LanguageOption = None,
+    document: DocumentOption = None,
+    limit: Annotated[int, typer.Option(min=1, max=50, help="How many passages to show.")] = 10,
+    rerank: RerankOption = True,
+) -> None:
+    """Search the pack's documents, by meaning and by words, and print the best passages."""
+    settings = load_settings()
+    filters = Filters(about, kind, period, language, document)
+    try:
+        embedder = connect_embedder(settings)
+        index = connect_index(settings, pack, embedder)
+    except (PackError, SearchError) as err:
+        raise fail(str(err)) from err
+    try:
+        found = search(
+            index,
+            embedder,
+            query,
+            filters,
+            limit=limit,
+            reranker=connect_reranker(settings, rerank),
+        )
+    except SearchError as err:
+        raise fail(str(err)) from err
+    finally:
+        index.close()
+    if not found.hits:
+        raise fail("No passage matches; try fewer filters.")
+    show_search(found)
+
+
+@app.command(name="cite")
+def cite_command(
+    pack: PackArgument,
+    question: Annotated[str, typer.Argument(help="A question the pack's documents answer.")],
+    about: AboutOption = None,
+    kind: KindOption = None,
+    period: PeriodOption = None,
+    language: LanguageOption = None,
+    document: DocumentOption = None,
+    passages: Annotated[
+        int, typer.Option(min=1, max=20, help="How many passages the model reads.")
+    ] = 8,
+    rerank: RerankOption = True,
+    model: ModelOption = None,
+    stats: StatsOption = False,
+) -> None:
+    """Answer a question from the pack's documents, citing the page of every claim."""
+    settings = settings_for(model)
+    filters = Filters(about, kind, period, language, document)
+    try:
+        embedder = connect_embedder(settings)
+        index = connect_index(settings, pack, embedder)
+    except (PackError, SearchError) as err:
+        raise fail(str(err)) from err
+    try:
+        client = connect(settings)
+        reply = rag.answer(
+            client,
+            index,
+            embedder,
+            question,
+            filters,
+            reranker=connect_reranker(settings, rerank),
+            passages=passages,
+        )
+    except (ModelError, SearchError) as err:
+        raise fail(str(err)) from err
+    except rag.CiteError as err:
+        for call in err.answers:
+            record(call, stats)
+        raise fail(str(err)) from err
+    finally:
+        index.close()
+    for call in reply.answers:
+        record(call, stats)
+    typer.echo(reply.text)
+    if reply.kind == "not_found":
+        typer.secho("(not in the documents: nothing is cited)", fg="bright_black", err=True)
+        return
+    typer.echo("\nSources")
+    shown = set()
+    for citation in reply.citations:
+        quote = citation.quote
+        if citation.number not in shown:
+            shown.add(citation.number)
+            typer.echo(f"[{citation.number}] {quote.title}, page {quote.page}")
+            typer.echo(f"    {quote.link}")
+        typer.echo(f'    "{" ".join(quote.text.split())}"')
+
+
+@dataclass
+class Connections:
+    """What an eval suite runs on. Each is live, live and recorded, or replayed, and only what
+    the suite's capability needs is there."""
+
+    client: ModelClient | None = None
+    warehouse: Warehouse | None = None
+    embedder: Embedder | None = None
+    index: Index | None = None
+    reranker: Reranker | None = None
+    recording: Recording | None = None
+
+    def close(self) -> None:
+        if self.warehouse:
+            self.warehouse.close()
+        if self.index:
+            self.index.close()
+
+
+# What each kind of suite needs: a model, a warehouse, an embedder, an index, a reranker.
+NEEDS: dict[type, set[str]] = {
+    evals.Suite: {"model", "warehouse", "embedder"},
+    evals.ExtractionSuite: {"model"},
+    evals.SearchSuite: {"embedder", "index", "reranker"},
+    evals.CiteSuite: {"model", "embedder", "index", "reranker"},
+}
+
+
 def eval_connections(
     pack: Path,
-    suite: str,
+    name: str,
+    suite: evals.AnySuite,
     settings: Settings,
     url: str | None,
     record: bool,
     replay: bool,
-    data: bool = True,
-) -> tuple[ModelClient, Warehouse | None, Recording | None]:
-    """The model and warehouse an eval runs on: live, live and recorded, or replayed. Without
-    data, as for an extraction, there is no warehouse."""
-    path = evals.recording_path(pack, suite)
+) -> Connections:
+    """The connections a suite runs on: live, live and recorded, or replayed."""
+    needs = NEEDS[type(suite)]
+    path = evals.recording_path(pack, name)
     if replay:
         if not path.is_file():
             raise PackError(f"No recording at {path}. Make one with --record.")
         recording = Recording.load(path)
-        return ReplayClient(recording), ReplayWarehouse(recording) if data else None, recording
-    connection = connect_warehouse(url, pack, settings) if data else None
+        return Connections(
+            client=ReplayClient(recording) if "model" in needs else None,
+            warehouse=ReplayWarehouse(recording) if "warehouse" in needs else None,
+            embedder=ReplayEmbedder(recording) if "embedder" in needs else None,
+            index=ReplayIndex(recording) if "index" in needs else None,
+            reranker=ReplayReranker(recording) if recording.reranker else None,
+            recording=recording,
+        )
+    live = Connections()
     try:
-        client = connect(settings)
-    except ModelError:
-        if connection:
-            connection.close()
+        if "warehouse" in needs:
+            live.warehouse = connect_warehouse(url, pack, settings)
+        if "embedder" in needs:
+            live.embedder = connect_embedder(settings)
+        if "index" in needs and live.embedder:
+            live.index = connect_index(settings, pack, live.embedder)
+        if "reranker" in needs:
+            live.reranker = connect_reranker(settings)
+        if "model" in needs:
+            live.client = connect(settings)
+    except (PackError, QueryError, SearchError, ModelError):
+        live.close()
         raise
     if not record:
-        return client, connection, None
-    name, dialect = (connection.name, connection.dialect) if connection else ("", "")
-    recording = Recording(client.model, name, dialect, date.today().isoformat())
-    if connection:
-        connection = RecordingWarehouse(connection, recording)
-    return RecordingClient(client, recording), connection, recording
+        return live
+    recording = Recording(
+        live.client.model if live.client else "",
+        live.warehouse.name if live.warehouse else "",
+        live.warehouse.dialect if live.warehouse else "",
+        date.today().isoformat(),
+    )
+    return Connections(
+        client=RecordingClient(live.client, recording) if live.client else None,
+        warehouse=RecordingWarehouse(live.warehouse, recording) if live.warehouse else None,
+        embedder=RecordingEmbedder(live.embedder, recording) if live.embedder else None,
+        index=RecordingIndex(live.index, recording) if live.index else None,
+        reranker=RecordingReranker(live.reranker, recording) if live.reranker else None,
+        recording=recording,
+    )
+
+
+def check_suite_for(pack: Path, suite: evals.AnySuite, knowledge: Knowledge | None) -> list[str]:
+    """Everything that makes a suite unfit to measure with, for its kind of suite."""
+    if isinstance(suite, evals.ExtractionSuite):
+        return evals.check_extraction_suite(suite, load_extraction(pack, suite.extraction), pack)
+    if isinstance(suite, evals.SearchSuite | evals.CiteSuite):
+        return evals.check_document_suite(suite, load_documents(pack))
+    return evals.check_suite(suite, knowledge)  # type: ignore[arg-type]
 
 
 def eval_suite(
     pack: Path,
     name: str,
     suite: evals.AnySuite,
-    knowledge: Knowledge,
+    knowledge: Knowledge | None,
     settings: Settings,
     *,
     warehouse: str | None,
@@ -505,36 +805,45 @@ def eval_suite(
     baseline: Path | None = None,
 ) -> bool:
     """Run one suite and print its report. True when it fails its gate."""
-    extracting = isinstance(suite, evals.ExtractionSuite)
     try:
-        if isinstance(suite, evals.ExtractionSuite):
-            spec = load_extraction(pack, suite.extraction)
-            problems = evals.check_extraction_suite(suite, spec, pack)
-        else:
-            problems = evals.check_suite(suite, knowledge)
+        problems = check_suite_for(pack, suite, knowledge)
     except PackError as err:
         raise fail(str(err)) from err
     if problems:
         raise fail(f"Suite {name} cannot be used:\n" + "\n".join(f"  {p}" for p in problems))
     try:
-        client, connection, recording = eval_connections(
-            pack, name, settings, warehouse, record_run, replay_run, data=not extracting
-        )
-    except (PackError, QueryError, ModelError) as err:
+        c = eval_connections(pack, name, suite, settings, warehouse, record_run, replay_run)
+    except (PackError, QueryError, ModelError, SearchError) as err:
         raise fail(str(err)) from err
-    graders: list[evals.Grader] = (
-        [evals.grade_behaviour, evals.grade_fields]
-        if extracting
-        else [evals.grade_behaviour, evals.grade_rows, evals.Judge(client)]
-    )
+    graders: list[evals.Grader] = []
+    if isinstance(suite, evals.Suite) and c.client:
+        graders = [evals.grade_behaviour, evals.grade_rows, evals.Judge(c.client)]
+    elif isinstance(suite, evals.ExtractionSuite):
+        graders = [evals.grade_behaviour, evals.grade_fields]
+    elif isinstance(suite, evals.CiteSuite) and c.client:
+        graders = [evals.grade_behaviour, evals.grade_citations, evals.FaithfulnessJudge(c.client)]
 
     started: list[str] = []  # the ids of the cases run so far, to name one that stops the run
 
     def run_case(case: evals.AnyCase) -> evals.CaseResult:
         started.append(case.id)
-        if isinstance(case, evals.ExtractionCase):
-            return evals.extract_case(client, pack, spec, case, graders)
-        return evals.answer_case(client, connection, knowledge, suite, case, graders, effort=effort)
+        if isinstance(case, evals.ExtractionCase) and isinstance(suite, evals.ExtractionSuite):
+            spec = load_extraction(pack, suite.extraction)
+            return evals.extract_case(c.client, pack, spec, case, graders)  # type: ignore[arg-type]
+        if isinstance(case, evals.SearchCase) and isinstance(suite, evals.SearchSuite):
+            return evals.search_case(c.index, c.embedder, c.reranker, suite, case)  # type: ignore[arg-type]
+        if isinstance(case, evals.CiteCase):
+            return evals.cite_case(c.client, c.index, c.embedder, c.reranker, case, graders)  # type: ignore[arg-type]
+        return evals.answer_case(
+            c.client,
+            c.warehouse,
+            knowledge,
+            suite,
+            case,
+            graders,  # type: ignore[arg-type]
+            effort=effort,
+            embedder=c.embedder,
+        )
 
     def show(result: evals.CaseResult) -> None:
         mark, colour = ("ok", "green") if result.passed else ("FAIL", "red")
@@ -543,21 +852,20 @@ def eval_suite(
             for call in result.answers:
                 record(call, stats=False)
 
+    model = c.client.model if c.client else (c.embedder.model if c.embedder else "")
+    recording = c.recording
     try:
-        report = evals.run(
-            name, suite, client.model, run_case, only=only, repeat=repeat, on_result=show
-        )
+        report = evals.run(name, suite, model, run_case, only=only, repeat=repeat, on_result=show)
     except NotRecorded as err:
         recorded_on = recording.recorded_on if recording else "?"
         raise fail(
             f"{name}, case {started[-1]}: {err}. A prompt, the pack, the code or the model has "
             f"changed since the recording of {recorded_on}: record it again with --record."
         ) from err
-    except (PackError, QueryError, ModelError) as err:
+    except (PackError, QueryError, ModelError, SearchError) as err:
         raise fail(f"{name}: {err}") from err
     finally:
-        if connection:
-            connection.close()
+        c.close()
     if record_run and recording:
         recording.verdicts = evals.verdicts(report)
         recording.save(evals.recording_path(pack, name))
@@ -630,7 +938,6 @@ def eval_command(
         raise fail("--record records whole suites, live: leave out --replay and --case.")
     settings = settings_for(model)
     try:
-        knowledge = load_knowledge(pack)
         found = evals.load_suites(pack)
     except PackError as err:
         raise fail(str(err)) from err
@@ -639,6 +946,12 @@ def eval_command(
     if unknown or not names:
         known = ", ".join(found) or "none"
         raise fail(f"No suite {', '.join(unknown)} in {pack}. Known: {known}")
+    try:
+        # Only text-to-SQL needs the semantic layer: a pack of documents alone has none
+        sql = any(isinstance(found[name], evals.Suite) for name in names)
+        knowledge = load_knowledge(pack) if sql else None
+    except PackError as err:
+        raise fail(str(err)) from err
     failed = [
         eval_suite(
             pack,
@@ -696,7 +1009,12 @@ def add_case_command(
             raise fail(str(err)) from err
         try:
             reply = text_to_sql.answer(
-                connect(settings), connection, knowledge, question, today=suites[suite].today
+                connect(settings),
+                connection,
+                knowledge,
+                question,
+                today=suites[suite].today,
+                embedder=connect_embedder(settings),
             )
         except (ModelError, QueryError, AnswerError) as err:
             raise fail(str(err)) from err

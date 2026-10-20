@@ -6,6 +6,48 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-20
+
+### Added
+
+- `vardex index PACK` fetches the documents in a pack's `documents/sources.yaml`, reads them
+  page by page and stores their passages, vectors and stemmed words in an index in PostgreSQL
+  with pgvector (`VARDEX_INDEX_URL`). Only new or changed documents are read; `--rebuild` reads
+  them all. A page with no text, as on a scan, is read by the model from a picture, and every
+  number in the reading is checked against Tesseract's OCR; numbers the two disagree on are
+  reported.
+- `vardex search PACK QUERY` searches the documents by meaning and by words, fuses the two
+  rankings by reciprocal rank fusion and reranks the best 20, with filters `--about`, `--kind`,
+  `--period`, `--language` and `--document`.
+- `vardex cite PACK QUESTION` answers from the best eight passages. Every claim cites a
+  passage, every quote is checked word for word against its passage, and every number is traced
+  to a quote; each source is printed with its document, page, quote and a link to the page.
+- `vardex extract` reads PDFs, scanned or not, with `--pages`, and gives every quoted value the
+  page its quote is on.
+- `Embedder` and `Reranker` interfaces, with open-weight models run locally through fastembed:
+  `intfloat/multilingual-e5-large` and `BAAI/bge-reranker-v2-m3` (`VARDEX_EMBEDDING_MODEL`,
+  `VARDEX_RERANK_MODEL`). `Index`, with `PostgresIndex`. `Quote` and `trace_quotes` in
+  provenance. Messages can carry pictures.
+- Eval suites with `capability: search` (recall at k and mean reciprocal rank, no model) and
+  `capability: cite` (behaviour, the pages cited, and a faithfulness judge with the new
+  `FAITHFUL` prompt). Recordings also hold vectors, rerank scores and searches, so CI replays
+  them with no index and no embedding model. The norwegian-companies pack has fifteen documents
+  and both suites.
+- The engine prompts `READ_PAGE`, `READ_PAGE_REPAIR`, `CITE`, `CITE_REPAIR` and `FAITHFUL`.
+- Decision records 0017 to 0023.
+
+### Changed
+
+- The text-to-SQL prompt shows the `show_examples` worked examples whose questions mean the most
+  like the question, from the pack's pool (`choose_examples: similar`), or the first ones. The
+  norwegian-companies pack has a pool of 24 and shows four.
+- `ANSWER` no longer names a currency; a pack's `style` in `questions.yaml` is added to it. The
+  norwegian-companies pack's style asks for amounts with their currency.
+- `vardex eval` loads the semantic layer only for text-to-SQL suites, so a pack of documents
+  alone needs none.
+- CI runs PostgreSQL with pgvector. The architecture test also finds a pack's name written with
+  underscores.
+
 ## [0.6.1] - 2026-10-16
 
 ### Added

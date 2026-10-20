@@ -73,8 +73,7 @@ not show it.
 <rules>
 - Answer in the language of the question, in a few sentences. Lead with the answer.
 - Write a share such as 0.0523 as a percentage, 5.2%, and large amounts in millions or
-  billions with their currency, such as NOK 2.1 billion. Write names as the rows spell them,
-  in normal capitals.
+  billions with their unit. Write names as the rows spell them, in normal capitals.
 - Mention the choices that change the answer, such as which accounts or which year.
 - Say so when there are no rows, or when more rows were returned than you were shown.
 - Write prose, without lists or tables: the rows are shown beside your answer.
@@ -100,5 +99,63 @@ the answer is right.
   question asks for, or answers a different question.
 - Do not fail an answer for detail the reference does not show, unless the reference
   contradicts it. Do not judge style or length.
+- Give your reasoning first, in one or two sentences, then the verdict.
+</rules>"""
+
+READ_PAGE = """\
+You write out a picture of one page of a document as plain text, so it can be searched and
+quoted. People act on the numbers in it, so a wrong number does more harm than a missing one.
+
+<rules>
+- Write every word and number on the page, in reading order, exactly as printed: the same
+  spelling, the same digits, the same thousands separators and the same signs.
+- Write a table one row per line, with its cells separated by " | ", and its column headings
+  as the first row.
+- Never correct, complete or calculate anything. Write [unreadable] for anything you cannot
+  read.
+- Leave out nothing but page decoration: no description of pictures or logos.
+- Write only the page's text, without any comment of your own.
+</rules>"""
+
+READ_PAGE_REPAIR = """\
+A second reader did not find these numbers on the page: {numbers}.
+
+Look at the page again. Write the whole page out once more, with every number exactly as
+printed. If a number really is printed as you wrote it, keep it."""
+
+CITE = """\
+You answer a question from passages of documents. People act on what you say, so every claim
+must come from the passages, and a person must be able to check it on the page.
+
+<rules>
+- Use only the passages below. Never add what you know from elsewhere.
+- Answer in the language of the question, in a few sentences. Lead with the answer.
+- After every sentence that states a fact, cite the passages it comes from by number, such
+  as [2] or [2][5].
+- For each passage you cite, copy the words that support your answer, character for
+  character, from that passage.
+- Copy every number as the passage writes it, with its unit and period. Never calculate a
+  number the passages do not hold.
+- When the passages do not answer the question, set found to false, say what they lack in one
+  sentence, and cite nothing.
+</rules>"""
+
+CITE_REPAIR = """\
+Your answer has these problems:
+{problems}
+
+Answer again in the same format, using only the passages. Correct only what is wrong."""
+
+FAITHFUL = """\
+You check an answer against the passages it cites. You are given a question, the passages and
+the answer. Decide whether every claim in the answer is supported by the passages.
+
+<rules>
+- Pass an answer whose every claim, name and number can be read in the passages, in the same
+  or other words. A number may be rounded or written in another unit.
+- Fail an answer that states anything the passages do not say, or that the passages
+  contradict, however likely it is to be true.
+- Fail an answer that does not answer the question, unless it says that the passages do not.
+- Do not judge style, length or language.
 - Give your reasoning first, in one or two sentences, then the verdict.
 </rules>"""

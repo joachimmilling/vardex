@@ -24,16 +24,19 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from vardex import text_to_sql
+from vardex import rag, text_to_sql
+from vardex.documents import DocumentList
+from vardex.embeddings import Embedder, Reranker
 from vardex.extraction import ExtractionError, ExtractionSpec, extract
 from vardex.llm import Answer, Effort, Ledger, Message, ModelClient, ModelError, Request
 from vardex.packs import Language, PackError, read_yaml
-from vardex.prompts import JUDGE
+from vardex.prompts import FAITHFUL, JUDGE
+from vardex.retrieval import Filters, Index, Passage, search
 from vardex.semantic import Knowledge
 from vardex.sql import QueryError, Result, Warehouse, check_sql, is_number, transpile
 
 Expect = Literal["answer", "clarify", "refuse"]
-Kind = Literal["answer", "clarify", "refuse", "values", "problem", "error"]
+Kind = Literal["answer", "clarify", "refuse", "values", "problem", "passages", "not_found", "error"]
 Z = 1.96  # for a 95% interval
 SLUG = r"^[a-z0-9]+(-[a-z0-9]+)*$"
 
@@ -121,6 +124,94 @@ class ExtractionSuite(BaseModel):
         return self
 
 
+PAGE = r"^[a-z0-9]+(-[a-z0-9]+)*:[1-9][0-9]*$"  # a document's id and a page: report-2025:42
+
+
+class CaseFilters(BaseModel):
+    """The filters a person would set for a question, such as the company it is about."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    about: str | None = None
+    kind: str | None = None
+    period: str | None = None
+    language: Language | None = None
+    document: str | None = None
+
+
+class SearchCase(BaseModel):
+    """One question to search the pack's documents for, and the pages that answer it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=SLUG)
+    type: str = Field(pattern=SLUG)
+    language: Language = "en"
+    question: str
+    pages: list[str] = Field(min_length=1)  # each as document-id:page; finding one is enough
+    filters: CaseFilters = CaseFilters()
+    critical: bool = False
+
+
+class SearchSuite(BaseModel):
+    """The contents of evals/<suite>.yaml in a pack, for searching documents."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str
+    capability: Literal["search"]
+    k: int = Field(default=10, ge=1)  # a case passes when one of its pages is in the top k
+    threshold: float = Field(ge=0, le=1)
+    cases: list[SearchCase] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def ids_are_unique(self) -> "SearchSuite":
+        ids = [case.id for case in self.cases]
+        if len(ids) != len(set(ids)):
+            raise ValueError("every case needs its own id")
+        return self
+
+
+class CiteCase(BaseModel):
+    """One question to answer from the pack's documents, and the pages a right answer cites;
+    or expect: not_found for a question the documents do not answer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=SLUG)
+    type: str = Field(pattern=SLUG)
+    language: Language = "en"
+    question: str
+    expect: Literal["answer", "not_found"] = "answer"
+    pages: list[str] = []  # each as document-id:page; a right answer cites one of them
+    filters: CaseFilters = CaseFilters()
+    critical: bool = False
+
+    @model_validator(mode="after")
+    def pages_with_answers_only(self) -> "CiteCase":
+        if (self.expect == "answer") != bool(self.pages):
+            raise ValueError("a case expecting an answer needs pages, and no other case takes them")
+        return self
+
+
+class CiteSuite(BaseModel):
+    """The contents of evals/<suite>.yaml in a pack, for answers from documents."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str
+    capability: Literal["cite"]
+    threshold: float = Field(ge=0, le=1)
+    cases: list[CiteCase] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def ids_are_unique(self) -> "CiteSuite":
+        ids = [case.id for case in self.cases]
+        if len(ids) != len(set(ids)):
+            raise ValueError("every case needs its own id")
+        return self
+
+
 @dataclass(frozen=True)
 class Outcome:
     """What the capability did with one case."""
@@ -140,8 +231,11 @@ class Grade:
     answers: list[Answer] = field(default_factory=list)  # a model grader's own calls
 
 
-AnyCase = Case | ExtractionCase
-AnySuite = Suite | ExtractionSuite
+AnyCase = Case | ExtractionCase | SearchCase | CiteCase
+AnySuite = Suite | ExtractionSuite | SearchSuite | CiteSuite
+CAPABILITIES: dict[str, type[BaseModel]] = {
+    "answer": Suite, "extract": ExtractionSuite, "search": SearchSuite, "cite": CiteSuite,
+}  # fmt: skip
 Grader = Callable[[AnyCase, Outcome, Result | None], Grade | None]
 
 
@@ -252,13 +346,13 @@ def wilson(passed: int, cases: int, z: float = Z) -> tuple[float, float]:
 
 
 def load_suites(pack: Path) -> dict[str, AnySuite]:
-    """Every suite in the pack's evals/ folder, by name: for answering questions, or for an
-    extraction when its capability says extract."""
+    """Every suite in the pack's evals/ folder, by name, read as the kind of suite its
+    capability names: answer, extract, search or cite."""
     suites: dict[str, AnySuite] = {}
     for path in sorted((pack / "evals").glob("*.yaml")):
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        kind = ExtractionSuite if data.get("capability") == "extract" else Suite
-        suites[path.stem] = read_yaml(path, kind, "eval suite")
+        kind = CAPABILITIES.get(data.get("capability"), Suite)
+        suites[path.stem] = read_yaml(path, kind, "eval suite")  # type: ignore[arg-type]
     return suites
 
 
@@ -397,6 +491,7 @@ def answer_case(
     graders: list[Grader],
     *,
     effort: Effort | None = "medium",
+    embedder: Embedder | None = None,
 ) -> CaseResult:
     """Run one case through text-to-SQL, exactly as vardex answer would, and grade it."""
     reference = None
@@ -411,7 +506,13 @@ def answer_case(
     ledger = Ledger(client)
     try:
         reply = text_to_sql.answer(
-            ledger, warehouse, knowledge, case.question, effort=effort, today=suite.today
+            ledger,
+            warehouse,
+            knowledge,
+            case.question,
+            effort=effort,
+            today=suite.today,
+            embedder=embedder,
         )
         outcome = Outcome(reply.kind, reply.text, reply.result, reply.answers)
     except text_to_sql.AnswerError as err:
@@ -480,6 +581,118 @@ def extract_case(
         if not err.retryable:
             raise  # every case would fail the same way, so stop the run
         outcome = Outcome("error", str(err), None, ledger.answers)
+    grades = [grade for grader in graders if (grade := grader(case, outcome, None))]
+    return CaseResult(case, outcome, grades)
+
+
+def page_of(passage: Passage) -> str:
+    """A passage's page, as a case names it: document-id:page."""
+    return f"{passage.document.id}:{passage.page}"
+
+
+def check_document_suite(suite: SearchSuite | CiteSuite, documents: DocumentList) -> list[str]:
+    """Every page a case names whose document is not in the pack's list."""
+    known = {document.id for document in documents.documents}
+    problems = []
+    for case in suite.cases:
+        for page in case.pages:
+            if page.split(":")[0] not in known:
+                problems.append(f"case {case.id}: no document {page.split(':')[0]}")
+            elif not re.match(PAGE, page):
+                problems.append(f"case {case.id}: {page!r} is not document-id:page")
+    return problems
+
+
+def search_case(
+    index: Index,
+    embedder: Embedder,
+    reranker: Reranker | None,
+    suite: SearchSuite,
+    case: SearchCase,
+) -> CaseResult:
+    """Search for one case's question, exactly as vardex search would, and grade it: is a
+    page that answers it in the top k? Its rank is kept for the mean reciprocal rank."""
+    filters = Filters(**case.filters.model_dump())
+    found = search(index, embedder, case.question, filters, limit=suite.k, reranker=reranker)
+    pages = [page_of(passage) for passage in found.passages]
+    rank = next((n for n, page in enumerate(pages, start=1) if page in case.pages), None)
+    outcome = Outcome("passages", ", ".join(dict.fromkeys(pages)), None, [], {"rank": rank})
+    reason = "" if rank else f"no page that answers it in the top {suite.k}: got {outcome.text}"
+    return CaseResult(case, outcome, [Grade("pages", rank is not None, reason)])
+
+
+def grade_citations(case: AnyCase, outcome: Outcome, reference: Result | None) -> Grade | None:
+    """Does the answer cite one of the pages that answer the question?"""
+    if not isinstance(case, CiteCase) or outcome.kind != "answer" or outcome.values is None:
+        return None
+    cited = outcome.values["cited"]
+    if set(cited) & set(case.pages):
+        return Grade("citations", True)
+    return Grade(
+        "citations",
+        False,
+        f"cites {', '.join(cited) or 'nothing'}, not one of {', '.join(case.pages)}",
+    )
+
+
+class FaithfulnessJudge:
+    """A grader that asks a model whether every claim in an answer is in the passages it
+    cites. The references are the passages, not a person's answer."""
+
+    def __init__(self, client: ModelClient, effort: Effort | None = "low") -> None:
+        self.client = client
+        self.effort = effort
+
+    def __call__(self, case: AnyCase, outcome: Outcome, reference: Result | None) -> Grade | None:
+        if not isinstance(case, CiteCase) or outcome.kind != "answer" or outcome.values is None:
+            return None
+        answer = self.client.send(self.request(case, outcome.text, outcome.values["passages"]))
+        try:
+            verdict = Verdict.model_validate_json(answer.text)
+        except ValueError:
+            return Grade("faithful", False, "the judge's verdict did not parse", [answer])
+        reason = "" if verdict.passed else verdict.reasoning
+        return Grade("faithful", verdict.passed, reason, [answer])
+
+    def request(self, case: CiteCase, text: str, passages: list[Passage]) -> Request:
+        message = (
+            f"<question>{case.question}</question>\n{rag.passages_text(passages)}\n"
+            f"<answer>\n{text}\n</answer>"
+        )
+        return Request(
+            system=FAITHFUL,
+            messages=[Message("user", message)],
+            effort=self.effort,
+            output_schema=Verdict,
+            cache_system=True,
+        )
+
+
+def cite_case(
+    client: ModelClient,
+    index: Index,
+    embedder: Embedder,
+    reranker: Reranker | None,
+    case: CiteCase,
+    graders: list[Grader],
+) -> CaseResult:
+    """Answer one case from the documents, exactly as vardex cite would, and grade it."""
+    ledger = Ledger(client)
+    filters = Filters(**case.filters.model_dump())
+    try:
+        reply = rag.answer(ledger, index, embedder, case.question, filters, reranker=reranker)
+    except rag.CiteError as err:
+        outcome = Outcome("error", str(err), None, err.answers)
+    except ModelError as err:
+        if not err.retryable:
+            raise  # every case would fail the same way, so stop the run
+        outcome = Outcome("error", str(err), None, ledger.answers)
+    else:
+        pages = sorted({f"{c.quote.document}:{c.quote.page}" for c in reply.citations})
+        numbers = {c.number for c in reply.citations}
+        cited = [p for n, p in enumerate(reply.search.passages, start=1) if n in numbers]
+        values = {"cited": pages, "passages": cited}
+        outcome = Outcome(reply.kind, reply.text, None, reply.answers, values)
     grades = [grade for grader in graders if (grade := grader(case, outcome, None))]
     return CaseResult(case, outcome, grades)
 
@@ -659,6 +872,10 @@ def format_report(report: Report, details: bool = False) -> str:
 
     lines = table("type", [*report.by(lambda c: c.type), report.total])
     lines += ["", *table("language", report.by(lambda c: c.language))]
+    ranks = [r.outcome.values["rank"] for r in report.results if r.outcome.kind == "passages"]
+    if ranks:  # a search suite: the share found is its recall, and how high it was found
+        mrr = sum(1 / rank for rank in ranks if rank) / len(ranks)
+        lines += ["", f"Mean reciprocal rank: {mrr:.2f}"]
     # An answer takes two calls, a plan and the words; more means a check sent it back
     answered = [r for r in report.results if r.outcome.kind == "answer"]
     again = [r for r in answered if len(r.outcome.answers) > 2]

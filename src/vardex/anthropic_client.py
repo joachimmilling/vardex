@@ -4,6 +4,7 @@ This is the only module in Vardex that imports `anthropic`; a test enforces it. 
 rest of Vardex should not have to know about Anthropic's API is handled here.
 """
 
+import base64
 import time
 from collections.abc import Callable
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 import anthropic
 
 from vardex.config import Settings
-from vardex.llm import Answer, MissingAPIKeyError, ModelError, Request, StopReason
+from vardex.llm import Answer, Message, MissingAPIKeyError, ModelError, Request, StopReason
 from vardex.pricing import UnknownModelError, Usage, cost_usd
 
 MODELS_WITHOUT_EFFORT = ("claude-haiku-4-5",)  # these reject output_config.effort
@@ -90,11 +91,15 @@ class AnthropicClient:
             system = [
                 {"type": "text", "text": request.system, "cache_control": {"type": "ephemeral"}}
             ]
+        if request.system_tail:
+            # After the breakpoint, so a tail that changes leaves the cached part as it was
+            blocks = system if isinstance(system, list) else [{"type": "text", "text": system}]
+            system = [*blocks, {"type": "text", "text": request.system_tail}]
         params: dict[str, Any] = {
             "model": self.model,
             "max_tokens": request.max_tokens,
             "system": system,
-            "messages": [{"role": m.role, "content": m.text} for m in request.messages],
+            "messages": [{"role": m.role, "content": content(m)} for m in request.messages],
         }
         if request.cache_conversation:
             # Automatic caching: the breakpoint moves to the last message on every turn, so
@@ -136,3 +141,21 @@ class AnthropicClient:
             cost_usd=cost,
             first_text_seconds=first_text_seconds,
         )
+
+
+def content(message: Message) -> str | list[dict[str, Any]]:
+    """A message's content: its text alone, or each picture as an image block, then the text."""
+    if not message.images:
+        return message.text
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.media_type,
+                "data": base64.b64encode(image.data).decode("ascii"),
+            },
+        }
+        for image in message.images
+    ]
+    return [*blocks, {"type": "text", "text": message.text}]

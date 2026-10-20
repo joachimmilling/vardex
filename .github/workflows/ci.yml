@@ -10,9 +10,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     services:
-      # A throwaway PostgreSQL, so the tests also run against a warehouse someone else runs
+      # A throwaway PostgreSQL with pgvector, so the tests also run against a warehouse
+      # someone else runs, and against a real index of documents
       postgres:
-        image: postgres:18
+        image: pgvector/pgvector:0.8.7-pg18
         env:
           POSTGRES_PASSWORD: postgres
         ports: ["5432:5432"]
@@ -32,6 +33,7 @@ jobs:
       - name: Test
         run: uv run pytest
       - name: Evals, replayed from the recordings
-        # No API key and no warehouse: the answers and rows come from evals/recordings/.
+        # No API key, no warehouse, no index and no embedding model: the answers, rows,
+        # vectors and passages come from evals/recordings/.
         # Fails when a recording is stale, below a suite's threshold, or on a critical case.
         run: uv run vardex eval packs/norwegian-companies --replay
