@@ -143,3 +143,50 @@ def test_extract_refuses_pages_it_cannot_read(tmp_path):
     result = runner.invoke(app, ["extract", PACK, "key-figures", __file__, "--pages", "four"])
     assert result.exit_code == 1
     assert "is not a page or a range of pages" in result.output
+
+
+KEY_FIGURES = json.dumps(
+    {
+        "problem": None,
+        "company_name": "Demo Laks AS",
+        "fiscal_year": 2025,
+        "accounts": "group",
+        "currency": "NOK",
+        "unit": "thousands",
+        "unit_quote": "NOK thousand",
+        "revenue": 1480312,
+        "revenue_quote": "1 480 312",
+        "operating_profit": 350000,
+        "operating_profit_quote": "350 000",
+    }
+)
+
+
+def test_extract_from_an_indexed_document_reads_the_pages_a_search_finds(
+    index, monkeypatch, tmp_path
+):
+    report = REPORT.model_copy(update={"id": "mowi-q2-2026"})  # a document in the pack's list
+    texts = [(2, "The board proposes a dividend."), (3, "Revenue and operating profit")]
+    index.put(report, "f", texts, FakeEmbedder().embed_documents([t for _, t in texts]))
+    pdf = tmp_path / "data" / "norwegian-companies" / "documents" / "mowi-q2-2026.pdf"
+    pdf.parent.mkdir(parents=True)
+    statement = ["Demo Laks AS, group, in NOK thousand", "Revenue 1 480 312", "EBIT 350 000"]
+    pages = [["Front page"], ["The board proposes a dividend."], statement]
+    pdf.write_bytes(text_pdf(pages))
+    model = FakeModel(KEY_FIGURES)
+    monkeypatch.setattr(cli, "connect", lambda settings: model)
+    result = runner.invoke(app, ["extract", PACK, "key-figures", "--document", "mowi-q2-2026"])
+    assert result.exit_code == 0, result.output
+    values = json.loads(result.output.splitlines()[-1])
+    assert (values["document"], values["revenue_page"], values["unit_page"]) == (
+        "mowi-q2-2026",
+        3,
+        3,
+    )
+    assert "Front page" not in model.requests[0].messages[0].text  # only the pages found
+
+
+def test_extract_from_a_document_that_is_not_indexed_says_so(index):
+    result = runner.invoke(app, ["extract", PACK, "key-figures", "--document", "orkla-q2-2026"])
+    assert result.exit_code == 1
+    assert "orkla-q2-2026 is not indexed: run vardex index" in result.output
