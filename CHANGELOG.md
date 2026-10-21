@@ -20,6 +20,13 @@ All notable changes to Vardex are recorded here. The format follows
   how large its passages are. Each document's fingerprint covers the passage size as well as the
   file, so changing the size re-reads every document without `--rebuild`.
 
+### Changed
+
+- A search suite looks 50 passages deep, grades on the top k as before, and says how far down a
+  missed page was: `found at rank 26, below the top 10` or `not among the 50 passages ranked`.
+  The report adds `Missed: 2 ranked lower, 0 not ranked at all`, which separates a ranking
+  problem from a reading one.
+
 ## [0.7.0] - 2026-10-20
 
 ### Added

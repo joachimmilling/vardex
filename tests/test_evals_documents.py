@@ -46,7 +46,7 @@ def test_a_search_case_passes_when_its_page_is_in_the_top_k(index):
     )  # fmt: skip
     result = search_case(index, FakeEmbedder(), None, search_suite(case), case)
     assert result.passed
-    assert result.outcome.values == {"rank": 1}
+    assert result.outcome.values == {"rank": 1, "found_at": 1}
 
 
 def test_one_page_that_answers_is_enough_and_none_fails_the_case(index):
@@ -55,13 +55,23 @@ def test_one_page_that_answers_is_enough_and_none_fails_the_case(index):
         pages=["demo-laks-annual-report-2025:40", "demo-laks-annual-report-2025:12"],
     )  # fmt: skip
     result = search_case(index, FakeEmbedder(), FakeReranker(), search_suite(case), case)
-    assert result.passed and result.outcome.values == {"rank": 1}
-    missed = case.model_copy(update={"pages": ["demo-laks-annual-report-2025:40"]})
-    result = search_case(index, FakeEmbedder(), FakeReranker(), search_suite(missed), missed)
+    assert result.passed and result.outcome.values == {"rank": 1, "found_at": 1}
+
+
+def test_a_missed_page_says_how_far_down_it_was(index):
+    lower = SearchCase(
+        id="lower", type="lookup", question="harvest volumes rose",
+        pages=["demo-laks-annual-report-2025:40"],
+    )  # fmt: skip
+    result = search_case(index, FakeEmbedder(), FakeReranker(), search_suite(lower), lower)
     assert not result.passed
+    assert result.outcome.values == {"rank": None, "found_at": 2}
     assert result.grades[0].reason == (
-        "no page that answers it in the top 1: got demo-laks-annual-report-2025:12"
+        "found at rank 2, below the top 1: got demo-laks-annual-report-2025:12"
     )
+    never = lower.model_copy(update={"pages": ["demo-laks-annual-report-2025:99"]})
+    result = search_case(index, FakeEmbedder(), FakeReranker(), search_suite(never), never)
+    assert result.grades[0].reason.startswith("not among the 2 passages ranked")
 
 
 def test_the_report_gives_recall_and_mean_reciprocal_rank(index):
@@ -84,6 +94,7 @@ def test_the_report_gives_recall_and_mean_reciprocal_rank(index):
     text = format_report(report)
     assert "all                2       2   100%" in text  # the share found: recall at 2
     assert "Mean reciprocal rank: 0.75" in text
+    assert "Missed: 0 ranked lower, 0 not ranked at all" in text
 
 
 def test_a_case_names_pages_of_documents_in_the_pack():
