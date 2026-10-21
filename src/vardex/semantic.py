@@ -12,12 +12,14 @@ None of them creates anything. They describe tables that already exist, in a war
 built or in one a company runs, and `check` tests every claim they make against it.
 """
 
+import difflib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from vardex.documents import DocumentList
 from vardex.packs import PackError, read_yaml
 from vardex.sql import QueryError, Warehouse, check_sql, transpile
 
@@ -279,3 +281,53 @@ def check(warehouse: Warehouse, knowledge: Knowledge) -> list[str]:
     for number, example in enumerate(knowledge.questions.examples, start=1):
         first(transpile(example.sql, dialect, warehouse.dialect), f"example {number}")
     return problems
+
+
+def quoted(value: str) -> str:
+    """A value as an SQL string literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def labels(warehouse: Warehouse, obj: ObjectType, keys: list[str]) -> dict[str, str]:
+    """The label of each object among `keys` that the warehouse holds, by its key."""
+    if not obj.label:
+        raise PackError(f"object {obj.name} has no label to name it by")
+    listed = ", ".join(quoted(key) for key in dict.fromkeys(keys))
+    sql = f"select {obj.key}, {obj.label} from {obj.table} where {obj.key} in ({listed})"
+    return {str(key): str(label) for key, label in warehouse.run(sql, max_rows=10_000).rows}
+
+
+def find_key(
+    warehouse: Warehouse, ontology: Ontology, object_name: str, name: str, keys: list[str]
+) -> str:
+    """The key of the one object among `keys` that a person's name for it names: its label,
+    or the label's first words, ignoring case, so Mowi finds MOWI ASA. No match, or several,
+    is a PackError that says which names come close, or which matched."""
+    if object_name not in {o.name for o in ontology.objects}:
+        raise PackError(f"the ontology has no object {object_name}")
+    known = labels(warehouse, ontology.object(object_name), keys)
+    wanted = name.casefold().split()
+    found = [k for k, label in known.items() if label.casefold().split()[: len(wanted)] == wanted]
+    if len(found) == 1:
+        return found[0]
+    if found:
+        names = ", ".join(sorted(known[k] for k in found))
+        raise PackError(f"{name!r} names several: {names}. Write more of the name.")
+    close = difflib.get_close_matches(
+        name.upper(), [label.upper() for label in known.values()], 3, 0.5
+    )
+    hint = f" Did you mean {', '.join(close)}?" if close else ""
+    raise PackError(f"No {object_name} with documents is named {name!r}.{hint}")
+
+
+def check_documents(warehouse: Warehouse, ontology: Ontology, documents: DocumentList) -> list[str]:
+    """Every document that is about an object the warehouse does not hold."""
+    if documents.about not in {o.name for o in ontology.objects}:
+        return [f"documents are about {documents.about}, which the ontology does not describe"]
+    obj = ontology.object(documents.about)
+    known = labels(warehouse, obj, [d.about for d in documents.documents])
+    return [
+        f"document {d.id}: no {documents.about} {d.about}"
+        for d in documents.documents
+        if d.about not in known
+    ]
