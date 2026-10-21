@@ -4,10 +4,12 @@ from pathlib import Path
 
 import duckdb
 import pytest
+import yaml
 
+from vardex.documents import DocumentList
 from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.packs import PackError
-from vardex.semantic import check, load_knowledge
+from vardex.semantic import check, check_documents, find_key, load_knowledge
 
 FILES = {
     "warehouse/models/models.yml": """
@@ -148,3 +150,56 @@ def test_check_finds_every_claim_the_warehouse_does_not_bear_out(tmp_path):
     ]
     assert problems[4].startswith('example 1: Binder Error: Referenced column "county"')
     assert len(problems) == 5
+
+
+DOCUMENTS = """
+about: Company
+documents:
+  - {id: laks-2025, title: Demo Laks AS 2025, about: "100000008", kind: annual-report,
+     period: "2025", language: nb, url: "https://reports.demo.no/laks-2025.pdf"}
+  - {id: data-2025, title: Demo Data AS 2025, about: "100000016", kind: annual-report,
+     period: "2025", language: en, url: "https://reports.demo.no/data-2025.pdf"}
+"""
+
+
+def lookup(tmp_path, name, keys=("100000008", "100000016")):
+    knowledge = load_knowledge(make_pack(tmp_path))
+    warehouse = make_warehouse(tmp_path)
+    try:
+        return find_key(warehouse, knowledge.ontology, "Company", name, list(keys))
+    finally:
+        warehouse.close()
+
+
+@pytest.mark.parametrize("name", ["DEMO LAKS AS", "demo laks", "Demo Laks AS"])
+def test_a_company_is_found_by_its_name_or_its_first_words(tmp_path, name):
+    assert lookup(tmp_path, name) == "100000008"
+
+
+def test_a_name_that_matches_several_lists_them(tmp_path):
+    with pytest.raises(PackError, match="'Demo' names several: DEMO DATA AS, DEMO LAKS AS"):
+        lookup(tmp_path, "Demo")
+
+
+def test_a_name_that_matches_none_suggests_close_ones(tmp_path):
+    with pytest.raises(PackError, match="Did you mean DEMO LAKS AS"):
+        lookup(tmp_path, "Demo Laksen")
+
+
+def test_only_companies_with_documents_are_looked_up(tmp_path):
+    with pytest.raises(PackError, match="No Company with documents is named 'Demo Data'"):
+        lookup(tmp_path, "Demo Data", keys=["100000008"])
+
+
+def test_a_document_about_an_unknown_company_is_reported(tmp_path):
+    pack = make_pack(tmp_path)
+    knowledge = load_knowledge(pack)
+    unknown = DOCUMENTS.replace('"100000016"', '"999999999"')
+    documents = DocumentList.model_validate(yaml.safe_load(unknown))
+    warehouse = make_warehouse(tmp_path)
+    try:
+        assert check_documents(warehouse, knowledge.ontology, documents) == [
+            "document data-2025: no Company 999999999"
+        ]
+    finally:
+        warehouse.close()

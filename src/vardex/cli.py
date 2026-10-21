@@ -65,7 +65,7 @@ from vardex.replay import (
     ReplayWarehouse,
 )
 from vardex.retrieval import Filters, Index, Search, SearchError, search
-from vardex.semantic import Knowledge, check, load_knowledge
+from vardex.semantic import Knowledge, check, check_documents, find_key, load_knowledge
 from vardex.sql import QueryError, Result, Warehouse, format_table, format_value
 from vardex.text_to_sql import AnswerError
 from vardex.warehouse import WarehouseError, build, warehouse_path
@@ -423,6 +423,11 @@ def check_command(pack: PackArgument, warehouse: WarehouseOption = None) -> None
         raise fail(str(err)) from err
     try:
         problems = check(connection, knowledge)
+        # The documents are checked against the ontology's tables once those hold
+        if not problems and (pack / "documents" / "sources.yaml").is_file():
+            problems += check_documents(connection, knowledge.ontology, load_documents(pack))
+    except PackError as err:
+        raise fail(str(err)) from err
     finally:
         connection.close()
     if problems:
@@ -572,6 +577,9 @@ KindOption = Annotated[str | None, typer.Option(help="Only this kind, such as an
 PeriodOption = Annotated[str | None, typer.Option(help="Only this period, such as 2025.")]
 LanguageOption = Annotated[Language | None, typer.Option(help="Only documents in this language.")]
 DocumentOption = Annotated[str | None, typer.Option(help="Only this document, by its id.")]
+CompanyOption = Annotated[
+    str | None, typer.Option(help="Only documents about this company, by name, such as Mowi.")
+]
 RerankOption = Annotated[
     bool, typer.Option("--rerank/--no-rerank", help="Reorder the passages with the reranker.")
 ]
@@ -597,7 +605,7 @@ def index_command(
         load_documents(pack)
         embedder = connect_embedder(settings)
         index = connect_index(settings, pack, embedder)
-    except (PackError, SearchError) as err:
+    except (PackError, SearchError, QueryError) as err:
         raise fail(str(err)) from err
     try:
         client: ModelClient | None = connect(settings)
@@ -630,6 +638,29 @@ def index_command(
     )
 
 
+def document_filters(
+    pack: Path,
+    settings: Settings,
+    company: str | None,
+    about: str | None,
+    rest: tuple[str | None, str | None, str | None, str | None],
+) -> Filters:
+    """The filters for a search. A company's name is looked up through the pack's ontology,
+    among the companies that have documents, and becomes the about filter."""
+    if company and about:
+        raise PackError("Give --company or --about, not both.")
+    if company:
+        documents = load_documents(pack)
+        connection = connect_warehouse(None, pack, settings)
+        try:
+            ontology = load_knowledge(pack).ontology
+            keys = [d.about for d in documents.documents]
+            about = find_key(connection, ontology, documents.about, company, keys)
+        finally:
+            connection.close()
+    return Filters(about, *rest)
+
+
 def show_search(found: Search) -> None:
     """Print a search's passages, best first, each with how it was ranked and where to read it."""
     for rank, hit in enumerate(found.hits, start=1):
@@ -649,6 +680,7 @@ def show_search(found: Search) -> None:
 def search_command(
     pack: PackArgument,
     query: Annotated[str, typer.Argument(help="What to look for, in any words.")],
+    company: CompanyOption = None,
     about: AboutOption = None,
     kind: KindOption = None,
     period: PeriodOption = None,
@@ -659,11 +691,13 @@ def search_command(
 ) -> None:
     """Search the pack's documents, by meaning and by words, and print the best passages."""
     settings = load_settings()
-    filters = Filters(about, kind, period, language, document)
     try:
+        filters = document_filters(
+            pack, settings, company, about, (kind, period, language, document)
+        )
         embedder = connect_embedder(settings)
         index = connect_index(settings, pack, embedder)
-    except (PackError, SearchError) as err:
+    except (PackError, SearchError, QueryError) as err:
         raise fail(str(err)) from err
     try:
         found = search(
@@ -687,6 +721,7 @@ def search_command(
 def cite_command(
     pack: PackArgument,
     question: Annotated[str, typer.Argument(help="A question the pack's documents answer.")],
+    company: CompanyOption = None,
     about: AboutOption = None,
     kind: KindOption = None,
     period: PeriodOption = None,
@@ -701,11 +736,13 @@ def cite_command(
 ) -> None:
     """Answer a question from the pack's documents, citing the page of every claim."""
     settings = settings_for(model)
-    filters = Filters(about, kind, period, language, document)
     try:
+        filters = document_filters(
+            pack, settings, company, about, (kind, period, language, document)
+        )
         embedder = connect_embedder(settings)
         index = connect_index(settings, pack, embedder)
-    except (PackError, SearchError) as err:
+    except (PackError, SearchError, QueryError) as err:
         raise fail(str(err)) from err
     try:
         client = connect(settings)
