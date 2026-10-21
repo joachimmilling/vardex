@@ -6,6 +6,13 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `vardex search` and `vardex cite` take `--company NAME`, which looks the name up through the
+  pack's ontology among the companies that have documents, and filters by its key. A name that
+  matches none suggests close ones, and a name that matches several lists them. `vardex check`
+  reports every document about a key the warehouse does not hold.
+
 ## [0.7.0] - 2026-10-20
 
 ### Added
