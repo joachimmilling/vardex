@@ -16,6 +16,9 @@ All notable changes to Vardex are recorded here. The format follows
   that document for the extraction's description and its fields', reads the pages of the best
   three passages from the document's PDF, and names the document in the output. A document that
   is not indexed says to run `vardex index`.
+- A pack sets `passage_words` in `documents/sources.yaml` (50 to 400, 250 by default) to choose
+  how large its passages are. Each document's fingerprint covers the passage size as well as the
+  file, so changing the size re-reads every document without `--rebuild`.
 
 ## [0.7.0] - 2026-10-20
 

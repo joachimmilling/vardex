@@ -63,13 +63,18 @@ def index_pack(
         path = document_path(data_dir, name, document)
         if fetch(http, document, path):
             say(f"{document.id}: fetched {path.stat().st_size / 1e6:,.1f} MB")
-        print_ = fingerprint(path)
+        # A changed passage size changes every passage, so it counts as a changed file
+        print_ = f"{fingerprint(path)}-{spec.passage_words}"
         if not rebuild and before.get(document.id) == print_:
             done.unchanged += 1
             continue
         reading = read_document(path, client, ocr)
         done.answers += reading.answers
-        pieces = [(page.number, text) for page in reading.pages for text in passages(page)]
+        pieces = [
+            (page.number, text)
+            for page in reading.pages
+            for text in passages(page, spec.passage_words)
+        ]
         vectors = embedder.embed_documents(
             [in_context(document.title, page, text) for page, text in pieces]
         )

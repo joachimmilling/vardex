@@ -109,3 +109,12 @@ def test_a_number_ocr_did_not_find_is_a_warning(tmp_path):
     model = FakeModel("Utbytte 50.000", "Utbytte 50.000")
     done, _, _ = run(make_pack(tmp_path), tmp_path, MemoryIndex(), model)
     assert done.warnings == ["demo-arsregnskap-2000, page 1: the OCR program did not find 50000"]
+
+
+def test_a_new_passage_size_reads_every_document_again(tmp_path):
+    pack, index = make_pack(tmp_path), MemoryIndex()
+    run(pack, tmp_path, index, FakeModel("Side 1"))
+    smaller = SOURCES.replace("about: Company", "about: Company\npassage_words: 50")
+    done, _, _ = run(make_pack(tmp_path / "again", smaller), tmp_path, index, FakeModel("Side 1"))
+    assert (done.documents, done.unchanged) == (2, 0)
+    assert all(fp.endswith("-50") for fp in index.documents().values())
