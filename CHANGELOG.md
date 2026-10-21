@@ -6,6 +6,13 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `vardex extract --document ID` extracts from an indexed document instead of files: it searches
+  that document for the extraction's description and its fields', reads the pages of the best
+  three passages from the document's PDF, and names the document in the output. A document that
+  is not indexed says to run `vardex index`.
+
 ## [0.7.0] - 2026-10-20
 
 ### Added

@@ -14,6 +14,7 @@ from vardex.anthropic_client import AnthropicClient
 from vardex.calllog import log_call
 from vardex.config import Settings, load_settings
 from vardex.documents import (
+    document_path,
     find_page,
     load_documents,
     page_numbers,
@@ -23,7 +24,13 @@ from vardex.documents import (
 )
 from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.embeddings import Embedder, Reranker
-from vardex.extraction import ExtractionError, build_request, extract, load_extraction
+from vardex.extraction import (
+    ExtractionError,
+    ExtractionSpec,
+    build_request,
+    extract,
+    load_extraction,
+)
 from vardex.fastembed_models import FastEmbedder, FastReranker
 from vardex.indexing import index_pack
 from vardex.ingest import http_client
@@ -241,17 +248,52 @@ def chat(
     typer.secho(f"{turns} turns · {cost}", fg="bright_black", err=True)
 
 
+def pages_to_extract(
+    pack: Path, spec: ExtractionSpec, document: str, settings: Settings, n: int = 3
+) -> tuple[Path, set[int]]:
+    """An indexed document's file, and the pages of the n passages a search finds best for
+    the extraction: its description and every field's, searched within the document."""
+    found = {d.id: d for d in load_documents(pack).documents}
+    if document not in found:
+        raise PackError(f"No document {document} in {pack}")
+    embedder = connect_embedder(settings)
+    index = connect_index(settings, pack, embedder)
+    try:
+        if document not in index.documents():
+            raise PackError(f"{document} is not indexed: run vardex index {pack}")
+        query = " ".join([spec.description, *(f.description for f in spec.fields.values())])
+        result = search(
+            index,
+            embedder,
+            query,
+            Filters(document=document),
+            limit=n,
+            reranker=connect_reranker(settings),
+        )
+    finally:
+        index.close()
+    path = document_path(settings.data_dir, load_pack(pack).name, found[document])
+    return path, {passage.page for passage in result.passages}
+
+
 @app.command(name="extract")
 def extract_command(
     pack: PackArgument,
     name: Annotated[str, typer.Argument(help="An extraction in the pack, such as key-figures.")],
     files: Annotated[
-        list[Path],
+        list[Path] | None,
         typer.Argument(help="Text or PDF files to extract from.", exists=True, dir_okay=False),
-    ],
+    ] = None,
     pages: Annotated[
         str | None,
         typer.Option(help="In a PDF, read only these pages, such as 4 or 4-6. Default: all."),
+    ] = None,
+    document: Annotated[
+        str | None,
+        typer.Option(
+            help="An indexed document, by its id, instead of files: the pages a "
+            "search finds for the extraction are read."
+        ),
     ] = None,
     model: ModelOption = None,
     effort: Annotated[
@@ -268,11 +310,18 @@ def extract_command(
 ) -> None:
     """Extract values from documents. Prints one JSON line per document that passes the checks.
     From a PDF, each quoted value also gets the page its quote is on."""
+    if bool(files) == bool(document):
+        raise fail("Give files to extract from, or --document, not both.")
     try:
         spec = load_extraction(pack, name)
         wanted = page_numbers(pages) if pages else None
-    except (PackError, ValueError) as err:
+        if document:
+            path, wanted = pages_to_extract(pack, spec, document, settings_for(model))
+            typer.secho(f"{document}: pages {', '.join(map(str, sorted(wanted)))}", err=True)
+            files = [path]
+    except (PackError, ValueError, SearchError) as err:
         raise fail(str(err)) from err
+    files = files or []
     if show_prompt:
         request = build_request(spec, files[0].read_text(encoding="utf-8"), effort)
         schema = request.output_schema.model_json_schema() if request.output_schema else None
@@ -293,10 +342,10 @@ def extract_command(
         try:
             if file.suffix.lower() == ".pdf":
                 read = read_document(file, ledger, tesseract, wanted).pages
-                document = pages_text(read)
+                text = pages_text(read)
             else:
-                document = file.read_text(encoding="utf-8")
-            result = extract(ledger, spec, document, effort=effort, repairs=repairs)
+                text = file.read_text(encoding="utf-8")
+            result = extract(ledger, spec, text, effort=effort, repairs=repairs)
         except ExtractionError as err:
             failed += 1
             typer.secho(f"{file.name}: {err}", fg=typer.colors.RED, err=True)
@@ -305,7 +354,7 @@ def extract_command(
                 record(answer, stats)
             raise fail(f"{file.name}: {err}") from err
         else:
-            values = {"file": file.name, **result.values}
+            values = {"document" if document else "file": document or file.name, **result.values}
             for field, spec_field in spec.fields.items():
                 quote = result.values.get(f"{field}_quote")
                 if read is not None and spec_field.quote and quote:
