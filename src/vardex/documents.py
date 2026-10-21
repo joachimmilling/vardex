@@ -53,6 +53,8 @@ class DocumentList(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     about: str  # the ontology's object that every document is about, such as Company
+    # Words per passage: the embedding model reads about 512 tokens, some 400 words at most
+    passage_words: int = Field(default=MAX_WORDS, ge=50, le=400)
     documents: list[DocumentSpec] = Field(min_length=1)
 
     @model_validator(mode="after")
