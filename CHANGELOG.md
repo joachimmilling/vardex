@@ -6,6 +6,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-21
+
 ### Added
 
 - `vardex search` and `vardex cite` take `--company NAME`, which looks the name up through the
