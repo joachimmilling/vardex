@@ -6,6 +6,12 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A pack sets `passage_words` in `documents/sources.yaml` (50 to 400, 250 by default) to choose
+  how large its passages are. Each document's fingerprint covers the passage size as well as the
+  file, so changing the size re-reads every document without `--rebuild`.
+
 ## [0.7.0] - 2026-10-20
 
 ### Added
