@@ -6,6 +6,13 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A search suite looks 50 passages deep, grades on the top k as before, and says how far down a
+  missed page was: `found at rank 26, below the top 10` or `not among the 50 passages ranked`.
+  The report adds `Missed: 2 ranked lower, 0 not ranked at all`, which separates a ranking
+  problem from a reading one.
+
 ## [0.7.0] - 2026-10-20
 
 ### Added

@@ -125,6 +125,7 @@ class ExtractionSuite(BaseModel):
 
 
 PAGE = r"^[a-z0-9]+(-[a-z0-9]+)*:[1-9][0-9]*$"  # a document's id and a page: report-2025:42
+DEPTH = 50  # how far down a search suite looks for a page it missed: every passage ranked
 
 
 class CaseFilters(BaseModel):
@@ -611,13 +612,22 @@ def search_case(
     case: SearchCase,
 ) -> CaseResult:
     """Search for one case's question, exactly as vardex search would, and grade it: is a
-    page that answers it in the top k? Its rank is kept for the mean reciprocal rank."""
+    page that answers it in the top k? Its rank is kept for the mean reciprocal rank. A page
+    missed is looked for further down, among every passage the search ranked, to say how far
+    it was."""
     filters = Filters(**case.filters.model_dump())
-    found = search(index, embedder, case.question, filters, limit=suite.k, reranker=reranker)
+    found = search(index, embedder, case.question, filters, limit=DEPTH, reranker=reranker)
     pages = [page_of(passage) for passage in found.passages]
-    rank = next((n for n, page in enumerate(pages, start=1) if page in case.pages), None)
-    outcome = Outcome("passages", ", ".join(dict.fromkeys(pages)), None, [], {"rank": rank})
-    reason = "" if rank else f"no page that answers it in the top {suite.k}: got {outcome.text}"
+    first = next((n for n, page in enumerate(pages, start=1) if page in case.pages), None)
+    rank = first if first and first <= suite.k else None
+    top = ", ".join(dict.fromkeys(pages[: suite.k]))
+    outcome = Outcome("passages", top, None, [], {"rank": rank, "found_at": first})
+    if rank:
+        reason = ""
+    elif first:
+        reason = f"found at rank {first}, below the top {suite.k}: got {top}"
+    else:
+        reason = f"not among the {len(pages)} passages ranked: got {top}"
     return CaseResult(case, outcome, [Grade("pages", rank is not None, reason)])
 
 
@@ -872,10 +882,16 @@ def format_report(report: Report, details: bool = False) -> str:
 
     lines = table("type", [*report.by(lambda c: c.type), report.total])
     lines += ["", *table("language", report.by(lambda c: c.language))]
-    ranks = [r.outcome.values["rank"] for r in report.results if r.outcome.kind == "passages"]
-    if ranks:  # a search suite: the share found is its recall, and how high it was found
-        mrr = sum(1 / rank for rank in ranks if rank) / len(ranks)
-        lines += ["", f"Mean reciprocal rank: {mrr:.2f}"]
+    found = [r.outcome.values for r in report.results if r.outcome.kind == "passages"]
+    if found:  # a search suite: the share found is its recall, and how high it was found
+        mrr = sum(1 / v["rank"] for v in found if v["rank"]) / len(found)
+        lower = sum(1 for v in found if not v["rank"] and v.get("found_at"))
+        never = sum(1 for v in found if not v.get("found_at"))
+        lines += [
+            "",
+            f"Mean reciprocal rank: {mrr:.2f}",
+            f"Missed: {lower} ranked lower, {never} not ranked at all",
+        ]
     # An answer takes two calls, a plan and the words; more means a check sent it back
     answered = [r for r in report.results if r.outcome.kind == "answer"]
     again = [r for r in answered if len(r.outcome.answers) > 2]
