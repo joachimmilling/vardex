@@ -2,7 +2,10 @@
 # in English and Norwegian, and annual accounts filed in the Register of Company Accounts.
 # The register sends every filed copy as pictures of its pages, with no text: those pages are
 # read by a model, and checked by OCR. Run: uv run vardex index packs/norwegian-companies
-about: Company  # every document is about one company, by its organisation number
+about: Company
+passage_words: 250  # 120, 250 and 400 words found 46, 45 and 45 of the search suite's 47
+# pages, at a mean reciprocal rank of 0.90, 0.91 and 0.90: the size barely matters here, so
+# this is the middle one, which keeps the index small and gives the model whole tables to cite
 
 documents:
   - id: mowi-annual-report-2025
