@@ -36,3 +36,29 @@ links:
     description: The company's main industry. Empty for a company that has not stated one.
     from: Company.industry_code
     to: Industry
+
+# Things the agent can ask to have done to an object, rather than only read about it. An
+# action names the object it acts on, the fields it needs and the sentence a person is asked
+# to approve. What it is allowed to do is in permissions.yaml, not here: this file says what
+# the action is, that one says who may use it and how far.
+actions:
+  - name: adjust_credit_limit
+    description: Propose a new credit limit for a company we sell to.
+    object: Company
+    connector: crm
+    confirm: >-
+      Set the credit limit of {label} ({key}) to {amount} NOK, from today, because {reason}.
+    fields:
+      - name: amount
+        description: The new limit in whole NOK.
+        type: amount
+      - name: reason
+        description: >-
+          Why, in one sentence a credit controller can check: name the figures it rests on
+          and the year they are from.
+        type: text
+      - name: urgency
+        description: normal for the next review, urgent to be looked at today.
+        type: choice
+        choices: [normal, urgent]
+        required: false

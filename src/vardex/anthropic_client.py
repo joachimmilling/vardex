@@ -12,7 +12,16 @@ from typing import Any
 import anthropic
 
 from vardex.config import Settings
-from vardex.llm import Answer, Message, MissingAPIKeyError, ModelError, Request, StopReason
+from vardex.llm import (
+    Answer,
+    Message,
+    MissingAPIKeyError,
+    ModelError,
+    Reasoning,
+    Request,
+    StopReason,
+    ToolCall,
+)
 from vardex.pricing import UnknownModelError, Usage, cost_usd
 
 MODELS_WITHOUT_EFFORT = ("claude-haiku-4-5",)  # these reject output_config.effort
@@ -101,6 +110,13 @@ class AnthropicClient:
             "system": system,
             "messages": [{"role": m.role, "content": content(m)} for m in request.messages],
         }
+        if request.tools:
+            # Tools are rendered before the system prompt, so the same list in the same order
+            # on every call is what keeps the prompt cache warm through a run.
+            params["tools"] = [
+                {"name": t.name, "description": t.description, "input_schema": t.schema}
+                for t in request.tools
+            ]
         if request.cache_conversation:
             # Automatic caching: the breakpoint moves to the last message on every turn, so
             # each turn reads the whole earlier conversation from the cache.
@@ -140,14 +156,40 @@ class AnthropicClient:
             seconds=seconds,
             cost_usd=cost,
             first_text_seconds=first_text_seconds,
+            tool_calls=tuple(
+                ToolCall(id=block.id, name=block.name, arguments=dict(block.input))
+                for block in response.content
+                if block.type == "tool_use"
+            ),
+            reasoning=tuple(
+                Reasoning(
+                    text=getattr(block, "thinking", "") or "",
+                    signature=getattr(block, "signature", "") or "",
+                    data=getattr(block, "data", "") or "",
+                )
+                for block in response.content
+                if block.type in ("thinking", "redacted_thinking")
+            ),
         )
 
 
 def content(message: Message) -> str | list[dict[str, Any]]:
-    """A message's content: its text alone, or each picture as an image block, then the text."""
-    if not message.images:
+    """A message's content as Anthropic wants it: text alone when that is all there is, else
+    the blocks in the order the API requires — reasoning, pictures, text, then calls, or the
+    replies to the calls of the turn before."""
+    if not (message.images or message.reasoning or message.tool_calls or message.tool_replies):
         return message.text
-    blocks: list[dict[str, Any]] = [
+    blocks: list[dict[str, Any]] = []
+    for block in message.reasoning:
+        # Sent back exactly as it came: the signature covers the text, and an edited block is
+        # refused. A block the provider encrypted carries `data` and no readable text.
+        if block.data:
+            blocks.append({"type": "redacted_thinking", "data": block.data})
+        else:
+            blocks.append(
+                {"type": "thinking", "thinking": block.text, "signature": block.signature}
+            )
+    blocks += [
         {
             "type": "image",
             "source": {
@@ -158,4 +200,21 @@ def content(message: Message) -> str | list[dict[str, Any]]:
         }
         for image in message.images
     ]
-    return [*blocks, {"type": "text", "text": message.text}]
+    if message.text:
+        blocks.append({"type": "text", "text": message.text})
+    blocks += [
+        {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}
+        for call in message.tool_calls
+    ]
+    # Every reply to a turn's calls goes in this one message. Splitting them over several
+    # teaches the model to stop asking for tools in parallel.
+    blocks += [
+        {
+            "type": "tool_result",
+            "tool_use_id": reply.id,
+            "content": reply.content,
+            "is_error": reply.is_error,
+        }
+        for reply in message.tool_replies
+    ]
+    return blocks

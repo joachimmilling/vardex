@@ -1,34 +1,61 @@
 """A stand-in for a model, so tests never call a real API or spend money."""
 
+from dataclasses import dataclass, field
 from decimal import Decimal
 
-from vardex.llm import Answer
+from vardex.llm import Answer, Reasoning, ToolCall
 from vardex.pricing import Usage
 
 
-class FakeModel:
-    """A ModelClient that replies with prepared texts, in order, and keeps every request."""
+@dataclass
+class Turn:
+    """One prepared turn in which the model asks for tools instead of answering."""
 
-    def __init__(self, *replies: str, stop_reason: str = "end") -> None:
+    text: str = ""
+    calls: list[tuple[str, dict]] = field(default_factory=list)
+    reasoning: str = "Thinking about it."
+
+    def tool_calls(self, step: int) -> tuple[ToolCall, ...]:
+        return tuple(
+            ToolCall(id=f"call-{step}-{n}", name=name, arguments=arguments)
+            for n, (name, arguments) in enumerate(self.calls, start=1)
+        )
+
+
+class FakeModel:
+    """A ModelClient that replies with prepared answers, in order, and keeps every request.
+
+    A reply is a string, which the model answers with, or a Turn, with which it asks for
+    tools. Running out of replies raises, so a test that loops for ever fails rather than
+    hanging.
+    """
+
+    def __init__(self, *replies: str | Turn, stop_reason: str = "end") -> None:
         self.replies = list(replies)
         self.requests = []
         self.model = "claude-sonnet-5-5"
         self.stop_reason = stop_reason
+        self.steps = 0
 
     def send(self, request, on_text=None):
         self.requests.append(request)
-        text = self.replies.pop(0)
-        if on_text:
-            on_text(text)
+        self.steps += 1
+        reply = self.replies.pop(0)  # IndexError when a test prepared too few
+        turn = reply if isinstance(reply, Turn) else Turn(text=reply)
+        if on_text and turn.text:
+            on_text(turn.text)
+        calls = turn.tool_calls(self.steps)
         return Answer(
-            text=text,
+            text=turn.text,
             model=self.model,
             usage=Usage(input_tokens=1000, output_tokens=200),
             thinking_tokens=150,
-            stop_reason=self.stop_reason,
+            stop_reason="tool_use" if calls else self.stop_reason,
             seconds=1.5,
             cost_usd=Decimal("0.004"),  # 1,000 × $2 + 200 × $10, per million
             first_text_seconds=0.5 if on_text else None,
+            tool_calls=calls,
+            reasoning=(Reasoning(turn.reasoning, signature="signed"),) if turn.reasoning else (),
         )
 
     def count_tokens(self, text):

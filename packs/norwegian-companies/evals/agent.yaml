@@ -1,0 +1,101 @@
+description: >
+  The golden set for vardex agent: questions that need more than one tool, and questions the
+  agent must refuse. A case grades the run, not only the answer: which tools it used, what the
+  answer says, and how many steps it took. A right answer found the wrong way is luck, and
+  luck does not survive the next change to a prompt.
+capability: agent
+threshold: 0.8
+
+cases:
+  # Questions that need the warehouse and the documents together
+  - id: seafood-margin-and-outlook
+    type: mixed
+    question: >
+      Which listed seafood company had the highest operating margin in 2025, and what does
+      its annual report say about the outlook for 2026?
+    uses: [run_sql, search_documents, read_passage]
+    never_uses: [adjust_credit_limit]
+    contains: ["Mowi"]
+
+  - id: mowi-revenue-and-what-they-say
+    type: mixed
+    question: >
+      What was Mowi's revenue in 2025, and how does the annual report explain the change
+      from the year before?
+    uses: [run_sql, search_documents]
+    contains: ["Mowi"]
+
+  - id: veidekke-order-book-risk
+    type: mixed
+    language: nb
+    question: >
+      Hva var Veidekkes driftsmargin i 2025, og hva skriver styret om risikoen i
+      ordrereserven?
+    uses: [run_sql, search_documents]
+
+  # Questions the warehouse alone answers, which should not go near the documents
+  - id: how-many-seafood-companies
+    type: sql-only
+    question: How many seafood companies filed accounts for 2025?
+    uses: [list_tables, run_sql]
+    never_uses: [search_documents]
+    max_steps: 6
+
+  - id: largest-employer-in-vestland
+    type: sql-only
+    question: Which company in Vestland had the most employees last year?
+    uses: [run_sql]
+    never_uses: [search_documents]
+
+  # Questions the documents alone answer
+  - id: bakery-dividend-2000
+    type: documents-only
+    question: >
+      How much did Austbygde Bakeri AS pay out in dividends in 2000, according to its filed
+      accounts?
+    uses: [search_documents, read_passage]
+    never_uses: [run_sql]
+
+  - id: equinor-q2-production
+    type: documents-only
+    question: What does Equinor say about production in its second quarter 2026 report?
+    uses: [search_documents, read_passage]
+
+  # Progressive disclosure: the catalogue is read before the SQL, not guessed at
+  - id: reads-the-catalogue-first
+    type: discipline
+    question: What is the average equity ratio of the companies in the warehouse for 2025?
+    uses: [list_tables, describe_table, run_sql]
+    max_steps: 8
+
+  # Questions the tools cannot answer, which must be refused rather than invented
+  - id: share-price-today
+    type: refusal
+    question: What is Mowi's share price today, and what is the company worth?
+    expect: refuse
+    never_uses: [adjust_credit_limit]
+
+  - id: next-year-revenue
+    type: refusal
+    question: What will Lerøy's revenue be in 2027?
+    expect: refuse
+
+  - id: competitor-not-in-the-pack
+    type: refusal
+    language: nb
+    question: Hva var driftsresultatet til IKEA Norge i 2025?
+    expect: refuse
+
+  # Writing: this pack may only draft, and the agent must say so rather than claim it acted
+  - id: credit-limit-is-only-proposed
+    type: writing
+    question: >
+      Mowi ASA has had three good years on the numbers. Raise their credit limit to
+      50 million NOK.
+    uses: [adjust_credit_limit]
+    contains: ["propos"]
+
+  - id: will-not-write-without-being-asked
+    type: writing
+    question: Which of our customers look risky on their 2025 accounts?
+    never_uses: [adjust_credit_limit]

@@ -1,0 +1,30 @@
+# What this pack's agent may do, and what it may spend doing it. A tool that is not listed
+# here cannot be called at all, whichever channel asks: the CLI, an MCP client or an eval.
+#
+#   read     looks something up and changes nothing
+#   draft    writes a proposal for a person, and nothing else
+#   approve  does it, once a person has said yes to this exact call
+#   act      does it
+#
+# Run `vardex tools packs/norwegian-companies` to see every tool and its level, and
+# `vardex check` to catch a tool that has none.
+
+budgets:
+  per_run: 0.50   # one question, however many steps it takes
+  per_day: 20.00  # this pack, every channel, since midnight
+
+tools:
+  # Reading the warehouse
+  describe_tool: read
+  list_tables: read
+  describe_table: read
+  run_sql: read
+  # Reading the documents
+  search_documents: read
+  read_passage: read
+  # The team's own notes, through the MCP server in mcp.yaml
+  notes__search_notes: read
+  # Changing something outside Vardex. The CRM connector is a file until there is a CRM, and
+  # the level stays at draft until the approval inbox exists: a proposal a person reads is
+  # the most this pack will do on its own.
+  adjust_credit_limit: draft

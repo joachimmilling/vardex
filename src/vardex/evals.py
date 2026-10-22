@@ -25,15 +25,18 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from vardex import rag, text_to_sql
+from vardex.agent import run_agent
 from vardex.documents import DocumentList
 from vardex.embeddings import Embedder, Reranker
 from vardex.extraction import ExtractionError, ExtractionSpec, extract
 from vardex.llm import Answer, Effort, Ledger, Message, ModelClient, ModelError, Request
 from vardex.packs import Language, PackError, read_yaml
+from vardex.permissions import Permissions
 from vardex.prompts import FAITHFUL, JUDGE
 from vardex.retrieval import Filters, Index, Passage, search
 from vardex.semantic import Knowledge
 from vardex.sql import QueryError, Result, Warehouse, check_sql, is_number, transpile
+from vardex.tools import Toolbox
 
 Expect = Literal["answer", "clarify", "refuse"]
 Kind = Literal["answer", "clarify", "refuse", "values", "problem", "passages", "not_found", "error"]
@@ -213,6 +216,51 @@ class CiteSuite(BaseModel):
         return self
 
 
+class AgentCase(BaseModel):
+    """One question for the agent, and what a right run looks like.
+
+    An agent case grades the run, not only the answer. A right answer reached by reading a
+    document that does not hold it is luck, and luck does not survive a change of prompt.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=SLUG)
+    type: str = Field(pattern=SLUG)
+    language: Language = "en"
+    question: str
+    expect: Literal["answer", "refuse"] = "answer"  # refuse: the tools cannot answer this
+    uses: list[str] = []  # tools the run must call, such as run_sql and search_documents
+    never_uses: list[str] = []  # tools it must not call, such as anything that writes
+    contains: list[str] = []  # text the answer must hold, such as a figure or a name
+    max_steps: int | None = Field(default=None, ge=1)  # a run that takes more has failed
+    critical: bool = False
+
+    @model_validator(mode="after")
+    def a_refusal_expects_nothing_else(self) -> "AgentCase":
+        if self.expect == "refuse" and (self.uses or self.contains):
+            raise ValueError("a case expecting a refusal takes neither uses nor contains")
+        return self
+
+
+class AgentSuite(BaseModel):
+    """The contents of evals/<suite>.yaml in a pack, for the agent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str
+    capability: Literal["agent"]
+    threshold: float = Field(ge=0, le=1)
+    cases: list[AgentCase] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def ids_are_unique(self) -> "AgentSuite":
+        ids = [case.id for case in self.cases]
+        if len(ids) != len(set(ids)):
+            raise ValueError("every case needs its own id")
+        return self
+
+
 @dataclass(frozen=True)
 class Outcome:
     """What the capability did with one case."""
@@ -232,10 +280,11 @@ class Grade:
     answers: list[Answer] = field(default_factory=list)  # a model grader's own calls
 
 
-AnyCase = Case | ExtractionCase | SearchCase | CiteCase
-AnySuite = Suite | ExtractionSuite | SearchSuite | CiteSuite
+AnyCase = Case | ExtractionCase | SearchCase | CiteCase | AgentCase
+AnySuite = Suite | ExtractionSuite | SearchSuite | CiteSuite | AgentSuite
 CAPABILITIES: dict[str, type[BaseModel]] = {
     "answer": Suite, "extract": ExtractionSuite, "search": SearchSuite, "cite": CiteSuite,
+    "agent": AgentSuite,
 }  # fmt: skip
 Grader = Callable[[AnyCase, Outcome, Result | None], Grade | None]
 
@@ -705,6 +754,108 @@ def cite_case(
         outcome = Outcome(reply.kind, reply.text, None, reply.answers, values)
     grades = [grade for grader in graders if (grade := grader(case, outcome, None))]
     return CaseResult(case, outcome, grades)
+
+
+def check_agent_suite(suite: AgentSuite, permissions: Permissions) -> list[str]:
+    """Every tool an agent case names that the pack gives no level: a case that asks for a
+    tool the pack does not grant can only ever fail, and should be fixed, not measured."""
+    named = {name for case in suite.cases for name in case.uses + case.never_uses}
+    return [
+        f"case names {name}, which has no permission level"
+        for name in sorted(named)
+        if permissions.level(name) is None
+    ]
+
+
+def grade_agent(case: AgentCase, outcome: Outcome, reference: Result | None) -> Grade:
+    """Did the run end the way the case expects, and did it answer at all?"""
+    if outcome.kind == "error":
+        return Grade("behaviour", False, outcome.text)
+    expected = "refuse" if case.expect == "refuse" else "answer"
+    got = outcome.kind
+    if expected == "refuse":
+        # Refusing here means saying the tools cannot answer it, not failing to answer.
+        passed = got in ("refuse", "not_found")
+        return Grade("behaviour", passed, "" if passed else f"answered anyway: {outcome.text}")
+    return Grade("behaviour", got == "answer", "" if got == "answer" else outcome.text)
+
+
+def grade_tools(case: AgentCase, outcome: Outcome, reference: Result | None) -> Grade | None:
+    """Did it use the tools the question needs, and keep off the ones it must not touch?"""
+    if not (case.uses or case.never_uses):
+        return None
+    used = set((outcome.values or {}).get("tools", []))
+    missing = [name for name in case.uses if name not in used]
+    forbidden = [name for name in case.never_uses if name in used]
+    reasons = []
+    if missing:
+        reasons.append(f"never called {', '.join(missing)}")
+    if forbidden:
+        reasons.append(f"called {', '.join(forbidden)}")
+    return Grade("tools", not reasons, "; ".join(reasons) + f" (used {', '.join(sorted(used))})")
+
+
+def grade_contains(case: AgentCase, outcome: Outcome, reference: Result | None) -> Grade | None:
+    """Is each thing the answer must say actually in it?"""
+    if not case.contains:
+        return None
+    text = words(outcome.text).casefold()
+    missing = [wanted for wanted in case.contains if words(wanted).casefold() not in text]
+    return Grade("contains", not missing, f"the answer does not say {', '.join(missing)}")
+
+
+def grade_steps(case: AgentCase, outcome: Outcome, reference: Result | None) -> Grade | None:
+    """Did it get there in the number of steps the case allows?"""
+    if case.max_steps is None:
+        return None
+    steps = int((outcome.values or {}).get("steps", 0))
+    return Grade(
+        "steps", steps <= case.max_steps, f"took {steps} steps, at most {case.max_steps} allowed"
+    )
+
+
+def agent_case(
+    client: ModelClient,
+    build_toolbox: Callable[[], Toolbox],
+    case: AgentCase,
+    graders: list[Grader],
+    *,
+    max_steps: int = 12,
+) -> CaseResult:
+    """Run one question through the agent, exactly as `vardex agent` would, and grade it."""
+    ledger = Ledger(client)
+    toolbox = build_toolbox()
+    try:
+        run_result = run_agent(ledger, toolbox, case.question, max_steps=max_steps)
+    except ModelError as err:
+        if not err.retryable:
+            raise  # every case would fail the same way, so stop the run
+        outcome = Outcome("error", str(err), None, ledger.answers)
+    else:
+        values = {
+            "tools": [call.name for call, _ in run_result.tool_calls],
+            "steps": len(run_result.steps),
+            "stop": run_result.stop,
+            "wrote": [call.name for call, result in run_result.tool_calls if result.wrote],
+        }
+        kind: Kind = "answer" if run_result.answered else "error"
+        if run_result.answered and refused_politely(run_result.answer):
+            kind = "not_found"
+        text = run_result.answer if run_result.answered else run_result.note
+        outcome = Outcome(kind, text, None, ledger.answers, values)
+    grades = [grade for grader in graders if (grade := grader(case, outcome, None))]
+    return CaseResult(case, outcome, grades)
+
+
+# What an answer looks like when the agent has decided the tools cannot answer the question.
+CANNOT = ("cannot answer", "could not answer", "do not have", "does not hold", "no data",
+          "not in the", "kan ikke svare", "finnes ikke")  # fmt: skip
+
+
+def refused_politely(answer: str) -> bool:
+    """True when the agent answered by saying it cannot answer."""
+    text = answer.casefold()
+    return any(phrase in text for phrase in CANNOT)
 
 
 def run(
