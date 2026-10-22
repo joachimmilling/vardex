@@ -80,10 +80,10 @@ cases:
     question: What will Lerøy's revenue be in 2027?
     expect: refuse
 
-  - id: competitor-not-in-the-pack
+  - id: year-the-warehouse-does-not-reach
     type: refusal
     language: nb
-    question: Hva var driftsresultatet til IKEA Norge i 2025?
+    question: Hva var driftsresultatet til Mowi i 2015?
     expect: refuse
 
   # Writing: this pack may only draft, and the agent must say so rather than claim it acted

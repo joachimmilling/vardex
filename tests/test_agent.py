@@ -7,8 +7,9 @@ from fakes import FakeModel, Turn
 
 from vardex.agent import MAX_STEPS, run_agent, transcript
 from vardex.budgets import Budget
-from vardex.llm import ModelError
+from vardex.llm import ModelError, ToolCall
 from vardex.permissions import Budgets, Permissions
+from vardex.replay import dump_answer, load_answer
 from vardex.tools import Invocation, Tool, ToolResult, arguments_schema, build_toolbox
 
 
@@ -179,3 +180,17 @@ def test_a_stopped_run_says_why_in_the_transcript():
     turns = [Turn("Again.", [("look_up", {"what": "x"})])] * (MAX_STEPS + 1)
     run = run_agent(FakeModel(*turns), toolbox([]), "For ever")
     assert "Stopped (steps)" in transcript(run)
+
+
+def test_a_recorded_turn_that_called_tools_replays_as_itself():
+    """A recording is JSON, so a turn's calls and reasoning come back as dictionaries unless
+    load_answer rebuilds them. Without this the loop hands a dict to the toolbox."""
+    model = FakeModel(Turn("Looking.", [("look_up", {"what": "revenue"})]), "It is 1.")
+    live = run_agent(model, toolbox([]), "What was revenue?")
+    asking = live.steps[0].answer
+    assert asking.tool_calls, "the fake should have asked for a tool"
+
+    replayed = load_answer(dump_answer(asking))
+    assert replayed == asking
+    assert isinstance(replayed.tool_calls[0], ToolCall)
+    assert replayed.tool_calls[0].name == "look_up"

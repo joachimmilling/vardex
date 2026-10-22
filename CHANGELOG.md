@@ -6,6 +6,17 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The agent suite's refusal case asks for a year the warehouse does not reach rather than for a
+  company said not to be in it: the register holds 1.18 million entities, so almost any name is
+  in there somewhere, and the case failed for being answerable rather than for being refused.
+
+### Added
+
+- A test that a recorded turn which called tools replays as itself, which is the bug that made
+  any agent suite unreplayable.
+
 ## [0.8.0] - 2026-10-21
 
 ### Added
