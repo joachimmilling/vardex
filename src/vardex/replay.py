@@ -23,7 +23,7 @@ from typing import Any
 
 from vardex.documents import DocumentSpec
 from vardex.embeddings import Embedder, Reranker, Vector
-from vardex.llm import Answer, ModelClient, Request
+from vardex.llm import Answer, ModelClient, Reasoning, Request, ToolCall
 from vardex.pricing import Usage
 from vardex.retrieval import Filters, Index, Passage
 from vardex.sql import Column, QueryError, Result, Table, Warehouse
@@ -114,7 +114,17 @@ def dump_answer(answer: Answer) -> dict[str, Any]:
 
 def load_answer(data: dict[str, Any]) -> Answer:
     cost = data["cost_usd"]
-    return Answer(**{**data, "usage": Usage(**data["usage"]), "cost_usd": cost and Decimal(cost)})
+    return Answer(
+        **{
+            **data,
+            "usage": Usage(**data["usage"]),
+            "cost_usd": cost and Decimal(cost),
+            # asdict flattened these to plain dicts, and a replayed turn goes back to the
+            # loop exactly as a live one does, so they have to be rebuilt as themselves.
+            "tool_calls": tuple(ToolCall(**call) for call in data.get("tool_calls", ())),
+            "reasoning": tuple(Reasoning(**block) for block in data.get("reasoning", ())),
+        }
+    )
 
 
 def dump_result(result: Result) -> dict[str, Any]:

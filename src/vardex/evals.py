@@ -848,7 +848,8 @@ def agent_case(
 
 
 # What an answer looks like when the agent has decided the tools cannot answer the question.
-CANNOT = ("cannot answer", "could not answer", "do not have", "does not hold", "no data",
+CANNOT = ("cannot answer", "could not answer", "cannot give", "can't give", "cannot tell",
+          "can't tell", "do not have", "don't have", "does not hold", "no data",
           "not in the", "kan ikke svare", "finnes ikke")  # fmt: skip
 
 

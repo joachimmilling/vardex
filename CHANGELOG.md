@@ -57,6 +57,14 @@ All notable changes to Vardex are recorded here. The format follows
 - `ModelError` and `BudgetError` end an agent run with its steps and its spending intact,
   rather than losing what the run had already worked out.
 
+### Fixed
+
+- A recorded run replays as itself again: a recording's tool calls and reasoning are rebuilt as
+  `ToolCall` and `Reasoning` rather than handed back as plain dictionaries, which stopped any
+  suite whose cases call tools from replaying at all.
+- An answer that says it cannot answer is recognised in more of the ways a model writes it,
+  such as "I can't give you", so a case expecting a refusal is not failed for the wording.
+
 ## [0.7.1] - 2026-10-21
 
 ### Added
