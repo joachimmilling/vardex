@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import duckdb
 import httpx2
 import pytest
 from fakes import FakeEmbedder, FakeModel, FakeReranker, MemoryIndex
@@ -13,6 +14,7 @@ from typer.testing import CliRunner
 
 from vardex import cli
 from vardex.cli import app
+from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.llm import MissingAPIKeyError
 
 runner = CliRunner()
@@ -143,6 +145,20 @@ def test_extract_refuses_pages_it_cannot_read(tmp_path):
     result = runner.invoke(app, ["extract", PACK, "key-figures", __file__, "--pages", "four"])
     assert result.exit_code == 1
     assert "is not a page or a range of pages" in result.output
+
+
+def test_a_company_by_name_becomes_the_about_filter(index, monkeypatch, tmp_path):
+    path = tmp_path / "w.duckdb"
+    with duckdb.connect(path) as con:
+        con.execute("create table dim_companies (orgnr varchar, name varchar)")
+        con.execute("insert into dim_companies values ('964118191', 'MOWI ASA')")
+    monkeypatch.setattr(cli, "connect_warehouse", lambda url, pack, s: DuckDBWarehouse(path))
+    result = runner.invoke(app, ["search", PACK, "salmon", "--company", "mowi"])
+    assert "No passage matches" in result.output  # the index in memory holds no Mowi report
+    assert {f.about for _, f, _ in index.searches} == {"964118191"}
+    both = runner.invoke(app, ["search", PACK, "salmon", "--company", "Mowi", "--about", "1"])
+    assert both.exit_code == 1
+    assert "Give --company or --about, not both." in both.output
 
 
 KEY_FIGURES = json.dumps(
