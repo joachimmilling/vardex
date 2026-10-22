@@ -54,6 +54,9 @@ DRIVERS = {
     "psycopg": {"postgres_warehouse.py", "pgvector_index.py"},
     "fastembed": {"fastembed_models.py"},
     "pypdfium2": {"documents.py"},
+    # MCP is a protocol like any other outside system: one module offers Vardex's tools over
+    # it, one uses other people's, and the engine itself knows nothing about it.
+    "mcp": {"mcp_server.py", "mcp_client.py"},
 }
 
 
@@ -63,3 +66,13 @@ def test_only_the_warehouses_import_a_database_driver():
         for module in imported_modules(tree):
             allowed = DRIVERS.get(module.split(".")[0])
             assert allowed is None or file.name in allowed, f"{file.name} imports {module!r}"
+
+
+def test_a_channel_holds_no_logic_of_its_own():
+    """The CLI and the MCP server may build a toolbox and print; they may not decide what a
+    tool is allowed to do. That decision lives in tools.py, once, for every channel."""
+    gate = {"WRITING", "LADDER"}  # the names a second gate would have to use
+    for name in ("cli.py", "mcp_server.py"):
+        text = (ENGINE / name).read_text(encoding="utf-8")
+        for word in gate:
+            assert word not in text, f"{name} looks like it decides permissions itself"

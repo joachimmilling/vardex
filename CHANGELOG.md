@@ -6,6 +6,65 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-21
+
+### Added
+
+- `vardex agent PACK QUESTION` answers a question by letting the model choose and use the
+  pack's tools: the warehouse catalogue and SQL, document search and reading, the pack's own
+  actions, and the tools of any MCP server the pack lists. `--steps-shown` prints each call as
+  it is made, `--stats` the steps, tokens, time and cost, and `--json` the whole run as one
+  object for a program to read. The loop stops when it has an answer, after 12 steps, or when
+  the next call would cost more than the pack allows.
+- `permissions.yaml` in a pack says what its agent may do. Every tool has one of four levels —
+  `read`, `draft`, `approve`, `act` — and a tool the pack has not listed cannot be called,
+  whichever channel asks. The same file holds the pack's spending caps.
+- Hard spending caps, enforced in the model client rather than asked of the model. `Budget`
+  wraps any `ModelClient` and prices the worst case of a call before sending it, so a cap
+  cannot be stepped over by a long answer; a cap per day is kept in `spend.json` beside the
+  pack's data and holds across commands and channels.
+- Actions in the ontology: a pack declares what may be done to one of its objects, with typed
+  fields and a sentence a person can approve, and Vardex turns it into a tool. At `draft` the
+  call writes a proposal to `proposals/<action>.jsonl` and nothing outside Vardex moves; at
+  `approve` a person must say yes to that exact call; at `act` it is carried out. An outside
+  system sits behind a `Connector`, with `FileConnector` as a stand-in for a pack that has no
+  CRM behind it yet.
+- `vardex mcp PACK` offers the pack's tools to another agent over the Model Context Protocol,
+  on standard input and output. Each tool carries its permission level as an annotation, a
+  tool at `approve` answers `input_required` with an elicitation the calling agent must put to
+  its user, and the toolbox is built per request because the protocol is stateless.
+- A pack lists the MCP servers it wants in `mcp.yaml`, and their tools join the toolbox named
+  for their server, as `notes__search_notes`. They are then governed like any other tool: a
+  level in `permissions.yaml` or no call, and every call counted against the same budget.
+  `examples/notes_server.py` is a small server over a folder of notes, so the whole path can
+  be run before anyone needs a token.
+- `vardex tools PACK` lists every tool the agent has and what each may do, with a missing
+  level in red. `vardex check` now compares a pack's tools with its permissions and fails on
+  either kind of drift.
+- Agent evals: a suite with `capability: agent` grades the run, not only the answer — the
+  tools it had to use, the tools it must not touch, what the answer contains and how many
+  steps it took. Every grader is code, so grading a recorded run costs nothing. The
+  `norwegian-companies` pack has 13 cases.
+- `ToolSpec`, `ToolCall`, `ToolReply` and `Reasoning` in `llm.py`, so tools reach a provider
+  through Vardex's own vocabulary. A turn's reasoning is stored opaquely and sent back
+  untouched, because providers sign these blocks and refuse an edited one.
+
+### Changed
+
+- `Request` takes the tools a call may use, and `Answer` carries back the calls the model made
+  and its reasoning. `Answer.as_message()` turns a turn into the assistant message to send
+  next, in the order the API requires.
+- `ModelError` and `BudgetError` end an agent run with its steps and its spending intact,
+  rather than losing what the run had already worked out.
+
+### Fixed
+
+- A recorded run replays as itself again: a recording's tool calls and reasoning are rebuilt as
+  `ToolCall` and `Reasoning` rather than handed back as plain dictionaries, which stopped any
+  suite whose cases call tools from replaying at all.
+- An answer that says it cannot answer is recognised in more of the ways a model writes it,
+  such as "I can't give you", so a case expecting a refusal is not failed for the wording.
+
 ## [0.7.1] - 2026-10-21
 
 ### Added

@@ -108,6 +108,56 @@ class Link(BaseModel):
         return name, column
 
 
+class ActionField(BaseModel):
+    """One thing an action needs to be told, with the type it must be given in."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=NAME)
+    description: str
+    type: Literal["text", "integer", "amount", "choice"] = "text"
+    choices: list[str] = []  # for type choice
+    required: bool = True
+
+    @model_validator(mode="after")
+    def choices_match_type(self) -> "ActionField":
+        if (self.type == "choice") != bool(self.choices):
+            raise ValueError(f"field {self.name}: choices belong to type choice, and only it")
+        return self
+
+    @property
+    def json_type(self) -> str:
+        return {"text": "string", "integer": "integer", "amount": "number", "choice": "string"}[
+            self.type
+        ]
+
+
+class Action(BaseModel):
+    """Something a pack can ask to have done to one of its objects.
+
+    An action is part of the ontology, not a tool bolted on beside it, because the thing it
+    changes is one of the objects the pack already describes. That is what makes it checkable:
+    the key must name a row that exists, and a person reading the proposal can look it up.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=NAME)
+    description: str
+    # The object it acts on, such as Company. Not called `on`: YAML reads a bare on as true.
+    object: str
+    fields: list[ActionField] = []
+    connector: str  # the outside system that carries it out, by the name Vardex knows it by
+    confirm: str  # a sentence a person must be able to read and say yes or no to
+
+    @model_validator(mode="after")
+    def field_names_are_unique(self) -> "Action":
+        names = [f.name for f in self.fields]
+        if len(names) != len(set(names)):
+            raise ValueError(f"action {self.name}: every field needs its own name")
+        return self
+
+
 class Ontology(BaseModel):
     """The contents of warehouse/ontology.yaml."""
 
@@ -115,6 +165,7 @@ class Ontology(BaseModel):
 
     objects: list[ObjectType] = []
     links: list[Link] = []
+    actions: list[Action] = []
 
     @model_validator(mode="after")
     def links_join_known_objects(self) -> "Ontology":
@@ -125,10 +176,18 @@ class Ontology(BaseModel):
             for end in (link.source[0], link.to):
                 if end not in names:
                     raise ValueError(f"link {link.name}: there is no object {end}")
+        if len({a.name for a in self.actions}) != len(self.actions):
+            raise ValueError("every action needs its own name")
+        for action in self.actions:
+            if action.object not in names:
+                raise ValueError(f"action {action.name}: there is no object {action.object}")
         return self
 
     def object(self, name: str) -> ObjectType:
         return next(o for o in self.objects if o.name == name)
+
+    def action(self, name: str) -> Action:
+        return next(a for a in self.actions if a.name == name)
 
 
 class Example(BaseModel):

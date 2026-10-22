@@ -7,7 +7,7 @@ implements a client for a provider imports that provider's SDK.
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel
 
@@ -47,12 +47,61 @@ class Image:
 
 
 @dataclass(frozen=True)
+class ToolSpec:
+    """A tool as the model sees it: a name, what it is for, and the shape of its arguments.
+
+    The description is the whole instruction manual the model gets. It never sees the code.
+    """
+
+    name: str
+    description: str
+    schema: dict[str, Any]  # JSON Schema for the arguments, an object with properties
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A model asking for one tool to be run, with the arguments it chose."""
+
+    id: str  # the provider's id for this call; the result must carry it back
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ToolReply:
+    """What running one tool gave back, on its way to the model."""
+
+    id: str  # the call it answers
+    content: str
+    is_error: bool = False  # a failure the model can learn from and work around
+
+
+@dataclass(frozen=True)
+class Reasoning:
+    """A model's own reasoning from a turn, kept so it can be sent back untouched.
+
+    Providers sign these blocks and reject an edited one, so Vardex stores them opaquely and
+    never reads, trims or rewrites them. Dropping them from a turn that also called a tool is
+    the classic way to break an agent loop: the provider refuses the next call.
+    """
+
+    text: str  # a summary, or empty when the provider returns none
+    signature: str = ""
+    data: str = ""  # set instead of text when the provider encrypted the block
+
+
+@dataclass(frozen=True)
 class Message:
-    """One turn of a conversation: text, and any pictures to read with it."""
+    """One turn of a conversation: text, and any pictures, tool calls or results with it."""
 
     role: Role
     text: str
     images: tuple[Image, ...] = ()  # shown to the model before the text
+    # An assistant turn carries back the reasoning and the calls it made, in that order; a
+    # user turn carries the replies to those calls, all of them in one message.
+    reasoning: tuple[Reasoning, ...] = ()
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_replies: tuple[ToolReply, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -69,6 +118,9 @@ class Request:
     # this question: it comes after the cached part, so the cached part stays the same
     system_tail: str = ""
     cache_conversation: bool = False  # keep everything up to the last message in the cache
+    # The tools the model may call this turn. They are sent before the system prompt, so a
+    # list that changes between calls costs the whole prompt cache: build it once per run.
+    tools: tuple[ToolSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -83,11 +135,17 @@ class Answer:
     seconds: float
     cost_usd: Decimal | None  # None when the model is not in the price table
     first_text_seconds: float | None = None  # set when the answer was streamed
+    tool_calls: tuple[ToolCall, ...] = ()  # set when stop_reason is tool_use
+    reasoning: tuple[Reasoning, ...] = ()  # to send back with the turn, untouched
 
     @property
     def truncated(self) -> bool:
         """True when the answer was cut off because it reached max_tokens."""
         return self.stop_reason == "max_tokens"
+
+    def as_message(self) -> Message:
+        """This answer as the assistant turn to send back: reasoning, text and calls."""
+        return Message("assistant", self.text, reasoning=self.reasoning, tool_calls=self.tool_calls)
 
 
 class ModelClient(Protocol):

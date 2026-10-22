@@ -1,0 +1,16 @@
+# MCP servers this pack's agent may use. Their tools arrive named for the server, as
+# notes__search_notes, and need a level in permissions.yaml like every other tool.
+#
+# A server a company already runs goes here the same way, with a url instead of a command:
+#
+#   - name: github
+#     description: Issues and pull requests.
+#     url: https://api.githubcopilot.com/mcp/
+#     tools: [search_issues]
+
+servers:
+  - name: notes
+    description: The team's own notes on the companies we follow.
+    command: [python, examples/notes_server.py]
+    env: [VARDEX_NOTES_DIR]  # the names only; the values stay in .env
+    tools: [search_notes]

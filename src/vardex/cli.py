@@ -1,16 +1,21 @@
 """The vardex command-line tool."""
 
 import json
+import os
 import sys
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import typer
 
 from vardex import __version__, evals, rag, text_to_sql
+from vardex.actions import Connector, FileConnector, action_tools, proposals_path
+from vardex.agent import MAX_STEPS, Run, run_agent
 from vardex.anthropic_client import AnthropicClient
+from vardex.budgets import Budget, BudgetError, Spend, spend_path
 from vardex.calllog import log_call
 from vardex.config import Settings, load_settings
 from vardex.documents import (
@@ -34,9 +39,22 @@ from vardex.extraction import (
 from vardex.fastembed_models import FastEmbedder, FastReranker
 from vardex.indexing import index_pack
 from vardex.ingest import http_client
-from vardex.llm import Answer, Conversation, Effort, Ledger, Message, ModelClient, ModelError
+from vardex.llm import (
+    Answer,
+    Conversation,
+    Effort,
+    Ledger,
+    Message,
+    MissingAPIKeyError,
+    ModelClient,
+    ModelError,
+    ToolCall,
+)
 from vardex.llm import ask as ask_model
+from vardex.mcp_client import McpSession, load_mcp_servers, outside_tools
+from vardex.mcp_server import build_server, serve_stdio
 from vardex.packs import Language, PackError, load_pack
+from vardex.permissions import load_permissions, unlisted
 from vardex.pgvector_index import PostgresIndex
 from vardex.postgres_warehouse import PostgresWarehouse
 from vardex.pricing import (
@@ -49,6 +67,7 @@ from vardex.pricing import (
     price_for,
     stale_prices_warning,
 )
+from vardex.prompts import AGENT
 from vardex.provenance import Figure
 from vardex.replay import (
     NotRecorded,
@@ -68,6 +87,7 @@ from vardex.retrieval import Filters, Index, Search, SearchError, search
 from vardex.semantic import Knowledge, check, check_documents, find_key, load_knowledge
 from vardex.sql import QueryError, Result, Warehouse, format_table, format_value
 from vardex.text_to_sql import AnswerError
+from vardex.tools import Approver, Tool, Toolbox, ToolResult, build_toolbox
 from vardex.warehouse import WarehouseError, build, warehouse_path
 
 app = typer.Typer(
@@ -426,6 +446,7 @@ def check_command(pack: PackArgument, warehouse: WarehouseOption = None) -> None
         # The documents are checked against the ontology's tables once those hold
         if not problems and (pack / "documents" / "sources.yaml").is_file():
             problems += check_documents(connection, knowledge.ontology, load_documents(pack))
+        problems += check_permissions(pack, connection)
     except PackError as err:
         raise fail(str(err)) from err
     finally:
@@ -435,9 +456,40 @@ def check_command(pack: PackArgument, warehouse: WarehouseOption = None) -> None
     typer.secho(
         f"OK  {connection.name}: {len(knowledge.tables)} models, {len(knowledge.metrics)} "
         f"metrics, {len(knowledge.ontology.objects)} objects, "
-        f"{len(knowledge.ontology.links)} links, {len(knowledge.questions.examples)} examples",
+        f"{len(knowledge.ontology.links)} links, {len(knowledge.ontology.actions)} actions, "
+        f"{len(knowledge.questions.examples)} examples",
         fg=typer.colors.GREEN,
     )
+
+
+def check_permissions(pack: Path, connection: Warehouse) -> list[str]:
+    """Every tool with no permission level, and every level for a tool that is not there.
+
+    A pack whose permissions and tools have drifted apart fails in the worst way: silently,
+    at the moment someone asks the agent to do the thing nobody granted. A pack with no
+    permissions.yaml has no agent, and there is nothing here to check.
+    """
+    if not (pack / "permissions.yaml").is_file():
+        return []
+    settings = load_settings()
+    knowledge = load_knowledge(pack)
+    permissions = load_permissions(pack)
+    tools = build_toolbox(
+        permissions,
+        warehouse=connection,
+        knowledge=knowledge,
+        extra=action_tools(knowledge, connection, connect_connectors(settings, pack)),
+    )
+    # The document tools exist whenever the pack has documents, index or no index
+    names = list(tools.tools) + (
+        ["search_documents", "read_passage"]
+        if (pack / "documents" / "sources.yaml").is_file()
+        else []
+    )
+    for spec in load_mcp_servers(pack).servers:
+        # Without starting the server, only the tools the pack named can be checked
+        names += [f"{spec.name}__{tool}" for tool in spec.tools]
+    return unlisted(permissions, names)
 
 
 def show_sources(result: Result, figures: list[Figure], err: bool = False) -> None:
@@ -805,6 +857,7 @@ NEEDS: dict[type, set[str]] = {
     evals.ExtractionSuite: {"model"},
     evals.SearchSuite: {"embedder", "index", "reranker"},
     evals.CiteSuite: {"model", "embedder", "index", "reranker"},
+    evals.AgentSuite: {"model", "warehouse", "embedder", "index", "reranker"},
 }
 
 
@@ -871,6 +924,8 @@ def check_suite_for(pack: Path, suite: evals.AnySuite, knowledge: Knowledge | No
         return evals.check_extraction_suite(suite, load_extraction(pack, suite.extraction), pack)
     if isinstance(suite, evals.SearchSuite | evals.CiteSuite):
         return evals.check_document_suite(suite, load_documents(pack))
+    if isinstance(suite, evals.AgentSuite):
+        return evals.check_agent_suite(suite, load_permissions(pack))
     return evals.check_suite(suite, knowledge)  # type: ignore[arg-type]
 
 
@@ -908,6 +963,26 @@ def eval_suite(
         graders = [evals.grade_behaviour, evals.grade_fields]
     elif isinstance(suite, evals.CiteSuite) and c.client:
         graders = [evals.grade_behaviour, evals.grade_citations, evals.FaithfulnessJudge(c.client)]
+    elif isinstance(suite, evals.AgentSuite):
+        # Every grader here is code: whether it answered, which tools it used, what the
+        # answer says and how many steps it took. A run costs model calls; grading it does not.
+        graders = [evals.grade_agent, evals.grade_tools, evals.grade_contains, evals.grade_steps]
+
+    def agent_toolbox() -> Toolbox:
+        """The agent's tools for one case. No MCP servers and nobody to approve: an eval
+        measures what the pack can do on its own, with nothing outside it and no person."""
+        knowledge_now = knowledge or load_knowledge(pack)
+        return build_toolbox(
+            load_permissions(pack),
+            warehouse=c.warehouse,
+            knowledge=knowledge_now,
+            index=c.index,
+            embedder=c.embedder,
+            reranker=c.reranker,
+            extra=action_tools(knowledge_now, c.warehouse, connect_connectors(settings, pack))
+            if c.warehouse
+            else [],
+        )
 
     started: list[str] = []  # the ids of the cases run so far, to name one that stops the run
 
@@ -920,6 +995,8 @@ def eval_suite(
             return evals.search_case(c.index, c.embedder, c.reranker, suite, case)  # type: ignore[arg-type]
         if isinstance(case, evals.CiteCase):
             return evals.cite_case(c.client, c.index, c.embedder, c.reranker, case, graders)  # type: ignore[arg-type]
+        if isinstance(case, evals.AgentCase):
+            return evals.agent_case(c.client, agent_toolbox, case, graders)  # type: ignore[arg-type]
         return evals.answer_case(
             c.client,
             c.warehouse,
@@ -1242,3 +1319,273 @@ def packs(
         typer.secho(f"OK     {pack.name} {pack.version}  recipes: {recipes}", fg=typer.colors.GREEN)
     if invalid:
         raise typer.Exit(code=1)
+
+
+# The agent, and the two channels it is reached through
+
+
+def connect_connectors(settings: Settings, pack: Path) -> dict[str, Connector]:
+    """The outside systems a pack's actions write to. The one place that chooses them."""
+    return {"crm": FileConnector(proposals_path(settings.data_dir, load_pack(pack).name))}
+
+
+def approve_at_keyboard(call: ToolCall, tool: Tool) -> bool:
+    """Ask the person who started the run. With nobody there, the answer is no."""
+    if not interactive():
+        return False
+    arguments = ", ".join(f"{k}={v!r}" for k, v in call.arguments.items())
+    typer.secho(f"\n{tool.name}({arguments})", fg=typer.colors.YELLOW, err=True)
+    return typer.confirm("Allow this?", default=False, err=True)
+
+
+def build_agent(
+    pack: Path,
+    settings: Settings,
+    *,
+    warehouse_url: str | None = None,
+    documents: bool = True,
+    rerank: bool = True,
+    dry_run: bool = False,
+    approve: Approver | None = None,
+    sessions: list[McpSession] | None = None,
+) -> tuple[Toolbox, list[Warehouse | Index]]:
+    """Everything the agent of one run can reach, and what has to be closed afterwards."""
+    knowledge = load_knowledge(pack)
+    permissions = load_permissions(pack)
+    connection = connect_warehouse(warehouse_url, pack, settings)
+    open_now: list[Warehouse | Index] = [connection]
+    index = embedder = None
+    if documents and (pack / "documents" / "sources.yaml").is_file():
+        embedder = connect_embedder(settings)
+        index = connect_index(settings, pack, embedder)
+        open_now.append(index)
+    extra = action_tools(knowledge, connection, connect_connectors(settings, pack))
+    extra += outside_tools(sessions or [])
+    toolbox = build_toolbox(
+        permissions,
+        warehouse=connection,
+        knowledge=knowledge,
+        index=index,
+        embedder=embedder,
+        reranker=connect_reranker(settings, rerank) if index is not None else None,
+        extra=extra,
+        approve=approve,
+        dry_run=dry_run,
+    )
+    return toolbox, open_now
+
+
+ERROR_CODES: list[tuple[type[Exception], str]] = [
+    (MissingAPIKeyError, "no_api_key"),
+    (BudgetError, "budget_exceeded"),
+    (ModelError, "model_failed"),
+    (PackError, "pack_invalid"),
+    (SearchError, "index_unavailable"),
+    (WarehouseError, "warehouse_unavailable"),
+    (QueryError, "query_failed"),
+]
+
+
+def error_code(err: Exception) -> str:
+    """A name a program can branch on, for each way a command can fail."""
+    for kind, code in ERROR_CODES:
+        if isinstance(err, kind):
+            return code
+    return "failed"
+
+
+def print_json(body: dict[str, Any]) -> None:
+    """Print one JSON object on stdout, for a program reading our output."""
+    typer.echo(json.dumps(body, ensure_ascii=False, default=str))
+
+
+def fail_json(err: Exception) -> typer.Exit:
+    """Report a failure as JSON on stdout, so a coding agent can read it."""
+    print_json({"ok": False, "error": {"code": error_code(err), "message": str(err)}})
+    return typer.Exit(code=1)
+
+
+def run_as_json(run: Run, toolbox: Toolbox) -> dict[str, Any]:
+    """A whole run as data: the answer, every call, and what it cost."""
+    return {
+        "ok": run.answered,
+        "stop": run.stop,
+        "answer": run.answer,
+        "note": run.note,
+        "steps": len(run.steps),
+        "tool_calls": [
+            {
+                "name": call.name,
+                "arguments": call.arguments,
+                "permission": toolbox.level(call.name),
+                "is_error": result.is_error,
+                "wrote": result.wrote,
+                "content": result.content,
+                "data": result.structured,
+            }
+            for call, result in run.tool_calls
+        ],
+        "usage": {
+            "input_tokens": run.usage.input_tokens,
+            "output_tokens": run.usage.output_tokens,
+            "cache_read_tokens": run.usage.cache_read_tokens,
+            "cache_write_tokens": run.usage.cache_write_tokens,
+        },
+        "cost_usd": str(run.cost_usd) if run.cost_usd is not None else None,
+        "seconds": round(run.seconds, 2),
+    }
+
+
+@app.command(name="agent")
+def agent_command(
+    pack: PackArgument,
+    question: Annotated[str, typer.Argument(help="The question to answer.")],
+    model: ModelOption = None,
+    warehouse: WarehouseOption = None,
+    effort: Annotated[Effort | None, typer.Option(help="How much work the model puts in.")] = None,
+    steps: Annotated[int, typer.Option(help="Most model calls in one run.")] = MAX_STEPS,
+    documents: Annotated[
+        bool, typer.Option("--documents/--no-documents", help="Let it search the pack's documents.")
+    ] = True,
+    rerank: Annotated[
+        bool, typer.Option("--rerank/--no-rerank", help="Rerank search results.")
+    ] = True,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Say what a tool would change, change nothing.")
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print the whole run as JSON, for another program.")
+    ] = False,
+    show_steps: Annotated[
+        bool, typer.Option("--steps-shown", help="Print each step as it runs.")
+    ] = False,
+    stats: StatsOption = False,
+) -> None:
+    """Answer a question by letting the model use the pack's tools."""
+    settings = settings_for(model)
+    if not as_json:
+        warn_if_prices_are_stale()
+    sessions: list[McpSession] = []
+    try:
+        specs = load_mcp_servers(pack).servers
+        permissions = load_permissions(pack)
+        with ExitStack() as stack:
+            for spec in specs:
+                sessions.append(
+                    stack.enter_context(
+                        McpSession(spec, environment=dict(os.environ), ask=ask_at_keyboard)
+                    )
+                )
+            toolbox, open_now = build_agent(
+                pack,
+                settings,
+                warehouse_url=warehouse,
+                documents=documents,
+                rerank=rerank,
+                dry_run=dry_run,
+                approve=approve_at_keyboard,
+                sessions=sessions,
+            )
+            for closing in open_now:
+                stack.callback(closing.close)
+            budget = Budget(
+                connect(settings),
+                caps=permissions.budgets,
+                spend=Spend(spend_path(settings.data_dir, load_pack(pack).name)),
+            )
+            run = run_agent(
+                budget,
+                toolbox,
+                question,
+                system=AGENT,
+                max_steps=steps,
+                on_call=show_call if show_steps and not as_json else None,
+            )
+    except (PackError, ModelError, SearchError, WarehouseError, QueryError) as err:
+        raise (fail_json(err) if as_json else fail(str(err))) from err
+    if as_json:
+        print_json(run_as_json(run, toolbox))
+        raise typer.Exit(code=0 if run.answered else 1)
+    for answer in (step.answer for step in run.steps):
+        record(answer, stats=False)
+    if not run.answered:
+        typer.secho(run.note, fg=typer.colors.RED, err=True)
+    typer.echo(run.answer)
+    if stats:
+        cost = format_usd(run.cost_usd) if run.cost_usd is not None else "cost unknown"
+        typer.secho(
+            f"{len(run.steps)} steps · {len(run.tool_calls)} tool calls · "
+            f"{run.usage.input_tokens:,} in · {run.usage.output_tokens:,} out · "
+            f"{run.seconds:.1f} s · {cost}",
+            fg="bright_black",
+            err=True,
+        )
+    if not run.answered:
+        raise typer.Exit(code=1)
+
+
+def show_call(call: ToolCall, result: ToolResult) -> None:
+    """Print one tool call as it happens, so a person can watch the agent work."""
+    arguments = ", ".join(f"{k}={v!r}" for k, v in call.arguments.items())
+    colour = typer.colors.RED if result.is_error else typer.colors.BRIGHT_BLACK
+    typer.secho(f"  {call.name}({arguments[:120]})", fg=colour, err=True)
+
+
+def ask_at_keyboard(question: str) -> bool:
+    """Put a yes-or-no question from an outside server to the person."""
+    if not interactive():
+        return False
+    return typer.confirm(question, default=False, err=True)
+
+
+@app.command(name="tools")
+def tools_command(
+    pack: PackArgument,
+    warehouse: WarehouseOption = None,
+    documents: Annotated[bool, typer.Option("--documents/--no-documents")] = True,
+) -> None:
+    """List the tools this pack's agent has, and what each may do."""
+    settings = load_settings()
+    sessions: list[McpSession] = []
+    try:
+        with ExitStack() as stack:
+            for spec in load_mcp_servers(pack).servers:
+                sessions.append(stack.enter_context(McpSession(spec, environment=dict(os.environ))))
+            toolbox, open_now = build_agent(
+                pack, settings, warehouse_url=warehouse, documents=documents, sessions=sessions
+            )
+            for closing in open_now:
+                stack.callback(closing.close)
+            rows = [
+                (name, toolbox.level(name) or "none", tool.summary)
+                for name, tool in toolbox.tools.items()
+            ]
+    except (PackError, SearchError, WarehouseError, QueryError) as err:
+        raise fail(str(err)) from err
+    width = max(len(name) for name, _, _ in rows)
+    for name, level, summary in rows:
+        colour = typer.colors.RED if level == "none" else None
+        typer.secho(f"{name.ljust(width)}  {level:<8}  {summary[:70]}", fg=colour)
+
+
+@app.command(name="mcp")
+def mcp_command(
+    pack: PackArgument,
+    warehouse: WarehouseOption = None,
+    documents: Annotated[bool, typer.Option("--documents/--no-documents")] = True,
+) -> None:
+    """Offer this pack's tools to another agent, over MCP on standard input and output."""
+    settings = load_settings()
+    name = load_pack(pack).name
+
+    def build() -> Toolbox:
+        # A new toolbox per request: the protocol is stateless, and a connection should not
+        # be held open for a client that may never come back.
+        toolbox, _ = build_agent(pack, settings, warehouse_url=warehouse, documents=documents)
+        return toolbox
+
+    try:
+        build()  # fail loudly here rather than on the first request from a client
+    except (PackError, SearchError, WarehouseError, QueryError) as err:
+        raise fail(str(err)) from err
+    serve_stdio(build_server(name, build))
