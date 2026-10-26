@@ -69,7 +69,7 @@ from vardex.pricing import (
     stale_prices_warning,
 )
 from vardex.prompts import AGENT
-from vardex.provenance import Figure
+from vardex.provenance import Figure, Quote
 from vardex.replay import (
     NotRecorded,
     Recording,
@@ -522,6 +522,61 @@ def show_sources(result: Result, figures: list[Figure], err: bool = False) -> No
         typer.echo(f"  {figure.text:<16} {where}", err=err)
 
 
+JsonOption = Annotated[
+    bool, typer.Option("--json", help="Print the result as one JSON object, for a program.")
+]
+
+
+def result_as_json(result: Result) -> dict[str, Any]:
+    """The query an answer rests on: what ran, and what came back."""
+    return {
+        "sql": result.sql.strip(),
+        "warehouse": result.warehouse,
+        "seconds": round(result.seconds, 3),
+        "columns": list(result.columns),
+        "rows": [list(row) for row in result.rows],
+        "truncated": result.truncated,
+    }
+
+
+def figure_as_json(figure: Figure) -> dict[str, Any]:
+    """One number in an answer, and everywhere it can be traced to."""
+    return {
+        "text": figure.text,
+        "traced": figure.traced,
+        "cells": [
+            {"row": cell.row, "column": cell.column, "value": cell.value} for cell in figure.cells
+        ],
+        "in_sql": figure.in_sql,
+        "in_question": figure.in_question,
+        "in_assumptions": figure.in_assumptions,
+        "quotes": [quote_as_json(quote) for quote in figure.quotes],
+    }
+
+
+def quote_as_json(quote: Quote) -> dict[str, Any]:
+    """Words copied from a page, and where a person can read them."""
+    return {
+        "document": quote.document,
+        "title": quote.title,
+        "page": quote.page,
+        "text": " ".join(quote.text.split()),
+        "link": quote.link,
+    }
+
+
+def reply_as_json(reply: text_to_sql.Reply) -> dict[str, Any]:
+    """A warehouse answer as data: what it said, what it ran, and what it rests on."""
+    return {
+        "kind": reply.kind,
+        "answer": reply.text,
+        "assumptions": list(reply.assumptions),
+        "warnings": list(reply.warnings),
+        "query": result_as_json(reply.result) if reply.result else None,
+        "figures": [figure_as_json(figure) for figure in reply.figures],
+    }
+
+
 @app.command(name="answer")
 def answer_command(
     pack: PackArgument,
@@ -543,6 +598,7 @@ def answer_command(
     no_input: Annotated[
         bool, typer.Option("--no-input", help="Never wait for an answer to a question back.")
     ] = False,
+    as_json: JsonOption = False,
     stats: StatsOption = False,
 ) -> None:
     """Answer a question from the pack's warehouse, with the SQL it ran and the rows it used.
@@ -553,7 +609,7 @@ def answer_command(
         knowledge = load_knowledge(pack)
         connection = connect_warehouse(warehouse, pack, settings)
     except (PackError, QueryError) as err:
-        raise fail(str(err)) from err
+        raise (fail_json(err) if as_json else fail(str(err))) from err
     spent: list[Answer] = []  # the calls for the question in hand, still logged if one fails
     try:
         if show_prompt:
@@ -587,7 +643,7 @@ def answer_command(
             for call in reply.answers:
                 record(call, stats)
             asked_back = len(earlier) // 2
-            if reply.kind != "clarify" or no_input or asked_back == MAX_ASKED_BACK:
+            if reply.kind != "clarify" or no_input or as_json or asked_back == MAX_ASKED_BACK:
                 break
             if not interactive():
                 break
@@ -597,15 +653,27 @@ def answer_command(
     except (ModelError, QueryError) as err:
         for call in spent:
             record(call, stats)
-        raise fail(str(err)) from err
+        raise (fail_json(err) if as_json else fail(str(err))) from err
     except AnswerError as err:
         for call in err.answers:
             record(call, stats)
+        if as_json:
+            raise fail_json(
+                err,
+                data={"query": result_as_json(err.result)} if err.result else None,
+            ) from err
         if err.result:
             show_sources(err.result, [], err=True)
         raise fail(str(err)) from err
     finally:
         connection.close()
+
+    if as_json:
+        # A question back is the one outcome that is not an answer, and it already exits 2.
+        if reply.kind == "clarify":
+            raise fail_json(reply.text, code="clarify_needed", exit_code=2)
+        ok_json(reply_as_json(reply))
+        return
 
     typer.echo(reply.text)
     for warning in reply.warnings:
@@ -730,6 +798,41 @@ def show_search(found: Search) -> None:
         typer.echo(f"    {snippet[:200]}{'…' if len(snippet) > 200 else ''}\n")
 
 
+def search_as_json(found: Search) -> dict[str, Any]:
+    """What a search returned: each passage, and every rank and score behind its place."""
+    return {
+        "query": found.query,
+        "hits": [
+            {
+                "place": place,
+                "passage_id": hit.passage.id,
+                "document": hit.passage.document.id,
+                "title": hit.passage.document.title,
+                "page": hit.passage.page,
+                "link": hit.passage.link,
+                "text": hit.passage.text,
+                "meaning_rank": hit.meaning_rank,
+                "words_rank": hit.words_rank,
+                "fused": round(hit.fused, 6),
+                "rerank": hit.rerank,
+            }
+            for place, hit in enumerate(found.hits, start=1)
+        ],
+    }
+
+
+def cite_as_json(reply: rag.Reply) -> dict[str, Any]:
+    """A cited answer as data: what it said, and the page behind every claim."""
+    return {
+        "kind": reply.kind,
+        "answer": reply.text,
+        "citations": [
+            {"number": citation.number, **quote_as_json(citation.quote)}
+            for citation in reply.citations
+        ],
+    }
+
+
 @app.command(name="search")
 def search_command(
     pack: PackArgument,
@@ -742,6 +845,7 @@ def search_command(
     document: DocumentOption = None,
     limit: Annotated[int, typer.Option(min=1, max=50, help="How many passages to show.")] = 10,
     rerank: RerankOption = True,
+    as_json: JsonOption = False,
 ) -> None:
     """Search the pack's documents, by meaning and by words, and print the best passages."""
     settings = load_settings()
@@ -752,7 +856,7 @@ def search_command(
         embedder = connect_embedder(settings)
         index = connect_index(settings, pack, embedder)
     except (PackError, SearchError, QueryError) as err:
-        raise fail(str(err)) from err
+        raise (fail_json(err) if as_json else fail(str(err))) from err
     try:
         found = search(
             index,
@@ -763,11 +867,15 @@ def search_command(
             reranker=connect_reranker(settings, rerank),
         )
     except SearchError as err:
-        raise fail(str(err)) from err
+        raise (fail_json(err) if as_json else fail(str(err))) from err
     finally:
         index.close()
     if not found.hits:
-        raise fail("No passage matches; try fewer filters.")
+        note = "No passage matches; try fewer filters."
+        raise fail_json(note, code="no_match") if as_json else fail(note)
+    if as_json:
+        ok_json(search_as_json(found))
+        return
     show_search(found)
 
 
@@ -786,6 +894,7 @@ def cite_command(
     ] = 8,
     rerank: RerankOption = True,
     model: ModelOption = None,
+    as_json: JsonOption = False,
     stats: StatsOption = False,
 ) -> None:
     """Answer a question from the pack's documents, citing the page of every claim."""
@@ -797,7 +906,7 @@ def cite_command(
         embedder = connect_embedder(settings)
         index = connect_index(settings, pack, embedder)
     except (PackError, SearchError, QueryError) as err:
-        raise fail(str(err)) from err
+        raise (fail_json(err) if as_json else fail(str(err))) from err
     try:
         client = connect(settings)
         reply = rag.answer(
@@ -810,15 +919,18 @@ def cite_command(
             passages=passages,
         )
     except (ModelError, SearchError) as err:
-        raise fail(str(err)) from err
+        raise (fail_json(err) if as_json else fail(str(err))) from err
     except rag.CiteError as err:
         for call in err.answers:
             record(call, stats)
-        raise fail(str(err)) from err
+        raise (fail_json(err) if as_json else fail(str(err))) from err
     finally:
         index.close()
     for call in reply.answers:
         record(call, stats)
+    if as_json:
+        ok_json(cite_as_json(reply))
+        return
     typer.echo(reply.text)
     if reply.kind == "not_found":
         typer.secho("(not in the documents: nothing is cited)", fg="bright_black", err=True)
@@ -1399,20 +1511,45 @@ def error_code(err: Exception) -> str:
 
 
 def print_json(body: dict[str, Any]) -> None:
-    """Print one JSON object on stdout, for a program reading our output."""
+    """Print one JSON object on stdout, for a program reading our output.
+
+    One object and nothing else. Everything a person would want to read — warnings, statistics,
+    the rows in a table — goes to stderr, so `vardex … --json | jq` never chokes on prose.
+    """
     typer.echo(json.dumps(body, ensure_ascii=False, default=str))
 
 
-def fail_json(err: Exception) -> typer.Exit:
-    """Report a failure as JSON on stdout, so a coding agent can read it."""
-    print_json({"ok": False, "error": {"code": error_code(err), "message": str(err)}})
-    return typer.Exit(code=1)
+def ok_json(data: dict[str, Any]) -> None:
+    """Report success as the one envelope every command shares."""
+    print_json({"ok": True, "data": data})
+
+
+def fail_json(
+    err: Exception | str,
+    code: str = "failed",
+    exit_code: int = 1,
+    data: dict[str, Any] | None = None,
+) -> typer.Exit:
+    """Report a failure as the same envelope, and exit with a code that matches `ok`.
+
+    A program should never have to read the exit code and the body and find them disagreeing,
+    so the two are set in one place: ok false here always means a non-zero exit.
+
+    `data` carries whatever the command did manage to produce. A run that stopped on its
+    budget still cost money, and a caller that only learns it failed cannot bill it.
+    """
+    if isinstance(err, Exception):
+        code = error_code(err)
+    body: dict[str, Any] = {"ok": False, "error": {"code": code, "message": str(err)}}
+    if data is not None:
+        body["data"] = data
+    print_json(body)
+    return typer.Exit(code=exit_code)
 
 
 def run_as_json(run: Run, toolbox: Toolbox) -> dict[str, Any]:
     """A whole run as data: the answer, every call, and what it cost."""
     return {
-        "ok": run.answered,
         "stop": run.stop,
         "answer": run.answer,
         "note": run.note,
@@ -1508,8 +1645,11 @@ def agent_command(
     except (PackError, ModelError, SearchError, WarehouseError, QueryError) as err:
         raise (fail_json(err) if as_json else fail(str(err))) from err
     if as_json:
-        print_json(run_as_json(run, toolbox))
-        raise typer.Exit(code=0 if run.answered else 1)
+        body = run_as_json(run, toolbox)
+        if not run.answered:
+            raise fail_json(run.note, code=f"agent_{run.stop}", data=body)
+        ok_json(body)
+        raise typer.Exit(code=0)
     for answer in (step.answer for step in run.steps):
         record(answer, stats=False)
     if not run.answered:

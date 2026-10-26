@@ -237,3 +237,94 @@ def test_a_question_back_without_a_keyboard_ends_with_2(data, monkeypatch):
     assert result.exit_code == 2
     assert result.stdout.startswith("Most of what?")
     assert len(model.requests) == 1
+
+
+def test_answer_json_is_one_object_with_the_sql_the_rows_and_the_figures(data, monkeypatch):
+    """A coding agent reads stdout and nothing else, so prose and statistics go to stderr."""
+    make_warehouse(data)
+    plan = {
+        "action": "query",
+        "sql": SQL,
+        "message": None,
+        "assumptions": ["Employees are today's figures."],
+    }
+    model = FakeModel(json.dumps(plan), "Demo Laks AS has the most employees: 120.")
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+
+    result = runner.invoke(app, ["answer", PACK, "Who has the most employees?", "--json"])
+
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)  # the whole of stdout, or this raises
+    assert body["ok"] is True
+    data_out = body["data"]
+    assert data_out["kind"] == "answer"
+    assert data_out["answer"] == "Demo Laks AS has the most employees: 120."
+    assert data_out["assumptions"] == ["Employees are today's figures."]
+    assert data_out["query"]["sql"] == SQL.strip()
+    assert data_out["query"]["columns"] == ["name", "employees"]
+    assert data_out["query"]["rows"][0] == ["DEMO LAKS AS", 120]
+    figure = next(f for f in data_out["figures"] if f["text"] == "120")
+    assert figure["traced"] is True
+    assert figure["cells"][0] == {"row": 1, "column": "employees", "value": 120}
+
+
+def test_answer_json_reports_a_failure_as_a_code_and_exits_non_zero(data, monkeypatch):
+    make_warehouse(data)
+    plan = {
+        "action": "query",
+        "sql": "select nope from companies",
+        "message": None,
+        "assumptions": [],
+    }
+    model = FakeModel(*([json.dumps(plan)] * 4))
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+
+    result = runner.invoke(app, ["answer", PACK, "Who?", "--json"])
+
+    assert result.exit_code == 1
+    body = json.loads(result.stdout)
+    assert body["ok"] is False
+    assert body["error"]["code"]
+    assert body["error"]["message"]
+
+
+def test_answer_json_never_waits_at_the_keyboard(data, monkeypatch):
+    """A question back is the one outcome that is not an answer, so it exits 2, as it does
+    without --json. A program piping us input is not there to be asked."""
+    make_warehouse(data)
+    plan = {
+        "action": "clarify",
+        "sql": None,
+        "message": "Employees today, or last year?",
+        "assumptions": [],
+    }
+    model = FakeModel(json.dumps(plan))
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+
+    result = runner.invoke(app, ["answer", PACK, "Who has the most?", "--json"])
+
+    assert result.exit_code == 2
+    body = json.loads(result.stdout)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "clarify_needed"
+    assert "Employees today" in body["error"]["message"]
+
+
+def test_answer_json_keeps_stdout_to_the_one_object_even_with_stats(data, monkeypatch):
+    """--json and --stats together: the statistics are for a person and go to stderr, so a
+    program piping stdout into jq still gets one object and nothing else."""
+    make_warehouse(data)
+    plan = {"action": "query", "sql": SQL, "message": None, "assumptions": []}
+    model = FakeModel(json.dumps(plan), "Demo Laks AS has the most employees: 120.")
+    monkeypatch.setattr("vardex.cli.connect", lambda settings: model)
+    monkeypatch.setattr("vardex.cli.load_knowledge", lambda pack: knowledge())
+
+    result = runner.invoke(app, ["answer", PACK, "Who?", "--json", "--stats"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["ok"] is True
+    assert result.stdout.strip().count("\n") == 0  # one line, one object
+    assert "in · " in result.stderr
