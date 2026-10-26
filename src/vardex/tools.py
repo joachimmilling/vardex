@@ -21,8 +21,10 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
+from vardex.charts import ChartError, Series, write_chart
 from vardex.embeddings import Embedder, Reranker
 from vardex.llm import ToolCall, ToolSpec
 from vardex.permissions import WRITING, Permission, Permissions
@@ -459,6 +461,84 @@ def document_tools(
     ]
 
 
+def chart_tools(folder: Path) -> list[Tool]:
+    """The tool that draws. A chart is written even on a dry run: a picture nobody can open is
+    not a dry run of anything, and writing into the pack's own data folder changes nothing
+    outside Vardex, which is why this stays a `read` tool."""
+
+    def make_chart(call: Invocation) -> ToolResult:
+        title = str(call.argument("title", "")).strip()
+        kind = str(call.argument("kind", "bar"))
+        labels = [str(one) for one in call.argument("labels", []) or []]
+        given = call.argument("series", []) or []
+        if not title:
+            return ToolResult("A chart needs a title. Say what it shows.", is_error=True)
+        series = [
+            Series(name=str(one.get("name", "")), values=[float(v) for v in one.get("values", [])])
+            for one in given
+        ]
+        try:
+            chart = write_chart(folder, title, kind, labels, series)
+        except ChartError as err:
+            return ToolResult(str(err), is_error=True)
+        except (TypeError, ValueError) as err:
+            return ToolResult(f"Those numbers could not be charted: {err}", is_error=True)
+        return ToolResult(
+            f"Wrote {chart.path}.\n{chart.summary}\nIt is described as: {chart.aria_label}",
+            structured={
+                "path": str(chart.path),
+                "aria_label": chart.aria_label,
+                "summary": chart.summary,
+            },
+        )
+
+    return [
+        Tool(
+            name="make_chart",
+            summary="Draw numbers you already have as a bar or line chart, saved as an SVG.",
+            description=(
+                "Writes a chart to a file and returns its path. Use it when the answer is a "
+                "shape rather than a number: several years, several companies, a trend.\n\n"
+                "Give one label per point on the horizontal axis, and one or more named "
+                "series, each with one value per label. At most 4 series and 60 points in "
+                "total; beyond that, chart fewer of them or group them first.\n\n"
+                "You get back the path and a description, not the numbers: you already have "
+                "those. Tell the person where the file is, and say in words what it shows."
+            ),
+            schema=arguments_schema(
+                {
+                    "title": {"type": "string", "description": "What the chart shows."},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["bar", "line"],
+                        "description": "bar to compare, line for a trend over time.",
+                    },
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The horizontal axis, such as years.",
+                    },
+                    "series": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "values": {"type": "array", "items": {"type": "number"}},
+                            },
+                            "required": ["name", "values"],
+                            "additionalProperties": False,
+                        },
+                        "description": "One entry per line or bar colour.",
+                    },
+                },
+                ["title", "kind", "labels", "series"],
+            ),
+            run=make_chart,
+        )
+    ]
+
+
 def build_toolbox(
     permissions: Permissions,
     *,
@@ -467,6 +547,7 @@ def build_toolbox(
     index: Index | None = None,
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
+    charts: Path | None = None,
     extra: list[Tool] | None = None,
     approve: Approver | None = None,
     dry_run: bool = False,
@@ -478,6 +559,8 @@ def build_toolbox(
         tools += warehouse_tools(warehouse, knowledge)
     if index is not None and embedder is not None:
         tools += document_tools(index, embedder, reranker)
+    if charts is not None:
+        tools += chart_tools(charts)
     tools += extra or []
     box = Toolbox(
         {tool.name: tool for tool in tools}, permissions, approve=approve, dry_run=dry_run
