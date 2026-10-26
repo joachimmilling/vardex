@@ -6,6 +6,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-26
+
 ### Added
 
 - A `make_chart` tool, in a new `charts.py`, draws numbers the agent already has as a bar or
