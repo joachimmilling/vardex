@@ -1,5 +1,6 @@
 """The agent loop: what it sends, what it stops for, and what it records."""
 
+import time
 from decimal import Decimal
 
 import pytest
@@ -10,7 +11,14 @@ from vardex.budgets import Budget
 from vardex.llm import ModelError, ToolCall
 from vardex.permissions import Budgets, Permissions
 from vardex.replay import dump_answer, load_answer
-from vardex.tools import Invocation, Tool, ToolResult, arguments_schema, build_toolbox
+from vardex.tools import (
+    Invocation,
+    Tool,
+    ToolFailure,
+    ToolResult,
+    arguments_schema,
+    build_toolbox,
+)
 
 
 def counting_tool(calls: list[dict]) -> Tool:
@@ -194,3 +202,76 @@ def test_a_recorded_turn_that_called_tools_replays_as_itself():
     assert replayed == asking
     assert isinstance(replayed.tool_calls[0], ToolCall)
     assert replayed.tool_calls[0].name == "look_up"
+
+
+def sleeping_tool(seconds: float) -> Tool:
+    """A tool that takes its time, so a turn's calls can be shown to overlap."""
+
+    def run(invocation: Invocation) -> ToolResult:
+        name = invocation.arguments["what"]
+        if name == "boom":
+            raise ToolFailure("there is no such thing")
+        time.sleep(seconds)
+        return ToolResult(f"Looked up {name}.")
+
+    return Tool(
+        name="look_up",
+        summary="Look one thing up, slowly.",
+        description="Looks one thing up, slowly.",
+        schema=arguments_schema({"what": {"type": "string"}}, ["what"]),
+        run=run,
+    )
+
+
+def sleeping_toolbox(seconds: float):
+    return build_toolbox(
+        Permissions(tools={"look_up": "read", "describe_tool": "read"}),
+        extra=[sleeping_tool(seconds)],
+    )
+
+
+def test_a_turns_calls_run_at_the_same_time():
+    nap = 0.3
+    asked = [("look_up", {"what": w}) for w in ("one", "two", "three")]
+    model = FakeModel(Turn("Three at once.", asked), "Done.")
+    started = time.monotonic()
+    run = run_agent(model, sleeping_toolbox(nap), "Three things?")
+    elapsed = time.monotonic() - started
+    assert run.answered
+    assert len(run.steps[0].calls) == 3
+    # Serial would be 3 naps; concurrent is one, with room for the threads themselves.
+    assert elapsed < nap * 2, f"three {nap}s calls took {elapsed:.2f}s, so they ran one by one"
+
+
+def test_replies_come_back_in_the_order_the_model_asked():
+    """The API matches replies by id, but a stable order keeps transcripts and recordings the
+    same from run to run, even when the quickest tool finishes first."""
+    asked = [("look_up", {"what": w}) for w in ("slow", "quick", "middling")]
+    model = FakeModel(Turn("Three at once.", asked), "Done.")
+    toolbox = sleeping_toolbox(0.05)
+    run = run_agent(model, toolbox, "Three things?")
+    assert [call.arguments["what"] for call, _ in run.steps[0].calls] == [
+        "slow",
+        "quick",
+        "middling",
+    ]
+    assert [call.arguments["what"] for call, _ in toolbox.calls] == ["slow", "quick", "middling"]
+
+
+def test_a_failing_call_does_not_stop_its_neighbours():
+    asked = [("look_up", {"what": w}) for w in ("one", "boom", "three")]
+    model = FakeModel(Turn("Three at once.", asked), "Done.")
+    run = run_agent(model, sleeping_toolbox(0.0), "Three things?")
+    results = [result for _, result in run.steps[0].calls]
+    assert [r.is_error for r in results] == [False, True, False]
+    assert "no such thing" in results[1].content
+    assert results[2].content == "Looked up three."
+
+
+def test_every_call_records_how_long_it_took():
+    nap = 0.2
+    model = FakeModel(Turn("Looking.", [("look_up", {"what": "revenue"})]), "Done.")
+    run = run_agent(model, sleeping_toolbox(nap), "How long?")
+    call, result = run.steps[0].calls[0]
+    assert result.seconds >= nap
+    assert f"[{result.seconds:.1f} s]" in transcript(run)
