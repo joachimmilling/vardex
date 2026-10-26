@@ -832,11 +832,16 @@ def agent_case(
             raise  # every case would fail the same way, so stop the run
         outcome = Outcome("error", str(err), None, ledger.answers)
     else:
+        # These go in `values` rather than being read off the Run, because the recording
+        # carries `values` and nothing else: a replayed suite must report the same figures
+        # as the live one that recorded it.
         values = {
             "tools": [call.name for call, _ in run_result.tool_calls],
             "steps": len(run_result.steps),
             "stop": run_result.stop,
             "wrote": [call.name for call, result in run_result.tool_calls if result.wrote],
+            "tool_calls": len(run_result.tool_calls),
+            "cost_usd": str(run_result.cost_usd) if run_result.cost_usd is not None else None,
         }
         kind: Kind = "answer" if run_result.answered else "error"
         if run_result.answered and refused_politely(run_result.answer):
@@ -999,6 +1004,59 @@ def format_comparison(comparison: Comparison) -> str:
     return "\n".join(lines)
 
 
+def median(numbers: list[float]) -> float:
+    """The middle value. The median, not the mean: one runaway run should not move it."""
+    ordered = sorted(numbers)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def agent_figures(report: Report, details: bool = False) -> list[str]:
+    """What the agent suite's runs took, beside whether they passed.
+
+    A suite that only says 90% tells you nothing about the case that took nine steps and forty
+    cents to get there. This is information, not a threshold: it moves no gate. The point is
+    that a run which got slower or dearer is visible in the same place as one that broke.
+    """
+    runs = [
+        r.outcome.values for r in report.results if r.outcome.values and "steps" in r.outcome.values
+    ]
+    if not runs:
+        return []
+    steps = [float(v["steps"]) for v in runs]
+    costs = [Decimal(v["cost_usd"]) for v in runs if v.get("cost_usd") is not None]
+    used: Counter[str] = Counter(tool for v in runs for tool in v.get("tools", []))
+    lines = [
+        "",
+        f"Steps: median {median(steps):.0f}, worst {max(steps):.0f}",
+    ]
+    if costs:
+        lines.append(
+            f"Cost: median ${median([float(c) for c in costs]):.3f}, "
+            f"worst ${max(float(c) for c in costs):.3f}, "
+            f"total ${sum(costs):.2f}"
+        )
+    else:
+        lines.append("Cost: not priced")
+    tools = ", ".join(f"{name} {count}" for name, count in used.most_common()) or "none"
+    lines.append(f"Tools used: {tools}")
+    if details:
+        for result in report.results:
+            values = result.outcome.values or {}
+            if "steps" not in values:
+                continue
+            cost = values.get("cost_usd")
+            shown = f"${float(cost):.3f}" if cost is not None else "unpriced"
+            calls = values.get("tool_calls", 0)
+            lines.append(
+                f"  {result.case.id}: {values['steps']} steps, "
+                f"{calls} tool call{'' if calls == 1 else 's'}, {shown}"
+            )
+    return lines
+
+
 def format_report(report: Report, details: bool = False) -> str:
     """The report as text: the rate by type, by language and in all, then every failure and
     every flaky case. With details, each failure also shows its question, the SQL that ran and
@@ -1044,6 +1102,7 @@ def format_report(report: Report, details: bool = False) -> str:
             f"Mean reciprocal rank: {mrr:.2f}",
             f"Missed: {lower} ranked lower, {never} not ranked at all",
         ]
+    lines += agent_figures(report, details)
     # An answer takes two calls, a plan and the words; more means a check sent it back
     answered = [r for r in report.results if r.outcome.kind == "answer"]
     again = [r for r in answered if len(r.outcome.answers) > 2]
