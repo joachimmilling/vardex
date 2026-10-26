@@ -19,6 +19,9 @@ tools:
   list_tables: read
   describe_table: read
   run_sql: read
+  # Drawing what has been read. The file lands in the pack's own data folder, so this
+  # changes nothing outside Vardex.
+  make_chart: read
   # Reading the documents
   search_documents: read
   read_passage: read

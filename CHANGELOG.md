@@ -6,21 +6,26 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A `make_chart` tool, in a new `charts.py`, draws numbers the agent already has as a bar or
+  line chart and writes it to `data/<pack>/charts/`. The SVG is written by hand, with no new
+  dependency: it carries its own stylesheet, takes its colours from custom properties with a
+  dark-mode fallback, and states what it shows in an `aria-label`. The tool returns the path
+  and that description rather than the series, which the model already has. It refuses more
+  than 4 series or 60 points. It is a `read` tool, and it draws on a dry run too.
+- A test that a recorded turn which called tools replays as itself, which is the bug that made
+  any agent suite unreplayable.
+
 ### Changed
 
 - A turn's tool calls now run at the same time, at most four at once, so a turn that asks for a
   search and a query waits for the slower of the two rather than for both. Replies still go back
   in the order the model asked. Every `ToolResult` carries the `seconds` its tool took, and the
   transcript shows them.
-
 - The agent suite's refusal case asks for a year the warehouse does not reach rather than for a
   company said not to be in it: the register holds 1.18 million entities, so almost any name is
   in there somewhere, and the case failed for being answerable rather than for being refused.
-
-### Added
-
-- A test that a recorded turn which called tools replays as itself, which is the bug that made
-  any agent suite unreplayable.
 
 ## [0.8.0] - 2026-10-21
 

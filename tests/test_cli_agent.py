@@ -50,6 +50,7 @@ tools:
   list_tables: read
   describe_table: read
   run_sql: read
+  make_chart: read
   adjust_credit_limit: draft
 """
 TABLES = """

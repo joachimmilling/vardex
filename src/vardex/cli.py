@@ -17,6 +17,7 @@ from vardex.agent import MAX_STEPS, Run, run_agent
 from vardex.anthropic_client import AnthropicClient
 from vardex.budgets import Budget, BudgetError, Spend, spend_path
 from vardex.calllog import log_call
+from vardex.charts import charts_path
 from vardex.config import Settings, load_settings
 from vardex.documents import (
     document_path,
@@ -478,6 +479,7 @@ def check_permissions(pack: Path, connection: Warehouse) -> list[str]:
         permissions,
         warehouse=connection,
         knowledge=knowledge,
+        charts=charts_path(settings.data_dir, pack.name),
         extra=action_tools(knowledge, connection, connect_connectors(settings, pack)),
     )
     # The document tools exist whenever the pack has documents, index or no index
@@ -979,6 +981,7 @@ def eval_suite(
             index=c.index,
             embedder=c.embedder,
             reranker=c.reranker,
+            charts=charts_path(settings.data_dir, pack.name),
             extra=action_tools(knowledge_now, c.warehouse, connect_connectors(settings, pack))
             if c.warehouse
             else [],
@@ -1368,6 +1371,7 @@ def build_agent(
         index=index,
         embedder=embedder,
         reranker=connect_reranker(settings, rerank) if index is not None else None,
+        charts=charts_path(settings.data_dir, pack.name),
         extra=extra,
         approve=approve,
         dry_run=dry_run,
