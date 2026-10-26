@@ -17,6 +17,7 @@ The loop itself never decides what a tool may do: it asks the Toolbox, which ask
 """
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Literal
@@ -36,6 +37,7 @@ from vardex.prompts import AGENT
 from vardex.tools import Toolbox, ToolResult
 
 MAX_STEPS = 12  # model calls in one run; beyond this a question is not getting answered
+AGENT_WORKERS = 4  # tool calls from one turn run at once; a turn rarely asks for more
 MAX_TOKENS = 4096
 
 # Why a run ended. Only `answered` means the question was answered.
@@ -103,6 +105,7 @@ def run_agent(
     system: str = AGENT,
     max_steps: int = MAX_STEPS,
     max_tokens: int = MAX_TOKENS,
+    workers: int = AGENT_WORKERS,
     on_text: Callable[[str], None] | None = None,
     on_call: Callable[[ToolCall, ToolResult], None] | None = None,
 ) -> Run:
@@ -146,9 +149,9 @@ def run_agent(
             return Run(question, answer.text, "answered", steps)
         # The turn goes back whole: the reasoning, the text and the calls, in that order.
         messages.append(answer.as_message())
+        results = _run_calls(toolbox, answer.tool_calls, workers)
         replies = []
-        for call in answer.tool_calls:
-            result = toolbox.call(call)
+        for call, result in zip(answer.tool_calls, results, strict=True):
             step.calls.append((call, result))
             if on_call is not None:
                 on_call(call, result)
@@ -160,6 +163,22 @@ def run_agent(
         "steps",
         f"Stopped after {max_steps} steps without an answer.",
     )
+
+
+def _run_calls(toolbox: Toolbox, calls: list[ToolCall], workers: int) -> list[ToolResult]:
+    """Run one turn's calls at once, and give the results back in the order asked.
+
+    A model that asks for a search and a query in the same turn should wait for the slower of
+    the two, not for both. The API matches replies to calls by id, so order is not required,
+    but keeping it makes recordings and transcripts readable and keeps replay stable.
+    """
+    if len(calls) < 2 or workers < 2:
+        return [toolbox.call(call) for call in calls]
+    with ThreadPoolExecutor(max_workers=min(workers, len(calls))) as pool:
+        results = list(pool.map(toolbox.run, calls))
+    for call, result in zip(calls, results, strict=True):
+        toolbox.record(call, result)
+    return results
 
 
 def _stopped(question: str, steps: list[Step], stop: Stop, note: str) -> Run:
@@ -179,7 +198,7 @@ def transcript(run: Run) -> str:
             arguments = ", ".join(f"{k}={v!r}" for k, v in call.arguments.items())
             mark = "!" if result.is_error else " "
             first = result.content.strip().splitlines()[0] if result.content.strip() else ""
-            lines.append(f" {mark} {call.name}({arguments})")
+            lines.append(f" {mark} {call.name}({arguments}) [{result.seconds:.1f} s]")
             lines.append(f"     → {first[:100]}")
     if run.answered:
         lines.append(f"\nAnswer: {run.answer}")

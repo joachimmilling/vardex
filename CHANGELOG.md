@@ -8,6 +8,11 @@ All notable changes to Vardex are recorded here. The format follows
 
 ### Changed
 
+- A turn's tool calls now run at the same time, at most four at once, so a turn that asks for a
+  search and a query waits for the slower of the two rather than for both. Replies still go back
+  in the order the model asked. Every `ToolResult` carries the `seconds` its tool took, and the
+  transcript shows them.
+
 - The agent suite's refusal case asks for a year the warehouse does not reach rather than for a
   company said not to be in it: the register holds 1.18 million entities, so almost any name is
   in there somewhere, and the case failed for being answerable rather than for being refused.

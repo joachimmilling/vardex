@@ -18,8 +18,9 @@ servers, then costs a few hundred tokens instead of filling the window.
 """
 
 import json
+import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from vardex.embeddings import Embedder, Reranker
@@ -44,6 +45,7 @@ class ToolResult:
 
     content: str
     is_error: bool = False
+    seconds: float = 0.0  # how long the tool itself took, so a slow one can be found
     structured: dict[str, Any] | None = None  # the same answer as data, for a channel to render
     wrote: bool = False  # True when something outside Vardex actually changed
 
@@ -116,12 +118,26 @@ class Toolbox:
         return self.permissions.level(name)
 
     def call(self, call: ToolCall) -> ToolResult:
-        """Run one call, or refuse it. Every refusal is a result the model can read, never an
-        exception: a model that asked for something it may not have should learn that and go
-        on, not crash the run."""
-        result = self._call(call)
-        self.calls.append((call, result))
+        """Run one call, or refuse it, and keep it. Every refusal is a result the model can
+        read, never an exception: a model that asked for something it may not have should learn
+        that and go on, not crash the run."""
+        result = self.run(call)
+        self.record(call, result)
         return result
+
+    def run(self, call: ToolCall) -> ToolResult:
+        """Run one call and time it, without keeping it.
+
+        Separate from `call` so several calls from one turn can run in threads while the record
+        is still written in the order the model asked, which keeps transcripts and recordings
+        the same from run to run.
+        """
+        started = time.monotonic()
+        result = self._call(call)
+        return replace(result, seconds=time.monotonic() - started)
+
+    def record(self, call: ToolCall, result: ToolResult) -> None:
+        self.calls.append((call, result))
 
     def _call(self, call: ToolCall) -> ToolResult:
         tool = self.tools.get(call.name)
