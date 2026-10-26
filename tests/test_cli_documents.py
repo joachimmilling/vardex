@@ -206,3 +206,59 @@ def test_extract_from_a_document_that_is_not_indexed_says_so(index):
     result = runner.invoke(app, ["extract", PACK, "key-figures", "--document", "orkla-q2-2026"])
     assert result.exit_code == 1
     assert "orkla-q2-2026 is not indexed: run vardex index" in result.output
+
+
+def test_search_json_gives_each_hit_its_ranks_and_scores(index, monkeypatch):
+    result = runner.invoke(app, ["search", PACK, "dividend", "--no-rerank", "--json"])
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.stdout)
+    assert body["ok"] is True
+    assert body["data"]["query"] == "dividend"
+    hit = body["data"]["hits"][0]
+    assert hit["place"] == 1
+    assert hit["document"] == REPORT.id
+    assert hit["title"] == REPORT.title
+    assert isinstance(hit["passage_id"], int)
+    assert hit["page"] >= 1
+    assert hit["link"].endswith(f"#page={hit['page']}")
+    assert hit["fused"] > 0
+    assert hit["rerank"] is None  # --no-rerank, so there is no reranker score to give
+    assert {"meaning_rank", "words_rank"} <= set(hit)
+
+
+def test_search_json_says_no_match_rather_than_printing_prose(index, monkeypatch):
+    result = runner.invoke(app, ["search", PACK, "dividend", "--period", "1999", "--json"])
+    assert result.exit_code == 1
+    body = json.loads(result.stdout)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "no_match"
+
+
+def test_cite_json_gives_the_answer_and_every_citation(index, monkeypatch):
+    answer = reply(True, "The board proposes NOK 4.20 per share [1].", [(1, "NOK 4.20 per share")])
+    monkeypatch.setattr(cli, "connect", lambda settings: FakeModel(answer))
+    result = runner.invoke(app, ["cite", PACK, "What dividend is proposed?", "--json"])
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.stdout)
+    assert body["ok"] is True
+    assert body["data"]["kind"] == "answer"
+    assert body["data"]["answer"] == "The board proposes NOK 4.20 per share [1]."
+    citation = body["data"]["citations"][0]
+    assert citation["number"] == 1
+    assert citation["text"] == "NOK 4.20 per share"
+    assert citation["page"] == 40
+    assert citation["title"] == "Demo Laks AS Annual Report 2025"
+    assert citation["link"] == "https://reports.demo.no/annual-2025.pdf#page=40"
+
+
+def test_cite_json_says_not_found_as_data_not_as_a_grey_line(index, monkeypatch):
+    """Nothing in the documents is a real answer, not a failure: ok stays true and the exit
+    code stays 0, exactly as without --json."""
+    answer = reply(False, "The passages do not give the chief executive's pay.")
+    monkeypatch.setattr(cli, "connect", lambda settings: FakeModel(answer))
+    result = runner.invoke(app, ["cite", PACK, "What does the CEO earn?", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert body["ok"] is True
+    assert body["data"]["kind"] == "not_found"
+    assert body["data"]["citations"] == []

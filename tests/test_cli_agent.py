@@ -115,12 +115,13 @@ def test_json_gives_a_program_the_whole_run(pack, monkeypatch):
     assert result.exit_code == 0
     body = json.loads(result.stdout)
     assert body["ok"] is True
-    assert body["answer"] == "DEMO LAKS AS."
-    assert body["steps"] == 2
-    assert [call["name"] for call in body["tool_calls"]] == ["run_sql"]
-    assert body["tool_calls"][0]["permission"] == "read"
-    assert body["usage"]["input_tokens"] == 2000
-    assert body["cost_usd"] == "0.008"
+    data = body["data"]
+    assert data["answer"] == "DEMO LAKS AS."
+    assert data["steps"] == 2
+    assert [call["name"] for call in data["tool_calls"]] == ["run_sql"]
+    assert data["tool_calls"][0]["permission"] == "read"
+    assert data["usage"]["input_tokens"] == 2000
+    assert data["cost_usd"] == "0.008"
 
 
 def test_a_failure_in_json_carries_a_code_a_program_can_branch_on(pack, monkeypatch):
@@ -169,7 +170,7 @@ def test_dry_run_says_what_would_change_and_changes_nothing(pack, monkeypatch):
         cli.app, ["agent", str(pack), "Raise their limit", "--dry-run", "--json"]
     )
     body = json.loads(result.stdout)
-    call = body["tool_calls"][0]
+    call = body["data"]["tool_calls"][0]
     assert "Dry run, nothing written" in call["content"]
     assert call["wrote"] is False
 

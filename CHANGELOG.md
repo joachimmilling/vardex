@@ -23,6 +23,12 @@ All notable changes to Vardex are recorded here. The format follows
   search and a query waits for the slower of the two rather than for both. Replies still go back
   in the order the model asked. Every `ToolResult` carries the `seconds` its tool took, and the
   transcript shows them.
+- `answer`, `cite` and `search` take `--json`, and every command that has it now prints the
+  same envelope: `{"ok": true, "data": {…}}`, or `{"ok": false, "error": {"code", "message"}}`
+  with a code a program can branch on. Nothing but that one object goes to stdout, and the
+  exit code always matches `ok`.
+- **Breaking:** `agent --json` moved its body under `data`, so every command reads the same
+  way. A caller that read `.answer` now reads `.data.answer`.
 - The agent suite's refusal case asks for a year the warehouse does not reach rather than for a
   company said not to be in it: the register holds 1.18 million entities, so almost any name is
   in there somewhere, and the case failed for being answerable rather than for being refused.
