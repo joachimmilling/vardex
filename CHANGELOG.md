@@ -16,6 +16,11 @@ All notable changes to Vardex are recorded here. The format follows
   than 4 series or 60 points. It is a `read` tool, and it draws on a dry run too.
 - A test that a recorded turn which called tools replays as itself, which is the bug that made
   any agent suite unreplayable.
+- An agent suite's report now says what the runs took, not only whether they passed: the
+  median and worst steps, the median, worst and total cost, and every tool used with how often
+  it was called. `--details` adds a line per case. Each run's steps, tool calls and cost go in
+  the outcome's `values`, so a replay reports the same figures as the live run that recorded
+  it. No gate changes: this is information, not a threshold.
 
 ### Changed
 
