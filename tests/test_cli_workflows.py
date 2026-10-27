@@ -403,3 +403,40 @@ def test_a_recording_that_does_not_cover_what_the_run_asks_for_fails_loudly(pack
 
 
 # --- how is it doing? ------------------------------------------------------------------
+
+
+def test_stats_say_plainly_when_a_workflow_has_stopped_running(pack, monkeypatch):
+    # Nothing has ever run: more than one cadence of silence, and it says so
+    silent = runner.invoke(cli.app, ["runs", str(pack), "--stats"])
+    assert silent.exit_code == 1
+    assert "It is not running." in silent.output
+
+    use(monkeypatch, propose(), NOTE)
+    runner.invoke(cli.app, ["run", str(pack)])
+    now = runner.invoke(cli.app, ["runs", str(pack), "--stats"])
+    assert now.exit_code == 0
+    assert "last ran within its cadence" in now.output
+    assert "1 drafted, 1 waiting" in now.output
+
+
+def test_stats_as_json_carry_the_numbers_a_dashboard_would_want(pack, monkeypatch):
+    use(monkeypatch, propose(), NOTE)
+    runner.invoke(cli.app, ["run", str(pack)])
+    reference = json.loads(runner.invoke(cli.app, ["inbox", str(pack), "--json"]).stdout)["data"][
+        "items"
+    ][0]["reference"]
+    runner.invoke(cli.app, ["approve", str(pack), reference, "--by", "joachim"])
+    body = json.loads(runner.invoke(cli.app, ["runs", str(pack), "--stats", "--json"]).stdout)
+    row = body["data"]["workflows"][0]
+    assert row["workflow"] == "weekly-watch"
+    assert row["quiet"] is False and row["silent_for"] < 1
+    assert row["states"] == {"done": 1}
+    assert row["median_cost_usd"] == "0.008"
+    assert row["proposals"] == {
+        "drafted": 1,
+        "waiting": 0,
+        "done": 1,
+        "rejected": 0,
+        "expired": 0,
+    }
+    assert row["agreed"] == 1.0
