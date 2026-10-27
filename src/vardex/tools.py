@@ -59,6 +59,10 @@ class Invocation:
     arguments: dict[str, Any]
     permission: Permission  # the level the pack gave this tool
     dry_run: bool = False  # say what would happen, change nothing
+    # What piece of work this call belongs to: the run, the step, the case it is about, and
+    # `work`, a name for that unit of work which is the same if the work is attempted
+    # again. A tool that writes uses it as an idempotency key. Empty for a one-off call.
+    context: dict[str, str] = field(default_factory=dict)
 
     @property
     def may_write(self) -> bool:
@@ -107,8 +111,10 @@ class Toolbox:
 
     tools: dict[str, Tool]
     permissions: Permissions
-    approve: Approver | None = None  # asks a person; None means nobody is there to ask
+    # Asks a person. None means nobody is there, so a call that needs approval drafts.
+    approve: Approver | None = None
     dry_run: bool = False
+    context: dict[str, str] = field(default_factory=dict)  # passed to every call
     calls: list[tuple[ToolCall, ToolResult]] = field(default_factory=list)
 
     @property
@@ -165,11 +171,11 @@ class Toolbox:
             )
         if tool.writes and permission == "approve" and not self.dry_run:
             if self.approve is None:
-                return ToolResult(
-                    f"{tool.name} needs a person to approve this call, and nobody is there to "
-                    "ask. Say what you would do and what approval it needs.",
-                    is_error=True,
-                )
+                # Nobody to ask, so the call steps down one rung and drafts instead. This is
+                # the whole of unattended work: a scheduled run cannot act, but it can leave
+                # a proposal for a person, which is better than refusing and better than
+                # acting. The tool is handed `draft`, so the code path is the drafting one.
+                return tool.run(Invocation(call.arguments, "draft", self.dry_run, self.context))
             if not self.approve(call, tool):
                 return ToolResult(
                     f"The person refused this {tool.name} call. Do not try it again; ask what "
@@ -177,7 +183,7 @@ class Toolbox:
                     is_error=True,
                 )
         try:
-            return tool.run(Invocation(call.arguments, permission, self.dry_run))
+            return tool.run(Invocation(call.arguments, permission, self.dry_run, self.context))
         except (QueryError, SearchError, ToolFailure) as err:
             # Something the model may be able to work around: bad SQL, a search that could
             # not run, a connector that said no. Anything else is a bug and must not be hidden.
@@ -551,6 +557,7 @@ def build_toolbox(
     extra: list[Tool] | None = None,
     approve: Approver | None = None,
     dry_run: bool = False,
+    context: dict[str, str] | None = None,
 ) -> Toolbox:
     """Every tool this run has, in one box. A part that was not connected adds no tools, so
     an agent with no index simply has no way to search documents, and is told so."""
@@ -563,7 +570,11 @@ def build_toolbox(
         tools += chart_tools(charts)
     tools += extra or []
     box = Toolbox(
-        {tool.name: tool for tool in tools}, permissions, approve=approve, dry_run=dry_run
+        {tool.name: tool for tool in tools},
+        permissions,
+        approve=approve,
+        dry_run=dry_run,
+        context=context or {},
     )
     helper = describe_tool(box)
     box.tools = {helper.name: helper, **box.tools}

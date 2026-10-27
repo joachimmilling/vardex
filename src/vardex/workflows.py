@@ -1,0 +1,835 @@
+"""Work that runs without being asked: what a pack declares, and what runs it.
+
+An agent answers a question somebody asked. A workflow asks the questions. The pack says
+what to look at, how often, and what may be proposed when something is wrong; the engine
+decides nothing except how to run it safely.
+
+The shape is deliberately boring. A workflow is a list of steps, in order, and each step is
+one of four things the engine knows how to do:
+
+- `watch`  — read the source's own feed of changes since the last cursor.
+- `find`   — run the pack's SQL against its warehouse; every row is a case to look at.
+- `brief`  — let the agent look into one case and, if the numbers justify it, draft an action.
+- `report` — write down what the run found, for a person to read on Monday morning.
+
+The model chooses nothing about the order. That is the difference between a workflow and an
+agent, and it is a feature: the steps are the same every week, so a run can be compared with
+last week's, resumed after a crash, and explained to somebody who was not there. Inside a
+step, where the work is genuinely open-ended, the agent chooses freely.
+
+Two rules hold the whole thing up.
+
+**The run decides whether it is due, not the clock.** Whatever fires it — launchd, cron, a
+CI schedule, a person — calls Vardex often, and Vardex works out whether this week's run has
+happened yet. Every scheduler misses ticks: a laptop is shut, a hosted runner is queued for
+twenty minutes at the top of the hour, a container restarts. A job that runs when it is told
+runs the wrong number of times. A job that knows when it is due runs once.
+
+**Nothing outside Vardex changes without a person.** A scheduled run has nobody to ask, so
+its actions can only be drafted. They land in the inbox, where somebody approves them, and
+the approval — a separate command, run by a human being — makes the change.
+"""
+
+import json
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import httpx2
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from vardex.agent import MAX_STEPS, run_agent
+from vardex.approvals import Inbox, Item
+from vardex.events import FeedSpec, read_feed
+from vardex.llm import ModelClient, ModelError, ToolCall
+from vardex.packs import PackError, read_yaml
+from vardex.permissions import Budgets, Permissions
+from vardex.prompts import WATCH
+from vardex.runs import Run, RunStore, Step, call_key, new_run_id, now_text
+from vardex.semantic import Knowledge
+from vardex.sql import QueryError, Warehouse, check_sql, format_value, transpile
+from vardex.tools import Toolbox, ToolResult
+
+WORKFLOW_DIR = "workflows"
+REPORT_DIR = "reports"
+STATE_DIR = "state"
+NAME = r"^[a-z0-9]+(-[a-z0-9]+)*$"
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+MAX_CASES = 50  # one run looks into this many cases at most, however many the SQL found
+
+
+class Schedule(BaseModel):
+    """When a workflow is due, in the pack's own words and the pack's own time zone."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    every: Literal["hour", "day", "week"] = "week"
+    at: str = Field(default="06:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")  # local time
+    weekday: Literal[
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+    ] = "monday"
+    # A real place, not an offset: offsets do not know about summer time, and a business
+    # that says "half past six" means half past six in both halves of the year.
+    timezone: str = "UTC"
+
+    @field_validator("timezone")
+    @classmethod
+    def known_zone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as err:
+            raise ValueError(f"{value} is not a time zone name, such as Europe/Oslo") from err
+        return value
+
+    @property
+    def zone(self) -> ZoneInfo:
+        return ZoneInfo(self.timezone)
+
+    @property
+    def hour_minute(self) -> tuple[int, int]:
+        hour, minute = self.at.split(":")
+        return int(hour), int(minute)
+
+    def due_before(self, when: datetime) -> datetime:
+        """The last moment this workflow should have run, at or before `when`.
+
+        Everything else is built on this. "Is it due?" becomes "has the run that this
+        moment asked for happened yet?", which is a question about work done rather than
+        about the clock, and so it survives a scheduler that fires late, twice, or not at
+        all. It also makes the twice-yearly clock change a non-event: the hour that happens
+        twice asks for the same run both times, and the run has already happened.
+        """
+        local = when.astimezone(self.zone)
+        hour, minute = self.hour_minute
+        if self.every == "hour":
+            slot = local.replace(minute=0, second=0, microsecond=0)
+            return slot if slot <= local else slot - timedelta(hours=1)
+        slot = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if self.every == "day":
+            return slot if slot <= local else slot - timedelta(days=1)
+        back = (slot.weekday() - WEEKDAYS.index(self.weekday)) % 7
+        slot = slot - timedelta(days=back)
+        return slot if slot <= local else slot - timedelta(days=7)
+
+    def next_after(self, when: datetime) -> datetime:
+        """The next moment it is due, for telling a person when to expect the run."""
+        step = {"hour": timedelta(hours=1), "day": timedelta(days=1), "week": timedelta(days=7)}
+        return self.due_before(when) + step[self.every]
+
+    def period(self, when: datetime) -> str:
+        """A name for the slot a moment belongs to, such as 2026-W44.
+
+        It names the piece of work. Two attempts at the same week's watch propose the same
+        change under the same key, so the inbox holds one proposal; next week's attempt is a
+        different period, so it may raise the same concern again. Without this, a monitor
+        either fills the inbox with duplicates or goes quiet about a problem for ever.
+        """
+        local = self.due_before(when)
+        if self.every == "hour":
+            return local.strftime("%Y-%m-%dT%H")
+        if self.every == "day":
+            return local.strftime("%Y-%m-%d")
+        year, week, _ = local.isocalendar()
+        return f"{year}-W{week:02d}"
+
+    def describe(self) -> str:
+        if self.every == "hour":
+            return f"every hour, on the hour ({self.timezone})"
+        if self.every == "day":
+            return f"every day at {self.at} ({self.timezone})"
+        return f"every {self.weekday} at {self.at} ({self.timezone})"
+
+
+class WatchStep(BaseModel):
+    """Read the source's feed of changes, and keep the ones about things the pack follows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=NAME)
+    uses: Literal["watch"]
+    feed: FeedSpec
+    # SQL giving one column of keys the pack cares about. Everything else in the feed is
+    # dropped, which is what turns a register's whole firehose into a handful of changes.
+    follow: str | None = None
+
+
+class FindStep(BaseModel):
+    """Run the pack's own SQL. Every row is a case for the run to look into."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=NAME)
+    uses: Literal["find"]
+    about: str  # the ontology object each row is about, such as Company
+    sql: str  # first column the object's key, a `reason` column, and any figures besides
+    changed_only: bool = False  # only cases a `watch` step saw change
+    limit: int = Field(default=MAX_CASES, ge=1, le=500)
+
+
+class BriefStep(BaseModel):
+    """Let the agent look into each case, write a note, and draft an action if it is right."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=NAME)
+    uses: Literal["brief"]
+    question: str  # asked once per case; {key}, {label}, {reason} and the figures fill in
+    propose: str | None = None  # the action it may draft, by its name in the ontology
+    max_steps: int = Field(default=MAX_STEPS, ge=1, le=40)
+    cases: int = Field(default=MAX_CASES, ge=1, le=500)  # at most this many per run
+
+
+class ReportStep(BaseModel):
+    """Write down what the run found, as something a person reads over coffee."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=NAME)
+    uses: Literal["report"]
+    title: str
+
+
+AnyStep = Annotated[WatchStep | FindStep | BriefStep | ReportStep, Field(discriminator="uses")]
+
+
+class WorkflowSpec(BaseModel):
+    """The contents of a pack's workflows/<name>.yaml."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str
+    steps: list[AnyStep] = Field(min_length=1)
+    schedule: Schedule | None = None  # without one, it runs only when somebody asks
+    budget: Budgets = Budgets()  # what one run of this workflow may spend
+    name: str = ""  # filled in from the file name
+
+    @model_validator(mode="after")
+    def ids_are_unique(self) -> "WorkflowSpec":
+        ids = [step.id for step in self.steps]
+        if len(ids) != len(set(ids)):
+            raise ValueError("every step needs its own id")
+        return self
+
+    def period(self, when: datetime) -> str:
+        """The piece of work this moment belongs to. A workflow with no schedule is its own
+        period every time, because nobody can say what a run by hand is one of."""
+        return self.schedule.period(when) if self.schedule else when.strftime("%Y-%m-%dT%H%M%S")
+
+
+class WorkflowError(Exception):
+    """Raised when a step cannot run at all: bad SQL, or a feed that has changed shape."""
+
+
+def workflows_dir(pack: Path) -> Path:
+    return pack / WORKFLOW_DIR
+
+
+def workflow_names(pack: Path) -> list[str]:
+    """Every workflow the pack declares, by the name of its file."""
+    folder = workflows_dir(pack)
+    if not folder.is_dir():
+        return []
+    return sorted(p.stem for p in folder.glob("*.yaml"))
+
+
+def load_workflow(pack: Path, name: str) -> WorkflowSpec:
+    """Read and validate one workflows/<name>.yaml. The file name is the workflow's name."""
+    path = workflows_dir(pack) / f"{name}.yaml"
+    if not path.is_file():
+        known = ", ".join(workflow_names(pack)) or "none"
+        raise PackError(f"No workflow {name} in {pack}. This pack has: {known}.")
+    return read_yaml(path, WorkflowSpec, "workflow file").model_copy(update={"name": name})
+
+
+def load_workflows(pack: Path) -> list[WorkflowSpec]:
+    return [load_workflow(pack, name) for name in workflow_names(pack)]
+
+
+def check_workflow(spec: WorkflowSpec, knowledge: Knowledge, permissions: Permissions) -> list[str]:
+    """Everything wrong with a workflow that can be found without running it.
+
+    This is the same bargain as the rest of the pack format: a mistake in YAML is found by
+    `vardex check` on a Friday afternoon, not by a run that fails at half past six on a
+    Monday morning with nobody watching.
+    """
+    problems = []
+    described = set(knowledge.tables)
+    objects = {o.name for o in knowledge.ontology.objects}
+    actions = {a.name for a in knowledge.ontology.actions}
+    watching = [step for step in spec.steps if isinstance(step, WatchStep)]
+    for step in spec.steps:
+        where = f"{spec.name} step {step.id}"
+        if isinstance(step, WatchStep) and step.follow:
+            problems += [
+                f"{where} follow: {problem}"
+                for problem in check_sql(step.follow, knowledge.questions.dialect, described)
+            ]
+        if isinstance(step, FindStep):
+            if step.about not in objects:
+                problems.append(f"{where}: there is no object {step.about} in the ontology")
+            if step.changed_only and not watching:
+                problems.append(f"{where}: changed_only needs a watch step before it")
+            problems += [
+                f"{where}: {problem}"
+                for problem in check_sql(step.sql, knowledge.questions.dialect, described)
+            ]
+        if isinstance(step, BriefStep) and step.propose:
+            if step.propose not in actions:
+                problems.append(f"{where}: there is no action {step.propose} in the ontology")
+            elif not permissions.allows(step.propose, "draft"):
+                level = permissions.level(step.propose) or "no level"
+                problems.append(
+                    f"{where}: {step.propose} has {level} in permissions.yaml, so this "
+                    "workflow could never propose anything"
+                )
+    if not any(isinstance(step, ReportStep) for step in spec.steps):
+        problems.append(f"{spec.name}: no report step, so a run leaves nothing to read")
+    return problems
+
+
+@dataclass
+class Watermarks:
+    """Where each feed was read up to. One small file per workflow, beside its runs."""
+
+    path: Path
+
+    def read(self) -> dict[str, Any]:
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def get(self, name: str) -> str | None:
+        value = self.read().get(name)
+        return str(value) if value is not None else None
+
+    def set(self, name: str, cursor: str | None) -> None:
+        """Save a cursor, whole, through a temporary file.
+
+        The cursor moves only after the changes it covers are in the run's own file. Moving
+        it first would lose changes the moment anything downstream failed; never moving it
+        would read them again, which is why work that writes carries an idempotency key.
+        """
+        if cursor is None:
+            return
+        state = self.read() | {name: cursor}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".writing")
+        temporary.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        temporary.replace(self.path)
+
+
+@dataclass(frozen=True)
+class Case:
+    """One thing the run is looking into: a row from a `find` step."""
+
+    key: str
+    label: str
+    reason: str
+    facts: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"key": self.key, "label": self.label, "reason": self.reason, "facts": self.facts}
+
+    def filled(self, template: str) -> str:
+        """The step's question with this case's own numbers in it."""
+        values = {"key": self.key, "label": self.label, "reason": self.reason, **self.facts}
+        try:
+            return template.format(**values)
+        except KeyError as err:
+            raise WorkflowError(
+                f"the question asks for {err}, which this case does not have. It has: "
+                f"{', '.join(values)}."
+            ) from err
+
+
+@dataclass
+class Connections:
+    """Everything a run can reach. Built by whatever starts the run, never by the runner."""
+
+    pack: str  # the pack's name, as pack.yaml gives it
+    folder: str  # the pack's folder, as it was typed, so the report can print a command
+    knowledge: Knowledge
+    permissions: Permissions
+    warehouse: Warehouse
+    client: ModelClient  # already wrapped in the pack's budget
+    inbox: Inbox
+    store: RunStore
+    marks: Watermarks
+    reports: Path
+    toolbox: Callable[[dict[str, str]], Toolbox]  # a toolbox for one case, with its context
+    http: Callable[[], httpx2.Client]
+
+
+def is_due(spec: WorkflowSpec, store: RunStore, now: datetime | None = None) -> bool:
+    """Whether this workflow's turn has come and gone without a run that finished.
+
+    A workflow with no schedule is never due: somebody has to ask for it.
+    """
+    if spec.schedule is None:
+        return False
+    moment = now or datetime.now(UTC)
+    last = store.last_done(spec.name)
+    if last is None:
+        return True
+    try:
+        since = datetime.fromisoformat(last.started_at)
+    except ValueError:
+        return True
+    return since < spec.schedule.due_before(moment)
+
+
+def start(spec: WorkflowSpec, connections: Connections, *, trigger: str, dry_run: bool) -> Run:
+    """A new run, with a step for each of the workflow's steps, saved before anything runs.
+
+    Saved first, on purpose. A run that dies in its first step has still left a file saying
+    what it was trying to do, and that file is the only evidence anybody will have.
+    """
+    run = Run(
+        id=new_run_id(spec.name),
+        pack=connections.pack,
+        workflow=spec.name,
+        trigger=trigger,
+        started_at=now_text(),
+        dry_run=dry_run,
+        steps=[Step(id=step.id, uses=step.uses) for step in spec.steps],
+    )
+    run.facts["period"] = spec.period(datetime.now(UTC))
+    connections.store.save(run)
+    return run
+
+
+class StopRun(Exception):
+    """Raised inside a step to stop the whole run without failing it: out of budget."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def run_workflow(
+    spec: WorkflowSpec,
+    run: Run,
+    connections: Connections,
+    *,
+    on_step: Callable[[Step], None] | None = None,
+    on_call: Callable[[ToolCall, ToolResult], None] | None = None,
+) -> Run:
+    """Run the workflow's steps in order, saving after every one, and return the run.
+
+    A step that has already finished is skipped, which is all resuming is.
+
+    A run that stops because it is out of budget is `stopped`, not `failed`. Those are
+    different words to whoever reads the list on Monday: one needs a decision about money,
+    the other needs somebody to fix something. Either way the report is still written, so a
+    run that got half way says what it found.
+    """
+    run.state = "running"
+    if _has_run_before(run):
+        run.attempts += 1  # this is a resume, and the count belongs in the record
+    connections.store.save(run)
+    for spec_step in spec.steps:
+        record = run.step(spec_step.id)
+        if record is None or record.finished:
+            continue
+        if isinstance(spec_step, ReportStep):
+            continue  # written at the end, whatever happened before it
+        record.state = "running"
+        record.started_at = now_text()
+        connections.store.save(run)
+        try:
+            _run_step(spec, spec_step, run, record, connections, on_call=on_call)
+        except StopRun as stop:
+            _end(run, record, "stopped", "stopped", stop.reason, connections, spec, on_step)
+            return run
+        except (WorkflowError, QueryError, PackError, ModelError, OSError) as err:
+            _end(run, record, "failed", "failed", str(err), connections, spec, on_step)
+            return run
+        record.state = "done"
+        record.ended_at = now_text()
+        connections.store.save(run)
+        if on_step is not None:
+            on_step(record)
+    # Finished before the report is written, so the report can say so. Nothing is left to
+    # go wrong but the writing of the file itself, and that is recorded on its own step.
+    run.state = "done"
+    run.note = ""  # whatever stopped an earlier attempt is history; the steps still say so
+    run.ended_at = now_text()
+    connections.store.save(run)
+    _write_report(spec, run, connections, on_step)
+    connections.store.save(run)
+    return run
+
+
+def _has_run_before(run: Run) -> bool:
+    return any(step.started_at for step in run.steps)
+
+
+def _end(
+    run: Run,
+    record: Step,
+    step_state: str,
+    run_state: str,
+    reason: str,
+    connections: Connections,
+    spec: WorkflowSpec,
+    on_step: Callable[[Step], None] | None,
+) -> None:
+    """Close a run that is not going to finish: record why, then still write the report."""
+    record.state = step_state  # type: ignore[assignment]
+    record.note = reason
+    record.ended_at = now_text()
+    run.state = run_state  # type: ignore[assignment]
+    run.note = f"{record.id}: {reason}"
+    run.ended_at = now_text()
+    connections.store.save(run)
+    _write_report(spec, run, connections, on_step)
+    connections.store.save(run)
+
+
+def _write_report(
+    spec: WorkflowSpec,
+    run: Run,
+    connections: Connections,
+    on_step: Callable[[Step], None] | None = None,
+) -> None:
+    """Write the report step, every attempt.
+
+    Unlike every other step, this one is written again on a resume rather than skipped. It
+    costs nothing, it is the same file, and a report left over from the attempt that stopped
+    would tell a person the run had stopped when it has since finished.
+    """
+    for spec_step in spec.steps:
+        if not isinstance(spec_step, ReportStep):
+            continue
+        record = run.step(spec_step.id)
+        if record is None:
+            continue
+        record.started_at = record.started_at or now_text()
+        try:
+            _report(spec, spec_step, run, record, connections)
+            record.state = "done"
+        except OSError as err:  # a report nobody can write must not hide the run
+            record.state = "failed"
+            record.note = str(err)
+        record.ended_at = now_text()
+        connections.store.save(run)
+        if on_step is not None:
+            on_step(record)
+
+
+def _run_step(
+    spec: WorkflowSpec,
+    step: AnyStep,
+    run: Run,
+    record: Step,
+    connections: Connections,
+    *,
+    on_call: Callable[[ToolCall, ToolResult], None] | None = None,
+) -> None:
+    if isinstance(step, WatchStep):
+        _watch(step, run, record, connections)
+    elif isinstance(step, FindStep):
+        _find(step, run, record, connections)
+    elif isinstance(step, BriefStep):
+        _brief(spec, step, run, record, connections, on_call=on_call)
+
+
+def keys_from_sql(warehouse: Warehouse, knowledge: Knowledge, sql: str) -> set[str]:
+    """One column of keys from the pack's own SQL, as strings."""
+    result = warehouse.run(
+        transpile(sql, knowledge.questions.dialect, warehouse.dialect), max_rows=100_000
+    )
+    return {str(row[0]) for row in result.rows if row[0] is not None}
+
+
+def _watch(step: WatchStep, run: Run, record: Step, connections: Connections) -> None:
+    """Read the feed from the saved cursor, keep what the pack follows, move the cursor."""
+    cursor = connections.marks.get(step.id)
+    with connections.http() as client:
+        batch = read_feed(client, step.feed, cursor)
+    keys = batch.keys
+    followed = None
+    if step.follow:
+        followed = keys_from_sql(connections.warehouse, connections.knowledge, step.follow)
+        keys = [key for key in keys if key in followed]
+    run.facts["changed"] = sorted(set(run.facts.get("changed", [])) | set(keys))
+    run.facts[f"feed:{step.id}"] = {
+        "read": batch.read,
+        "kept": len(keys),
+        "pages": batch.pages,
+        "more": batch.more,
+        "cursor": batch.cursor,
+        "followed": len(followed) if followed is not None else None,
+    }
+    record.items = len(keys)
+    record.note = f"{batch.read} changes read, {len(keys)} about something we follow" + (
+        ", and more waiting" if batch.more else ""
+    )
+    # Saved before the cursor moves: the changes are in the run's file now, so a crash
+    # after this line loses nothing that resuming cannot pick up.
+    connections.store.save(run)
+    if not run.dry_run:
+        # A dry run changes nothing, and the cursor is a change. Moving it would mean a
+        # rehearsal quietly consumed the week's changes and the real run saw none of them.
+        connections.marks.set(step.id, batch.cursor)
+
+
+def _find(step: FindStep, run: Run, record: Step, connections: Connections) -> None:
+    """Run the pack's SQL and turn every row into a case."""
+    knowledge = connections.knowledge
+    problems = check_sql(step.sql, knowledge.questions.dialect, set(knowledge.tables))
+    if problems:
+        raise WorkflowError(f"the SQL may not run: {'; '.join(problems)}")
+    obj = knowledge.ontology.object(step.about)
+    result = connections.warehouse.run(
+        transpile(step.sql, knowledge.questions.dialect, connections.warehouse.dialect),
+        max_rows=step.limit + 1,
+    )
+    if "reason" not in result.columns:
+        raise WorkflowError(
+            "a find step's SQL must return a `reason` column: one sentence saying why this "
+            f"row needs a look. It returned: {', '.join(result.columns)}."
+        )
+    key_column = result.columns[0]
+    label_column = obj.label if obj.label in result.columns else key_column
+    cases = []
+    for row in result.rows[: step.limit]:
+        values = dict(zip(result.columns, row, strict=True))
+        key = str(values[key_column])
+        cases.append(
+            Case(
+                key=key,
+                label=str(values.get(label_column, key)),
+                reason=str(values.get("reason", "")),
+                facts={
+                    name: format_value(value)
+                    for name, value in values.items()
+                    if name not in (key_column, "reason", label_column)
+                },
+            )
+        )
+    if step.changed_only:
+        changed = set(run.facts.get("changed", []))
+        cases = [case for case in cases if case.key in changed]
+    run.facts["cases"] = run.facts.get("cases", []) + [case.as_dict() for case in cases]
+    over = len(result.rows) - step.limit
+    record.items = len(cases)
+    record.note = f"{len(cases)} case(s)" + (
+        f", and at least {over} more over the limit of {step.limit}" if over > 0 else ""
+    )
+
+
+def journalled(box: Toolbox, run: Run) -> Toolbox:
+    """A toolbox that will not do the same writing call twice, however often it is asked.
+
+    This is the whole of idempotency, and it is a dozen lines. Every call that changed
+    something outside Vardex — or that put a proposal in the inbox — is kept in the run's
+    journal under a key made from the tool's name and its arguments. A resumed run that asks
+    for the same change is handed the first answer back, and nothing moves twice.
+
+    Reading calls are not journalled. They are cheap, they change nothing, and a resumed run
+    is better off seeing today's numbers than last night's.
+    """
+    original = box.run
+
+    def run_once(call: ToolCall) -> ToolResult:
+        key = call_key(call.name, call.arguments)
+        remembered = run.journal.get(key)
+        if remembered is not None:
+            return ToolResult(
+                content=remembered["content"] + "\n(Done by an earlier attempt at this run.)",
+                structured=remembered.get("structured"),
+                wrote=False,  # it was done before, by whichever attempt recorded it
+            )
+        result = original(call)
+        if result.wrote or (result.structured or {}).get("state") == "proposed":
+            run.journal[key] = {"content": result.content, "structured": result.structured}
+        return result
+
+    box.run = run_once  # type: ignore[method-assign]
+    return box
+
+
+def _brief(
+    spec: WorkflowSpec,
+    step: BriefStep,
+    run: Run,
+    record: Step,
+    connections: Connections,
+    *,
+    on_call: Callable[[ToolCall, ToolResult], None] | None = None,
+) -> None:
+    """Look into each case with the agent, one at a time, saving after every one."""
+    cases = [Case(**case) for case in run.facts.get("cases", [])][: step.cases]
+    if not cases:
+        record.note = "nothing to look into"
+        return
+    notes: dict[str, str] = run.facts.setdefault("notes", {})
+    proposals: list[str] = run.facts.setdefault("proposals", [])
+    failures: dict[str, str] = run.facts.setdefault("failures", {})
+    period = run.facts.get("period", "")
+    hours = connections.permissions.approvals.needed_within_hours
+    spent = Decimal(record.cost_usd)
+    for case in cases:
+        done = f"{step.id}:{case.key}"
+        if done in run.journal:
+            continue  # this case was finished by an earlier attempt
+        context = {
+            "run": run.id,
+            "step": step.id,
+            "case": case.key,
+            # The name of this piece of work. The same case in the same period is the same
+            # work however often it is attempted, and that is what the inbox dedupes on.
+            "work": f"{spec.name}:{step.id}:{case.key}:{period}",
+            "why": case.reason,
+            "by": run.id,
+            "needed_by": (datetime.now(UTC) + timedelta(hours=hours)).isoformat(timespec="seconds"),
+        }
+        box = journalled(connections.toolbox(context), run)
+        answer = run_agent(
+            connections.client,
+            box,
+            case.filled(step.question),
+            system=WATCH,
+            max_steps=step.max_steps,
+            on_call=on_call,
+        )
+        run.spend(answer.cost_usd)
+        spent += answer.cost_usd or Decimal(0)
+        record.cost_usd = str(spent)
+        if answer.stop == "budget":
+            connections.store.save(run)
+            raise StopRun(
+                f"{answer.note} Looked into {len(notes)} of {len(cases)} cases; "
+                f"resume with `vardex run {connections.folder} --resume {run.id}`."
+            )
+        if answer.answered:
+            notes[case.key] = answer.answer
+        else:
+            failures[case.key] = f"{answer.stop}: {answer.note}"
+        for _, result in answer.tool_calls:
+            reference = (result.structured or {}).get("reference")
+            if reference and not result.is_error and reference not in proposals:
+                proposals.append(str(reference))
+        run.journal[done] = {
+            "steps": len(answer.steps),
+            "cost_usd": str(answer.cost_usd) if answer.cost_usd else None,
+            "stop": answer.stop,
+        }
+        record.items = len(notes) + len(failures)
+        connections.store.save(run)
+    record.note = f"{len(notes)} note(s), {len(proposals)} proposal(s)" + (
+        f", {len(failures)} case(s) failed" if failures else ""
+    )
+
+
+def _report(
+    spec: WorkflowSpec, step: ReportStep, run: Run, record: Step, connections: Connections
+) -> None:
+    """Write the run down as markdown, and remember where."""
+    text = digest(spec, step, run, connections.inbox, connections.folder)
+    connections.reports.mkdir(parents=True, exist_ok=True)
+    path = connections.reports / f"{run.id}.md"
+    path.write_text(text, encoding="utf-8")
+    run.facts["report"] = str(path)
+    record.items = 1
+    record.note = str(path)
+
+
+def digest(
+    spec: WorkflowSpec, step: ReportStep, run: Run, inbox: Inbox, folder: str = "PACK"
+) -> str:
+    """What the run found, as something a person can read in two minutes.
+
+    It leads with what needs a decision, because that is the only part with a deadline on
+    it. The figures and the notes come after, and what went wrong is never left out: a
+    digest that hides its failures teaches people to trust a run that should not be trusted.
+    """
+    cases = [Case(**case) for case in run.facts.get("cases", [])]
+    notes: dict[str, str] = run.facts.get("notes", {})
+    failures: dict[str, str] = run.facts.get("failures", {})
+    waiting = inbox.items(state="proposed")
+    mine = [item for item in waiting if item.reference in run.facts.get("proposals", [])]
+    lines = [
+        f"# {step.title}",
+        "",
+        f"- Run `{run.id}`, started by {run.trigger} at {run.started_at}",
+        f"- Workflow `{spec.name}`" + (f", {spec.schedule.describe()}" if spec.schedule else ""),
+        f"- Finished: **{run.state}**" + (f" — {run.note}" if run.note else ""),
+        f"- Cost ${run.spent:.4f}" + (" (dry run, nothing written)" if run.dry_run else ""),
+        "",
+    ]
+    feeds = {name: feed for name, feed in run.facts.items() if name.startswith("feed:")}
+    if feeds:
+        lines += ["## What changed", ""]
+        for name, feed in feeds.items():
+            lines.append(
+                f"- `{name.split(':', 1)[1]}`: {feed['read']} changes read, "
+                f"{feed['kept']} about something we follow"
+                + (", and more waiting for the next run" if feed.get("more") else "")
+            )
+        lines.append("")
+    lines += [f"## Needs a decision ({len(mine)})", ""]
+    if mine:
+        for item in mine:
+            lines += [
+                f"### {item.proposal.label} — `{item.reference}`",
+                "",
+                f"> {item.proposal.sentence}",
+                "",
+                f"- Why: {item.proposal.why or 'see the note below'}",
+                f"- Answer by: {item.needed_by or 'no deadline'}",
+                f"- Approve: `vardex approve {folder} {item.reference} --by YOUR-NAME`",
+                "",
+            ]
+    else:
+        lines += ["Nothing. No action met the bar this run.", ""]
+    lines += [f"## What the run looked at ({len(cases)})", ""]
+    for case in cases:
+        lines += [f"### {case.label} ({case.key})", "", f"- Found because: {case.reason}"]
+        if case.facts:
+            lines.append(
+                "- Figures: " + ", ".join(f"{name} {value}" for name, value in case.facts.items())
+            )
+        note = notes.get(case.key)
+        if note:
+            lines += ["", note.strip(), ""]
+        elif case.key in failures:
+            lines += ["", f"**Not looked into:** {failures[case.key]}", ""]
+        else:
+            lines += ["", "_This run did not reach it._", ""]
+    if failures:
+        lines += ["## What went wrong", ""]
+        lines += [f"- {key}: {why}" for key, why in failures.items()]
+        lines.append("")
+    overdue = [item for item in waiting if item.overdue()]
+    if overdue:
+        lines += ["## Overdue, from earlier runs", ""]
+        lines += [
+            f"- `{item.reference}` {item.proposal.label}: waiting since {item.made_at}, "
+            f"due {item.needed_by}"
+            for item in overdue
+        ]
+        lines.append("")
+    return "\n".join(lines)
+
+
+def reports_path(data_dir: Path, pack: str) -> Path:
+    return data_dir / pack / REPORT_DIR
+
+
+def marks_path(data_dir: Path, pack: str, workflow: str) -> Path:
+    return data_dir / pack / STATE_DIR / f"{workflow}.json"
+
+
+def waiting_summary(items: list[Item]) -> str:
+    """One line about the inbox, for the end of a run."""
+    if not items:
+        return "nothing waiting for a decision"
+    overdue = sum(1 for item in items if item.overdue())
+    return f"{len(items)} waiting for a decision" + (f", {overdue} overdue" if overdue else "")

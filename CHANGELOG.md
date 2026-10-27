@@ -6,6 +6,66 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-27
+
+### Added
+
+- Workflows: work that runs without being asked. A pack declares one in
+  `workflows/<name>.yaml` with a schedule in its own time zone, a budget and a list of steps,
+  and `vardex run PACK` runs it. Four kinds of step: `watch` reads a source's change feed,
+  `find` runs SQL on the warehouse to pick the cases, `brief` gives each case to the agent, and
+  `report` writes what the run found to `data/<pack>/reports/`. `vardex check` checks a
+  workflow's steps against the semantic layer and the ontology.
+- `vardex run PACK --if-due` is what a scheduler calls. The run works out whether it is due
+  from the pack's schedule and the last run that finished, so firing often costs nothing and a
+  missed fire is caught up. A run that finished exits 0, as does one that was not due; a run
+  that failed or stopped exits 1. `--dry-run` does every step and changes nothing: not the
+  connector, not the inbox, not the feed's cursor.
+- Durable runs, in `runs.py`. A run is a JSON file in `data/<pack>/runs/`, written whole through
+  a temporary file after every step and every case. `--resume RUN` picks a stopped run up where
+  it stopped, skips what is done, and keeps what it has spent, so a resume gets no fresh budget.
+  A writing call is journalled under its tool and arguments and never made twice in one run. A
+  lock file allows one run of a workflow at a time, and is taken over after six hours.
+- `vardex runs PACK` lists the recent runs, or shows one; `vardex schedule PACK` shows each
+  workflow, when it last finished and when it is next due.
+- A reader for a source's own feed of changes, in `events.py`. The pack names the URL, the
+  fields and the cursor; the reader pages forward from the cursor it kept, steps past the last
+  position it saw, and stops after a set number of pages so a backlog is caught up over several
+  runs rather than in one that never ends.
+- The approval inbox, in `approvals.py`: an append-only log in `data/<pack>/inbox.jsonl`. A
+  proposal waits there with a deadline; `vardex inbox PACK` shows what is waiting (`--overdue`,
+  `--state`, `--wide`), `vardex approve` checks the person is one the pack names, records the
+  decision and carries the change out, `vardex reject` records a no with a reason, and
+  `vardex undo` puts a carried-out change back. A proposal is named by any prefix that matches
+  only one. An identical proposal for the same piece of work is not added twice.
+- `permissions.yaml` takes an `approvals` block: who may approve, how many hours a proposal has,
+  when it expires and who hears about it first.
+- A `WATCH` prompt for work nobody is watching: check the flag before writing about it, a wrong
+  flag is a useful result, and a proposal waits in the inbox and is never reported as done.
+- The pack's `weekly-watch` workflow: every Monday at 06:30 in Oslo it reads the register's
+  change feed, finds companies we follow that are bankrupt or have negative equity, briefs each
+  one and proposes any credit-limit change for a person to approve.
+- Scheduler templates in `examples/schedulers/`: a launchd agent for a Mac and a GitHub Actions
+  workflow, each asking every so often whether anything is due.
+- Decision records 0029 to 0032: checkpointed runs, the run deciding when it is due, unattended
+  work only drafting, and every change carrying what it was before.
+
+### Changed
+
+- A writing tool at `approve` with nobody to ask now drafts instead of refusing. The ladder is
+  unchanged; what that rung means when nobody is there is not. A scheduled run passes no
+  approver, so it can only draft.
+- A `Toolbox` carries the context of the work a call belongs to: the run, the step, the case,
+  and a `work` name that is the same each time that work is attempted. A writing tool uses it
+  for its idempotency key.
+- An action's change records the values it replaced, in `Change`, and the `Connector` protocol
+  gains `undo` and `undoable`. `FileConnector.undo` refuses when the values are no longer the
+  ones the change left behind.
+- **Breaking:** `Connector.record` is gone. A proposal is kept in Vardex's own inbox, so nothing
+  reaches the other system before a person says yes. `carry_out` now returns the `Change` it
+  made, and a connector implements `carry_out` and `undo` only.
+- `adjust_credit_limit` in the `norwegian-companies` pack moves from `draft` to `approve`.
+
 ## [0.8.1] - 2026-10-26
 
 ### Added

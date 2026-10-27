@@ -10,9 +10,14 @@ allows strictly more than the one below:
 - `approve`  — does the thing, but only after a person has said yes to this exact call.
 - `act`      — does the thing.
 
-The same file holds the spending caps, because they answer the same question: what may this
-pack do on its own? A cap is a number of dollars, enforced in the model layer, so no prompt,
-no tool and no agent can spend past it.
+The same file holds the spending caps and the approval rules, because all three answer the
+same question: what may this pack do on its own? A cap is a number of dollars, enforced in
+the model layer, so no prompt, no tool and no agent can spend past it.
+
+`approve` has two faces, and the pack does not choose between them. When somebody is at the
+keyboard, they are asked there and then. When nothing is watching — a scheduled run at half
+past six — there is nobody to ask, so the tool may only draft, and the proposal waits in the
+inbox for a person. Same level, same declaration, two ways of answering.
 """
 
 from decimal import Decimal
@@ -37,12 +42,26 @@ class Budgets(BaseModel):
     per_day: Decimal | None = Field(default=None, gt=0)  # the pack's whole day, all channels
 
 
+class Approvals(BaseModel):
+    """Who may decide on this pack's proposals, and how long they have to do it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Who may say yes. Empty means anyone who can run the command, which is honest on one
+    # person's machine and not enough for a company, where this belongs behind real identity.
+    approvers: list[str] = []
+    needed_within_hours: int = Field(default=72, ge=1)  # the deadline put on a new proposal
+    expire_after_days: int = Field(default=14, ge=1)  # after this, nobody is going to answer
+    escalate_to: str = ""  # who hears about a proposal nobody has answered in time
+
+
 class Permissions(BaseModel):
     """The contents of a pack's permissions.yaml."""
 
     model_config = ConfigDict(extra="forbid")
 
     budgets: Budgets = Budgets()
+    approvals: Approvals = Approvals()
     tools: dict[str, Permission] = {}
 
     def level(self, tool: str) -> Permission | None:
@@ -53,6 +72,10 @@ class Permissions(BaseModel):
         """True when the pack lets this tool do something that needs `needed`."""
         given = self.level(tool)
         return given is not None and LADDER.index(given) >= LADDER.index(needed)
+
+    def may_approve(self, who: str) -> bool:
+        """Whether this person is on the pack's list of approvers."""
+        return not self.approvals.approvers or who in self.approvals.approvers
 
 
 def load_permissions(pack: Path) -> Permissions:
