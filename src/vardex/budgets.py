@@ -18,6 +18,7 @@ commands, and across the CLI, the MCP server and whatever comes next.
 """
 
 import json
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -111,9 +112,15 @@ class Budget:
     caps: Budgets = field(default_factory=Budgets)
     spend: Spend | None = None  # None keeps no record, so there can be no cap per day
     run_usd: Decimal = Decimal(0)  # spent since this Budget was made: one question, one run
+    reserved: Decimal = Decimal(0)  # the worst case of the calls in flight right now
     day_usd: Decimal = Decimal(0)  # today's total, read once and kept up to date
     answers: list[Answer] = field(default_factory=list)
     unpriced: int = 0  # calls whose model has no price, so they could not be counted
+    # One cap, several threads. A workflow step may look into its cases at the same time, and
+    # two threads that check the cap at the same moment would both find room for a call that
+    # only one of them can afford. Checking and spending happen under this lock, so the cap
+    # holds however many threads are asking.
+    gate: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self) -> None:
         if self.spend is not None:
@@ -123,45 +130,71 @@ class Budget:
     def model(self) -> str:
         return self.client.model
 
+    def left(self) -> list[tuple[str, Decimal]]:
+        """What is left under each cap there is, in dollars, named for a person.
+
+        Whatever is set aside for calls already in flight counts as spent. Without that,
+        two threads asking at the same moment would both be told there is room for the last
+        call, and the cap would be stepped over by exactly one call per thread.
+        """
+        caps = (
+            ("this question", self.caps.per_run, self.run_usd),
+            ("today", self.caps.per_day, self.day_usd),
+        )
+        return [(name, cap - spent - self.reserved) for name, cap, spent in caps if cap is not None]
+
     def remaining(self) -> Decimal | None:
         """What is left before the first cap is reached, or None when there is no cap."""
-        left = [
-            cap - spent
-            for cap, spent in ((self.caps.per_run, self.run_usd), (self.caps.per_day, self.day_usd))
-            if cap is not None
-        ]
+        left = [amount for _, amount in self.left()]
         return min(left) if left else None
 
     def check(self, request: Request) -> None:
         """Raise BudgetError if this request could take spending past a cap."""
-        left = self.remaining()
-        if left is None:
+        caps = self.left()
+        if not caps:
             return
         worst = worst_case_usd(self.model, estimate_tokens(request), request.max_tokens)
         if worst is None or worst <= RESERVE:
             return
-        if worst > left:
-            which = "this question" if self.caps.per_run == left + self.run_usd else "today"
-            raise BudgetError(
-                f"The budget for {which} is spent: ${left:.4f} left, and this call could cost "
-                f"up to ${worst:.4f}. Raise the cap in permissions.yaml, or ask something "
-                "that takes fewer steps."
-            )
+        for which, left in sorted(caps, key=lambda pair: pair[1]):
+            if worst > left:
+                raise BudgetError(
+                    f"The budget for {which} is spent: ${left:.4f} left, and this call could "
+                    f"cost up to ${worst:.4f}. Raise the cap (in permissions.yaml, or in the "
+                    "workflow's own budget), or ask something that takes fewer steps."
+                )
 
     def send(self, request: Request, on_text: Callable[[str], None] | None = None) -> Answer:
-        self.check(request)
-        answer = self.client.send(request, on_text)
-        self.answers.append(answer)
-        if answer.cost_usd is None:
-            self.unpriced += 1
-        else:
-            self.run_usd += answer.cost_usd
-            self.day_usd = (
-                self.spend.add(answer.cost_usd)
-                if self.spend is not None
-                else self.day_usd + answer.cost_usd
-            )
+        with self.gate:
+            self.check(request)
+            # Counted as spent before the call is made, at the worst case, and corrected
+            # afterwards. Two threads then cannot both be told there is room for the last
+            # call: whichever asks second sees the first one's reservation.
+            reserved = worst_case_usd(self.model, estimate_tokens(request), request.max_tokens)
+            self.hold(reserved)
+        try:
+            answer = self.client.send(request, on_text)
+        finally:
+            with self.gate:
+                if reserved is not None:
+                    self.hold(-reserved)
+        with self.gate:
+            self.answers.append(answer)
+            if answer.cost_usd is None:
+                self.unpriced += 1
+            else:
+                self.run_usd += answer.cost_usd
+                self.day_usd = (
+                    self.spend.add(answer.cost_usd)
+                    if self.spend is not None
+                    else self.day_usd + answer.cost_usd
+                )
         return answer
+
+    def hold(self, amount: Decimal | None) -> None:
+        """Set aside what a call in flight could cost, or give it back when it is done."""
+        if amount is not None:
+            self.reserved += amount
 
     def count_tokens(self, text: str) -> int:
         return self.client.count_tokens(text)

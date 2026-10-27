@@ -90,6 +90,7 @@ steps:
     propose: adjust_credit_limit  # the only action it may draft, and only as a proposal
     max_steps: 10
     cases: 10
+    workers: 2  # two companies at a time: they are independent, and it halves the wait
     question: |
       {label} (organisation number {key}) is on this week's credit watch.
 
