@@ -106,7 +106,9 @@ steps:
       Check whether that still holds, look at the years around it and at anything the
       company's own reports say, and write the note. If the figures justify it, propose a
       new credit limit with adjust_credit_limit and say in one sentence why, naming the
-      figures and their year.
+      figures and their year. A company the register has as bankrupt gets no more credit:
+      once you have confirmed the bankruptcy, propose a limit of 0, even when there are no
+      accounts to cite. The bankruptcy is the reason.
 
   # 5. One file a person reads over coffee on Monday.
   - id: digest

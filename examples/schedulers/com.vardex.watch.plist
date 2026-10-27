@@ -8,7 +8,9 @@
   from the pack's own schedule and the last run that finished, so firing often is free and
   missing a fire is survivable. Do not try to make this plist the schedule.
 
-  To use it, replace the two paths and the name, then:
+  To use it, replace CHANGE-ME with your user name, point the first argument at your uv
+  (`which uv`: /opt/homebrew/bin/uv from Homebrew, ~/.local/bin/uv from the installer;
+  launchd does not read your shell's PATH), then:
 
       cp examples/schedulers/com.vardex.watch.plist ~/Library/LaunchAgents/
       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vardex.watch.plist
