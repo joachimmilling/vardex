@@ -20,7 +20,11 @@ budget:
   per_run: 2.00  # this workflow only; the pack's per-day cap in permissions.yaml still holds
 
 steps:
-  # 1. What the register itself says changed, since the last time we read its feed.
+  # 1. Close what nobody answered last week, and put what is late at the top of the report.
+  - id: tidy
+    uses: tidy
+
+  # 2. What the register itself says changed, since the last time we read its feed.
   - id: changes
     uses: watch
     feed:
@@ -41,7 +45,7 @@ steps:
     # this pack follows the companies it has accounts for, which is the same shape of query.
     follow: select distinct orgnr from fct_accounts
 
-  # 2. Which of them a credit controller would want to look at this week.
+  # 3. Which of them a credit controller would want to look at this week.
   - id: risks
     uses: find
     about: Company
@@ -84,7 +88,7 @@ steps:
          or (l.revenue_nok > 0 and l.equity < 0.1 * l.revenue_nok)
       order by c.is_bankrupt desc, l.equity
 
-  # 3. The agent looks into each one and writes the note a person will read.
+  # 4. The agent looks into each one and writes the note a person will read.
   - id: brief
     uses: brief
     propose: adjust_credit_limit  # the only action it may draft, and only as a proposal
@@ -104,7 +108,7 @@ steps:
       new credit limit with adjust_credit_limit and say in one sentence why, naming the
       figures and their year.
 
-  # 4. One file a person reads over coffee on Monday.
+  # 5. One file a person reads over coffee on Monday.
   - id: digest
     uses: report
     title: Weekly company watch

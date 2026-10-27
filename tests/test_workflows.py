@@ -125,7 +125,7 @@ def knowledge() -> Knowledge:
 def permissions(level: str = "approve") -> Permissions:
     return Permissions(
         budgets=Budgets(per_run=Decimal("2.00")),
-        approvals=Approvals(approvers=["joachim"], needed_within_hours=72),
+        approvals=Approvals(approvers=["joachim"], needed_within_hours=72, escalate_to="joachim"),
         tools={
             "describe_tool": "read",
             "list_tables": "read",
@@ -644,3 +644,72 @@ def a_request():
     from vardex.llm import Message, Request
 
     return Request(system="x" * 200, messages=[Message("user", "y" * 200)], max_tokens=4096)
+
+
+# --- closing what nobody answered ------------------------------------------------------
+
+
+def tidying(**changes) -> WorkflowSpec:
+    return spec(
+        steps=[
+            {"id": "tidy", "uses": "tidy"},
+            *WORKFLOW["steps"],
+        ],
+        **changes,
+    )
+
+
+def an_old_proposal(connections, days: int, hours_late: int = 0) -> str:
+    """A proposal made `days` ago, with a deadline `hours_late` hours in the past."""
+    from datetime import timedelta
+
+    from vardex.actions import Proposal
+
+    made = datetime.now(UTC) - timedelta(days=days)
+    proposal = Proposal(
+        action="adjust_credit_limit",
+        key="100000008",
+        label="DEMO LAKS AS",
+        fields={"amount": 1.0, "reason": "last week"},
+        sentence="Set DEMO LAKS AS's credit limit to 1 NOK.",
+        made_at=made.isoformat(timespec="seconds"),
+        idempotency_key=f"old-{days}-{hours_late}",
+    )
+    needed = (datetime.now(UTC) - timedelta(hours=hours_late)).isoformat(timespec="seconds")
+    connections.inbox.add(proposal, by="an earlier run", needed_by=needed if hours_late else "")
+    return proposal.reference
+
+
+def test_a_proposal_nobody_answered_is_closed_and_said_so(tmp_path):
+    connections, _ = wire(tmp_path, FakeModel(note(), note()))
+    stale = an_old_proposal(connections, days=20)
+    workflow = tidying()
+    run = run_workflow(
+        workflow, start(workflow, connections, trigger="schedule", dry_run=False), connections
+    )
+    assert run.facts["expired"] == [stale]
+    assert connections.inbox.get(stale).state == "expired"
+    report = (tmp_path / "reports" / f"{run.id}.md").read_text(encoding="utf-8")
+    assert "Closed, unanswered (1)" in report
+
+
+def test_what_is_late_goes_to_the_top_with_a_name_on_it(tmp_path):
+    connections, _ = wire(tmp_path, FakeModel(note(), note()))
+    late = an_old_proposal(connections, days=2, hours_late=5)
+    workflow = tidying()
+    run = run_workflow(
+        workflow, start(workflow, connections, trigger="schedule", dry_run=False), connections
+    )
+    assert run.facts["overdue"] == [late]
+    report = (tmp_path / "reports" / f"{run.id}.md").read_text(encoding="utf-8")
+    assert report.index("Late — joachim, these are yours (1)") < report.index("Needs a decision")
+
+
+def test_a_dry_run_does_not_even_decide_to_give_up(tmp_path):
+    connections, _ = wire(tmp_path, FakeModel(note(), note()), dry_run=True)
+    stale = an_old_proposal(connections, days=30)
+    workflow = tidying()
+    run_workflow(
+        workflow, start(workflow, connections, trigger="manual", dry_run=True), connections
+    )
+    assert connections.inbox.get(stale).state == "proposed"
