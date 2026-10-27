@@ -132,6 +132,13 @@ def test_at_draft_it_puts_a_proposal_in_the_inbox_and_touches_nothing_else(tmp_p
     assert changed(connector) == []  # the CRM has not been told anything
 
 
+def test_a_reason_with_its_own_full_stop_does_not_end_the_sentence_twice(tmp_path):
+    box, _, inbox = setup(tmp_path, "draft")
+    box.call(call(key="100000008", amount=500000, reason="equity was negative in 2025. "))
+    sentence = inbox.items()[0].proposal.sentence
+    assert sentence.endswith("because equity was negative in 2025.")
+
+
 def test_the_same_work_proposed_twice_is_one_proposal(tmp_path):
     box, _, inbox = setup(tmp_path, "draft")
     box.context = {"work": "weekly-watch:brief:100000008:2026-W44"}

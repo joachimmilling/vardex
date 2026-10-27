@@ -203,6 +203,17 @@ def check_fields(action: Action, given: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
+def in_sentence(values: dict[str, Any]) -> dict[str, Any]:
+    """The fields as they read inside the action's sentence. A model writes a reason as a
+    sentence of its own, full stop included, and the sentence it goes into has one already:
+    without this, a person is asked to approve "… because equity was negative in 2025..".
+    """
+    return {
+        name: value.strip().rstrip(".").rstrip() if isinstance(value, str) else value
+        for name, value in values.items()
+    }
+
+
 def find_object(warehouse: Warehouse, obj: ObjectType, key: str) -> str:
     """The label of the object with this key. Raises ToolFailure when there is no such row:
     an action aimed at nothing must fail before anything is written."""
@@ -256,7 +267,7 @@ def action_tool(
             key=key,
             label=label,
             fields=values,
-            sentence=action.confirm.format(label=label, key=key, **values),
+            sentence=action.confirm.format(label=label, key=key, **in_sentence(values)),
             made_at=now(),
             idempotency_key=f"{work}:{action.name}:{key}" if work else "",
             why=call.context.get("why", ""),
