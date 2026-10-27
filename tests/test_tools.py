@@ -215,11 +215,11 @@ def test_at_approve_a_refusal_stops_it(tmp_path):
     assert record == []
 
 
-def test_at_approve_with_nobody_to_ask_it_refuses(tmp_path):
+def test_at_approve_with_nobody_to_ask_it_drafts_instead(tmp_path):
     toolbox, record = writing_box("approve")
     result = toolbox.call(call("change_something"))
-    assert result.is_error
-    assert "nobody is there to ask" in result.content
+    assert not result.is_error and not result.wrote
+    assert result.content == "Proposed, not done."  # it stepped down a rung
     assert record == []
 
 

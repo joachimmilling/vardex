@@ -1,0 +1,109 @@
+# Work that runs without being asked. The file name is the workflow's name.
+#
+#   uv run vardex schedule packs/norwegian-companies      what is due, and when
+#   uv run vardex run packs/norwegian-companies           run it now
+#   uv run vardex run packs/norwegian-companies --if-due  what a scheduler calls
+#
+# Nothing here can change anything outside Vardex. A run with nobody watching has nobody to
+# approve a change, so its actions are drafted into the inbox and wait there.
+description: >
+  Monday morning watch over the companies we have accounts for: what the register changed
+  about them last week, which of them now look like a credit risk, and what to do about it.
+
+schedule:
+  every: week
+  weekday: monday
+  at: "06:30"
+  timezone: Europe/Oslo  # a place, so the hour is the same in both halves of the year
+
+budget:
+  per_run: 2.00  # this workflow only; the pack's per-day cap in permissions.yaml still holds
+
+steps:
+  # 1. What the register itself says changed, since the last time we read its feed.
+  - id: changes
+    uses: watch
+    feed:
+      url: https://data.brreg.no/enhetsregisteret/api/oppdateringer/enheter
+      items: _embedded.oppdaterteEnheter
+      key: organisasjonsnummer
+      position: oppdateringsid
+      cursor: oppdateringsid
+      since: dato  # used only for the very first read, which starts lookback_days back
+      kind: endringstype
+      stamp: dato
+      keep: [Endring, Sletting, Fjernet]  # a new company cannot already be a customer
+      inclusive: true  # this feed returns the row you name, so the cursor steps past it
+      page_size: 500
+      max_pages: 20  # about 10,000 changes a run; a longer backlog is read over several
+      lookback_days: 7
+    # The companies this pack follows. A real credit watch would read its customer list;
+    # this pack follows the companies it has accounts for, which is the same shape of query.
+    follow: select distinct orgnr from fct_accounts
+
+  # 2. Which of them a credit controller would want to look at this week.
+  - id: risks
+    uses: find
+    about: Company
+    changed_only: false  # look at every company that fits, not only the ones that changed
+    limit: 10
+    sql: |
+      with newest as (
+          select orgnr, max(fiscal_year) as fiscal_year
+          from fct_accounts
+          where accounts_type = 'company'
+          group by orgnr
+      ),
+      latest as (
+          select a.orgnr, a.fiscal_year, a.equity, a.revenue_nok, a.operating_profit_nok
+          from fct_accounts a
+          join newest n on n.orgnr = a.orgnr and n.fiscal_year = a.fiscal_year
+          where a.accounts_type = 'company'
+      )
+      select
+          c.orgnr,
+          c.name,
+          case
+              when c.is_bankrupt then 'The register has it as bankrupt.'
+              when l.equity < 0 then
+                  'Equity was negative in the ' || cast(l.fiscal_year as varchar) || ' accounts.'
+              else
+                  'Equity is under a tenth of revenue in '
+                  || cast(l.fiscal_year as varchar) || '.'
+          end as reason,
+          l.fiscal_year,
+          l.equity,
+          l.revenue_nok,
+          l.operating_profit_nok,
+          c.employees,
+          c.is_bankrupt
+      from dim_companies c
+      left join latest l on l.orgnr = c.orgnr
+      where c.is_bankrupt
+         or l.equity < 0
+         or (l.revenue_nok > 0 and l.equity < 0.1 * l.revenue_nok)
+      order by c.is_bankrupt desc, l.equity
+
+  # 3. The agent looks into each one and writes the note a person will read.
+  - id: brief
+    uses: brief
+    propose: adjust_credit_limit  # the only action it may draft, and only as a proposal
+    max_steps: 10
+    cases: 10
+    question: |
+      {label} (organisation number {key}) is on this week's credit watch.
+
+      It came up because: {reason}
+      The figures that raised it: equity {equity}, revenue in NOK {revenue_nok}, operating
+      profit in NOK {operating_profit_nok}, from the {fiscal_year} accounts. Employees:
+      {employees}. The register has it as bankrupt: {is_bankrupt}.
+
+      Check whether that still holds, look at the years around it and at anything the
+      company's own reports say, and write the note. If the figures justify it, propose a
+      new credit limit with adjust_credit_limit and say in one sentence why, naming the
+      figures and their year.
+
+  # 4. One file a person reads over coffee on Monday.
+  - id: digest
+    uses: report
+    title: Weekly company watch

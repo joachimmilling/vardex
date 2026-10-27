@@ -3,18 +3,21 @@
 import json
 import os
 import sys
+import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import typer
 
 from vardex import __version__, evals, rag, text_to_sql
-from vardex.actions import Connector, FileConnector, action_tools, proposals_path
+from vardex.actions import Connector, FileConnector, action_tools, connector_path
 from vardex.agent import MAX_STEPS, Run, run_agent
 from vardex.anthropic_client import AnthropicClient
+from vardex.approvals import ApprovalError, Inbox, Item, inbox_path
 from vardex.budgets import Budget, BudgetError, Spend, spend_path
 from vardex.calllog import log_call
 from vardex.charts import charts_path
@@ -55,7 +58,7 @@ from vardex.llm import ask as ask_model
 from vardex.mcp_client import McpSession, load_mcp_servers, outside_tools
 from vardex.mcp_server import build_server, serve_stdio
 from vardex.packs import Language, PackError, load_pack
-from vardex.permissions import load_permissions, unlisted
+from vardex.permissions import Permissions, load_permissions, unlisted
 from vardex.pgvector_index import PostgresIndex
 from vardex.postgres_warehouse import PostgresWarehouse
 from vardex.pricing import (
@@ -85,11 +88,29 @@ from vardex.replay import (
     ReplayWarehouse,
 )
 from vardex.retrieval import Filters, Index, Search, SearchError, search
+from vardex.runs import Lock, RunError, RunStore, runs_path
+from vardex.runs import Run as WorkflowRun
 from vardex.semantic import Knowledge, check, check_documents, find_key, load_knowledge
 from vardex.sql import QueryError, Result, Warehouse, format_table, format_value
 from vardex.text_to_sql import AnswerError
 from vardex.tools import Approver, Tool, Toolbox, ToolResult, build_toolbox
 from vardex.warehouse import WarehouseError, build, warehouse_path
+from vardex.workflows import (
+    Connections,
+    Watermarks,
+    WorkflowError,
+    WorkflowSpec,
+    check_workflow,
+    is_due,
+    load_workflow,
+    load_workflows,
+    marks_path,
+    reports_path,
+    run_workflow,
+    start,
+    waiting_summary,
+    workflow_names,
+)
 
 app = typer.Typer(
     help="Vardex: blocks, recipes and packs for enterprise AI apps.",
@@ -448,6 +469,7 @@ def check_command(pack: PackArgument, warehouse: WarehouseOption = None) -> None
         if not problems and (pack / "documents" / "sources.yaml").is_file():
             problems += check_documents(connection, knowledge.ontology, load_documents(pack))
         problems += check_permissions(pack, connection)
+        problems += check_workflows(pack, knowledge)
     except PackError as err:
         raise fail(str(err)) from err
     finally:
@@ -458,9 +480,21 @@ def check_command(pack: PackArgument, warehouse: WarehouseOption = None) -> None
         f"OK  {connection.name}: {len(knowledge.tables)} models, {len(knowledge.metrics)} "
         f"metrics, {len(knowledge.ontology.objects)} objects, "
         f"{len(knowledge.ontology.links)} links, {len(knowledge.ontology.actions)} actions, "
-        f"{len(knowledge.questions.examples)} examples",
+        f"{len(knowledge.questions.examples)} examples, "
+        f"{len(workflow_names(pack))} workflows",
         fg=typer.colors.GREEN,
     )
+
+
+def check_workflows(pack: Path, knowledge: Knowledge) -> list[str]:
+    """Every workflow the pack declares, checked without running any of it."""
+    if not workflow_names(pack):
+        return []
+    permissions = load_permissions(pack)
+    problems = []
+    for spec in load_workflows(pack):
+        problems += check_workflow(spec, knowledge, permissions)
+    return problems
 
 
 def check_permissions(pack: Path, connection: Warehouse) -> list[str]:
@@ -480,7 +514,12 @@ def check_permissions(pack: Path, connection: Warehouse) -> list[str]:
         warehouse=connection,
         knowledge=knowledge,
         charts=charts_path(settings.data_dir, pack.name),
-        extra=action_tools(knowledge, connection, connect_connectors(settings, pack)),
+        extra=action_tools(
+            knowledge,
+            connection,
+            connect_connectors(settings, pack),
+            connect_inbox(settings, pack),
+        ),
     )
     # The document tools exist whenever the pack has documents, index or no index
     names = list(tools.tools) + (
@@ -947,7 +986,7 @@ def cite_command(
 
 
 @dataclass
-class Connections:
+class EvalConnections:
     """What an eval suite runs on. Each is live, live and recorded, or replayed, and only what
     the suite's capability needs is there."""
 
@@ -983,7 +1022,7 @@ def eval_connections(
     url: str | None,
     record: bool,
     replay: bool,
-) -> Connections:
+) -> EvalConnections:
     """The connections a suite runs on: live, live and recorded, or replayed."""
     needs = NEEDS[type(suite)]
     path = evals.recording_path(pack, name)
@@ -991,7 +1030,7 @@ def eval_connections(
         if not path.is_file():
             raise PackError(f"No recording at {path}. Make one with --record.")
         recording = Recording.load(path)
-        return Connections(
+        return EvalConnections(
             client=ReplayClient(recording) if "model" in needs else None,
             warehouse=ReplayWarehouse(recording) if "warehouse" in needs else None,
             embedder=ReplayEmbedder(recording) if "embedder" in needs else None,
@@ -999,7 +1038,7 @@ def eval_connections(
             reranker=ReplayReranker(recording) if recording.reranker else None,
             recording=recording,
         )
-    live = Connections()
+    live = EvalConnections()
     try:
         if "warehouse" in needs:
             live.warehouse = connect_warehouse(url, pack, settings)
@@ -1022,7 +1061,7 @@ def eval_connections(
         live.warehouse.dialect if live.warehouse else "",
         date.today().isoformat(),
     )
-    return Connections(
+    return EvalConnections(
         client=RecordingClient(live.client, recording) if live.client else None,
         warehouse=RecordingWarehouse(live.warehouse, recording) if live.warehouse else None,
         embedder=RecordingEmbedder(live.embedder, recording) if live.embedder else None,
@@ -1084,7 +1123,8 @@ def eval_suite(
 
     def agent_toolbox() -> Toolbox:
         """The agent's tools for one case. No MCP servers and nobody to approve: an eval
-        measures what the pack can do on its own, with nothing outside it and no person."""
+        measures what the pack can do on its own, with nothing outside it and no person.
+        What it drafts goes to an inbox of its own, never the one people read."""
         knowledge_now = knowledge or load_knowledge(pack)
         return build_toolbox(
             load_permissions(pack),
@@ -1094,7 +1134,12 @@ def eval_suite(
             embedder=c.embedder,
             reranker=c.reranker,
             charts=charts_path(settings.data_dir, pack.name),
-            extra=action_tools(knowledge_now, c.warehouse, connect_connectors(settings, pack))
+            extra=action_tools(
+                knowledge_now,
+                c.warehouse,
+                connect_connectors(settings, pack),
+                Inbox(Path(tempfile.mkdtemp(prefix="vardex-eval-")) / "inbox.jsonl"),
+            )
             if c.warehouse
             else [],
         )
@@ -1441,16 +1486,35 @@ def packs(
 
 def connect_connectors(settings: Settings, pack: Path) -> dict[str, Connector]:
     """The outside systems a pack's actions write to. The one place that chooses them."""
-    return {"crm": FileConnector(proposals_path(settings.data_dir, load_pack(pack).name))}
+    name = load_pack(pack).name
+    return {
+        "crm": FileConnector(
+            connector_path(settings.data_dir, name, "crm"), name="the demo CRM, a file"
+        )
+    }
 
 
 def approve_at_keyboard(call: ToolCall, tool: Tool) -> bool:
-    """Ask the person who started the run. With nobody there, the answer is no."""
-    if not interactive():
-        return False
+    """Ask the person who started the run. Only used when somebody is there to ask."""
     arguments = ", ".join(f"{k}={v!r}" for k, v in call.arguments.items())
     typer.secho(f"\n{tool.name}({arguments})", fg=typer.colors.YELLOW, err=True)
     return typer.confirm("Allow this?", default=False, err=True)
+
+
+def connect_inbox(settings: Settings, pack: Path) -> Inbox:
+    """The pack's approval inbox. The one place that decides where proposals wait."""
+    return Inbox(inbox_path(settings.data_dir, load_pack(pack).name))
+
+
+@dataclass
+class Built:
+    """Everything one run of the agent can reach, and what has to be closed afterwards."""
+
+    toolbox: Toolbox
+    warehouse: Warehouse
+    knowledge: Knowledge
+    permissions: Permissions
+    open_now: list[Warehouse | Index]
 
 
 def build_agent(
@@ -1463,7 +1527,8 @@ def build_agent(
     dry_run: bool = False,
     approve: Approver | None = None,
     sessions: list[McpSession] | None = None,
-) -> tuple[Toolbox, list[Warehouse | Index]]:
+    context: dict[str, str] | None = None,
+) -> Built:
     """Everything the agent of one run can reach, and what has to be closed afterwards."""
     knowledge = load_knowledge(pack)
     permissions = load_permissions(pack)
@@ -1474,7 +1539,12 @@ def build_agent(
         embedder = connect_embedder(settings)
         index = connect_index(settings, pack, embedder)
         open_now.append(index)
-    extra = action_tools(knowledge, connection, connect_connectors(settings, pack))
+    extra = action_tools(
+        knowledge,
+        connection,
+        connect_connectors(settings, pack),
+        connect_inbox(settings, pack),
+    )
     extra += outside_tools(sessions or [])
     toolbox = build_toolbox(
         permissions,
@@ -1487,8 +1557,9 @@ def build_agent(
         extra=extra,
         approve=approve,
         dry_run=dry_run,
+        context=context or {},
     )
-    return toolbox, open_now
+    return Built(toolbox, connection, knowledge, permissions, open_now)
 
 
 ERROR_CODES: list[tuple[type[Exception], str]] = [
@@ -1617,17 +1688,21 @@ def agent_command(
                         McpSession(spec, environment=dict(os.environ), ask=ask_at_keyboard)
                     )
                 )
-            toolbox, open_now = build_agent(
+            built = build_agent(
                 pack,
                 settings,
                 warehouse_url=warehouse,
                 documents=documents,
                 rerank=rerank,
                 dry_run=dry_run,
-                approve=approve_at_keyboard,
+                # With nobody at the keyboard there is nobody to ask, so a tool that needs
+                # approval drafts into the inbox instead of refusing. Same rung, and the
+                # difference is only who answers.
+                approve=approve_at_keyboard if interactive() else None,
                 sessions=sessions,
             )
-            for closing in open_now:
+            toolbox = built.toolbox
+            for closing in built.open_now:
                 stack.callback(closing.close)
             budget = Budget(
                 connect(settings),
@@ -1695,14 +1770,14 @@ def tools_command(
         with ExitStack() as stack:
             for spec in load_mcp_servers(pack).servers:
                 sessions.append(stack.enter_context(McpSession(spec, environment=dict(os.environ))))
-            toolbox, open_now = build_agent(
+            built = build_agent(
                 pack, settings, warehouse_url=warehouse, documents=documents, sessions=sessions
             )
-            for closing in open_now:
+            for closing in built.open_now:
                 stack.callback(closing.close)
             rows = [
-                (name, toolbox.level(name) or "none", tool.summary)
-                for name, tool in toolbox.tools.items()
+                (name, built.toolbox.level(name) or "none", tool.summary)
+                for name, tool in built.toolbox.tools.items()
             ]
     except (PackError, SearchError, WarehouseError, QueryError) as err:
         raise fail(str(err)) from err
@@ -1725,11 +1800,473 @@ def mcp_command(
     def build() -> Toolbox:
         # A new toolbox per request: the protocol is stateless, and a connection should not
         # be held open for a client that may never come back.
-        toolbox, _ = build_agent(pack, settings, warehouse_url=warehouse, documents=documents)
-        return toolbox
+        return build_agent(pack, settings, warehouse_url=warehouse, documents=documents).toolbox
 
     try:
         build()  # fail loudly here rather than on the first request from a client
     except (PackError, SearchError, WarehouseError, QueryError) as err:
         raise fail(str(err)) from err
     serve_stdio(build_server(name, build))
+
+
+ByOption = Annotated[
+    str,
+    typer.Option(
+        "--by",
+        help="Who is deciding. Kept in the log, so it has to be a person, not a role.",
+    ),
+]
+WorkflowArgument = Annotated[
+    str | None,
+    typer.Argument(help="One workflow. Without it, every workflow the pack has."),
+]
+
+
+def connect_workflow(
+    pack: Path,
+    settings: Settings,
+    spec: WorkflowSpec,
+    stack: ExitStack,
+    *,
+    warehouse: str | None,
+    documents: bool,
+    rerank: bool,
+    dry_run: bool,
+    spent: Decimal = Decimal(0),
+) -> EvalConnections:
+    """Everything one workflow run can reach. The one place a run is wired together.
+
+    Note what the agent is given: no approver. There is nobody at the keyboard, so a tool
+    that needs a person can only draft, which is exactly what we want of a run nobody is
+    watching. And the budget starts at what the run has already spent, so resuming a run
+    does not hand it a fresh allowance.
+    """
+    name = load_pack(pack).name
+    sessions = [
+        stack.enter_context(McpSession(server, environment=dict(os.environ)))
+        for server in load_mcp_servers(pack).servers
+    ]
+    built = build_agent(
+        pack,
+        settings,
+        warehouse_url=warehouse,
+        documents=documents,
+        rerank=rerank,
+        dry_run=dry_run,
+        approve=None,
+        sessions=sessions,
+    )
+    for closing in built.open_now:
+        stack.callback(closing.close)
+    # The workflow may set its own cap for one run; the pack's cap for the day always holds.
+    caps = built.permissions.budgets.model_copy(
+        update={"per_run": spec.budget.per_run or built.permissions.budgets.per_run}
+    )
+    client = Budget(
+        connect(settings),
+        caps=caps,
+        spend=Spend(spend_path(settings.data_dir, name)),
+        run_usd=spent,
+    )
+    return Connections(
+        pack=name,
+        folder=str(pack),
+        knowledge=built.knowledge,
+        permissions=built.permissions,
+        warehouse=built.warehouse,
+        client=client,
+        inbox=connect_inbox(settings, pack),
+        store=RunStore(runs_path(settings.data_dir, name)),
+        marks=Watermarks(marks_path(settings.data_dir, name, spec.name)),
+        reports=reports_path(settings.data_dir, name),
+        # One toolbox, copied per case with that case's context. The tools themselves hold
+        # the open warehouse and index, so this costs nothing but the dataclass.
+        toolbox=lambda context: replace(built.toolbox, context=context, calls=[]),
+        http=http_client,
+    )
+
+
+def run_as_dict(run: WorkflowRun) -> dict[str, Any]:
+    """A workflow run as data, for a program or a person reading --json."""
+    return {
+        "id": run.id,
+        "workflow": run.workflow,
+        "state": run.state,
+        "trigger": run.trigger,
+        "started_at": run.started_at,
+        "ended_at": run.ended_at,
+        "attempts": run.attempts,
+        "dry_run": run.dry_run,
+        "note": run.note,
+        "cost_usd": run.cost_usd,
+        "steps": [
+            {
+                "id": step.id,
+                "uses": step.uses,
+                "state": step.state,
+                "items": step.items,
+                "note": step.note,
+                "cost_usd": step.cost_usd,
+            }
+            for step in run.steps
+        ],
+        "report": run.facts.get("report"),
+        "proposals": run.facts.get("proposals", []),
+        "cases": len(run.facts.get("cases", [])),
+    }
+
+
+def show_run(run: WorkflowRun) -> None:
+    """A run as a few lines on stderr, so stdout stays whatever the command prints."""
+    colour = {"done": typer.colors.GREEN, "failed": typer.colors.RED}.get(
+        run.state, typer.colors.YELLOW
+    )
+    typer.secho(f"{run.id}  {run.state}", fg=colour, err=True)
+    for step in run.steps:
+        mark = {"done": " ", "failed": "!", "stopped": "-", "skipped": "·"}.get(step.state, "·")
+        typer.secho(
+            f" {mark} {step.id:<12} {step.uses:<7} {step.note[:90]}", fg="bright_black", err=True
+        )
+    if run.note:
+        typer.secho(f"   {run.note}", fg=colour, err=True)
+
+
+def run_one_workflow(
+    pack: Path,
+    settings: Settings,
+    spec: WorkflowSpec,
+    *,
+    trigger: str,
+    warehouse: str | None,
+    documents: bool,
+    rerank: bool,
+    dry_run: bool,
+    resume: str | None,
+    show_steps: bool,
+) -> WorkflowRun:
+    """Start or resume one run of one workflow, under its own lock."""
+    name = load_pack(pack).name
+    store = RunStore(runs_path(settings.data_dir, name))
+    lock = Lock(runs_path(settings.data_dir, name) / f"{spec.name}.lock")
+    with ExitStack() as stack:
+        stack.enter_context(lock)
+        earlier = store.load(resume) if resume else None
+        connections = connect_workflow(
+            pack,
+            settings,
+            spec,
+            stack,
+            warehouse=warehouse,
+            documents=documents,
+            rerank=rerank,
+            dry_run=dry_run,
+            spent=earlier.spent if earlier else Decimal(0),
+        )
+        run = earlier or start(spec, connections, trigger=trigger, dry_run=dry_run)
+        return run_workflow(
+            spec,
+            run,
+            connections,
+            on_call=show_call if show_steps else None,
+        )
+
+
+@app.command(name="run")
+def run_command(
+    pack: PackArgument,
+    workflow: WorkflowArgument = None,
+    model: ModelOption = None,
+    warehouse: WarehouseOption = None,
+    if_due: Annotated[
+        bool,
+        typer.Option("--if-due", help="Run only what the schedule says is due. For a scheduler."),
+    ] = False,
+    resume: Annotated[
+        str | None, typer.Option(help="Carry on an earlier run, by its id, from where it stopped.")
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Say what would change, change nothing.")
+    ] = False,
+    documents: Annotated[bool, typer.Option("--documents/--no-documents")] = True,
+    rerank: Annotated[bool, typer.Option("--rerank/--no-rerank")] = True,
+    show_steps: Annotated[
+        bool, typer.Option("--steps-shown", help="Print each tool call as it happens.")
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Print the runs as JSON.")] = False,
+) -> None:
+    """Run the pack's scheduled work: on demand, or whatever the schedule says is due."""
+    settings = settings_for(model)
+    if not as_json:
+        warn_if_prices_are_stale()
+    try:
+        if resume:
+            earlier = RunStore(runs_path(settings.data_dir, load_pack(pack).name)).load(resume)
+            specs = [load_workflow(pack, earlier.workflow)]
+        else:
+            specs = [load_workflow(pack, workflow)] if workflow else load_workflows(pack)
+    except (PackError, RunError) as err:
+        raise (fail_json(err) if as_json else fail(str(err))) from err
+    if not specs:
+        message = f"{pack} declares no workflows: there is nothing to run."
+        raise (fail_json(message, code="pack_invalid") if as_json else fail(message))
+    runs: list[WorkflowRun] = []
+    skipped: list[str] = []
+    try:
+        for spec in specs:
+            store = RunStore(runs_path(settings.data_dir, load_pack(pack).name))
+            if if_due and not resume and not is_due(spec, store):
+                skipped.append(spec.name)
+                continue
+            runs.append(
+                run_one_workflow(
+                    pack,
+                    settings,
+                    spec,
+                    trigger="schedule" if if_due else "manual",
+                    warehouse=warehouse,
+                    documents=documents,
+                    rerank=rerank,
+                    dry_run=dry_run,
+                    resume=resume,
+                    show_steps=show_steps and not as_json,
+                )
+            )
+    except (PackError, RunError, WorkflowError, ModelError, SearchError, WarehouseError) as err:
+        raise (fail_json(err) if as_json else fail(str(err))) from err
+    worst = next((run for run in runs if run.state in ("failed", "stopped")), None)
+    if as_json:
+        body = {"runs": [run_as_dict(run) for run in runs], "not_due": skipped}
+        if worst is not None:
+            raise fail_json(worst.note, code=f"workflow_{worst.state}", data=body)
+        ok_json(body)
+        raise typer.Exit(code=0)
+    for name in skipped:
+        typer.secho(f"{name}: not due yet", fg="bright_black", err=True)
+    for run in runs:
+        show_run(run)
+        report = run.facts.get("report")
+        if report:
+            typer.echo(report)
+    if runs:
+        waiting = connect_inbox(settings, pack).items(state="proposed")
+        typer.secho(waiting_summary(waiting), fg="bright_black", err=True)
+    if worst is not None:
+        raise typer.Exit(code=1)
+
+
+@app.command(name="runs")
+def runs_command(
+    pack: PackArgument,
+    run_id: Annotated[str | None, typer.Argument(help="One run, by its id.")] = None,
+    workflow: Annotated[str | None, typer.Option(help="Only this workflow's runs.")] = None,
+    limit: Annotated[int, typer.Option(help="How many to list.")] = 10,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """List the pack's recent runs, or show one of them."""
+    settings = load_settings()
+    store = RunStore(runs_path(settings.data_dir, load_pack(pack).name))
+    try:
+        if run_id:
+            run = store.load(run_id)
+            if as_json:
+                ok_json(run_as_dict(run))
+                return
+            show_run(run)
+            typer.echo(json.dumps(run.facts, indent=2, ensure_ascii=False, default=str))
+            return
+        found = store.recent(limit=limit, workflow=workflow)
+    except (PackError, RunError) as err:
+        raise (fail_json(err) if as_json else fail(str(err))) from err
+    if as_json:
+        ok_json({"runs": [run_as_dict(run) for run in found]})
+        return
+    if not found:
+        typer.secho("No runs yet.", fg="bright_black")
+        return
+    for run in found:
+        colour = {"done": typer.colors.GREEN, "failed": typer.colors.RED}.get(run.state, "yellow")
+        typer.secho(
+            f"{run.id:<34} {run.state:<8} {run.trigger:<8} ${Decimal(run.cost_usd):.4f}  "
+            f"{run.note[:50]}",
+            fg=colour,
+        )
+
+
+@app.command(name="schedule")
+def schedule_command(
+    pack: PackArgument, as_json: Annotated[bool, typer.Option("--json")] = False
+) -> None:
+    """What the pack's workflows are, when each last ran, and when each is next due."""
+    settings = load_settings()
+    try:
+        specs = load_workflows(pack)
+    except PackError as err:
+        raise (fail_json(err) if as_json else fail(str(err))) from err
+    store = RunStore(runs_path(settings.data_dir, load_pack(pack).name))
+    now = datetime.now(UTC)
+    rows = []
+    for spec in specs:
+        last = store.last_done(spec.name)
+        rows.append(
+            {
+                "workflow": spec.name,
+                "schedule": spec.schedule.describe() if spec.schedule else "by hand only",
+                "last_done": last.started_at if last else None,
+                "due_now": is_due(spec, store, now),
+                "next_due": (
+                    spec.schedule.next_after(now).isoformat(timespec="minutes")
+                    if spec.schedule
+                    else None
+                ),
+            }
+        )
+    if as_json:
+        ok_json({"workflows": rows})
+        return
+    for row in rows:
+        mark = "due now" if row["due_now"] else f"next {row['next_due'] or '—'}"
+        typer.echo(
+            f"{row['workflow']:<16} {row['schedule']:<34} "
+            f"last {row['last_done'] or 'never':<22} {mark}"
+        )
+
+
+def item_as_json(item: Item) -> dict[str, Any]:
+    return item.as_dict()
+
+
+def show_item(item: Item, *, wide: bool = False) -> None:
+    colour = {
+        "proposed": typer.colors.YELLOW,
+        "done": typer.colors.GREEN,
+        "rejected": typer.colors.BRIGHT_BLACK,
+        "failed": typer.colors.RED,
+    }.get(item.state, None)
+    overdue = " OVERDUE" if item.overdue() else ""
+    typer.secho(f"{item.reference}  {item.state}{overdue}", fg=colour)
+    typer.echo(f"  {item.proposal.sentence}")
+    if wide:
+        if item.proposal.why:
+            typer.echo(f"  Why: {item.proposal.why}")
+        typer.echo(f"  Proposed {item.made_at} by {item.history[0].by or 'unknown'}")
+        if item.needed_by:
+            typer.echo(f"  Answer by {item.needed_by}")
+        for entry in item.history[1:]:
+            typer.echo(f"  {entry.at}  {entry.state} {entry.by} {entry.note}".rstrip())
+
+
+@app.command(name="inbox")
+def inbox_command(
+    pack: PackArgument,
+    state: Annotated[str | None, typer.Option(help="Only this state, such as done.")] = None,
+    overdue: Annotated[bool, typer.Option("--overdue", help="Only what is late.")] = False,
+    wide: Annotated[bool, typer.Option("--wide", help="Show the history of each one.")] = False,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """What is waiting for a person to decide, and what has been decided."""
+    settings = load_settings()
+    inbox = connect_inbox(settings, pack)
+    items = inbox.overdue() if overdue else inbox.items(state=state)  # type: ignore[arg-type]
+    if as_json:
+        ok_json({"items": [item_as_json(item) for item in items]})
+        return
+    if not items:
+        typer.secho("Nothing to show.", fg="bright_black")
+        return
+    for item in items:
+        show_item(item, wide=wide)
+    waiting = inbox.items(state="proposed")
+    typer.secho(waiting_summary(waiting), fg="bright_black", err=True)
+
+
+def may_decide(pack: Path, by: str) -> None:
+    """Refuse a decision by somebody the pack has not named as an approver."""
+    permissions = load_permissions(pack)
+    if not by.strip():
+        raise fail("Say who is deciding: --by YOUR-NAME. It goes in the log.")
+    if not permissions.may_approve(by):
+        allowed = ", ".join(permissions.approvals.approvers)
+        raise fail(f"{by} is not an approver for this pack. permissions.yaml names: {allowed}.")
+
+
+@app.command(name="approve")
+def approve_command(
+    pack: PackArgument,
+    reference: Annotated[str, typer.Argument(help="The proposal, or enough of its reference.")],
+    by: ByOption = "",
+    note: Annotated[str, typer.Option(help="Anything worth keeping with the decision.")] = "",
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Say what approving would do, and do nothing.")
+    ] = False,
+) -> None:
+    """Approve a proposal and carry it out. This is where a change to the outside happens."""
+    settings = load_settings()
+    may_decide(pack, by)
+    inbox = connect_inbox(settings, pack)
+    try:
+        item = inbox.get(reference)
+        permissions = load_permissions(pack)
+        # The ladder still decides. A pack that allows this action only to draft never
+        # agreed to it being carried out, whoever says yes.
+        if not permissions.allows(item.proposal.action, "approve"):
+            level = permissions.level(item.proposal.action) or "no level"
+            raise fail(
+                f"{item.proposal.action} has {level} in this pack's permissions.yaml, so an "
+                "approval cannot carry it out. Raise it to approve, or reject this."
+            )
+        if dry_run:
+            typer.secho("Dry run. Approving this would:", fg=typer.colors.YELLOW)
+            typer.echo(f"  {item.proposal.sentence}")
+            typer.echo(f"  in {connect_connectors(settings, pack)[_connector_of(pack, item)].name}")
+            return
+        inbox.decide(item.reference, approved=True, by=by, note=note)
+        connector = connect_connectors(settings, pack)[_connector_of(pack, item)]
+        done = inbox.carry_out(item.reference, connector, by=by)
+    except (ApprovalError, PackError) as err:
+        raise fail(str(err)) from err
+    typer.secho(f"Done: {done.proposal.sentence}", fg=typer.colors.GREEN)
+    if done.change:
+        typer.echo(f"Reference {done.change.reference}. Undo with:")
+        typer.echo(f"  vardex undo {pack} {done.reference} --by {by}")
+
+
+def _connector_of(pack: Path, item: Item) -> str:
+    """Which outside system an item's action is carried out in, from the ontology."""
+    action = load_knowledge(pack).ontology.action(item.proposal.action)
+    return action.connector
+
+
+@app.command(name="reject")
+def reject_command(
+    pack: PackArgument,
+    reference: Annotated[str, typer.Argument(help="The proposal, or enough of its reference.")],
+    by: ByOption = "",
+    note: Annotated[str, typer.Option(help="Why. Worth writing: it is what trains the pack.")] = "",
+) -> None:
+    """Say no to a proposal. Nothing is changed, and the reason is kept."""
+    settings = load_settings()
+    may_decide(pack, by)
+    try:
+        item = connect_inbox(settings, pack).decide(reference, approved=False, by=by, note=note)
+    except ApprovalError as err:
+        raise fail(str(err)) from err
+    typer.secho(f"Rejected {item.reference}.", fg=typer.colors.YELLOW)
+
+
+@app.command(name="undo")
+def undo_command(
+    pack: PackArgument,
+    reference: Annotated[str, typer.Argument(help="The change, or enough of its reference.")],
+    by: ByOption = "",
+) -> None:
+    """Put a carried-out change back as it was."""
+    settings = load_settings()
+    may_decide(pack, by)
+    inbox = connect_inbox(settings, pack)
+    try:
+        item = inbox.get(reference)
+        connector = connect_connectors(settings, pack)[_connector_of(pack, item)]
+        undone = inbox.undo(item.reference, connector, by=by)
+    except (ApprovalError, PackError) as err:
+        raise fail(str(err)) from err
+    typer.secho(f"Undone: {undone.proposal.sentence}", fg=typer.colors.GREEN)

@@ -11,7 +11,16 @@
 
 budgets:
   per_run: 0.50   # one question, however many steps it takes
-  per_day: 20.00  # this pack, every channel, since midnight
+  per_day: 20.00  # this pack, every channel and every scheduled run, since midnight
+
+# Who decides on a proposal, and how long they have. A proposal nobody answers is not a
+# decision waiting to be made; it is a decision nobody is going to make, resting on figures
+# that are getting older. So it expires, and somebody hears about it first.
+approvals:
+  approvers: [joachim]      # on one person's machine, this is the list
+  needed_within_hours: 72   # the deadline a run puts on what it drafts
+  expire_after_days: 14
+  escalate_to: joachim
 
 tools:
   # Reading the warehouse
@@ -27,7 +36,8 @@ tools:
   read_passage: read
   # The team's own notes, through the MCP server in mcp.yaml
   notes__search_notes: read
-  # Changing something outside Vardex. The CRM connector is a file until there is a CRM, and
-  # the level stays at draft until the approval inbox exists: a proposal a person reads is
-  # the most this pack will do on its own.
-  adjust_credit_limit: draft
+  # Changing something outside Vardex. The CRM connector is a file until there is a CRM.
+  # `approve` means this: an agent with somebody at the keyboard may ask them and act; an
+  # agent with nobody there may only draft, and the proposal waits in the inbox until a
+  # person approves it with `vardex approve`. Same level, two ways of being answered.
+  adjust_credit_limit: approve

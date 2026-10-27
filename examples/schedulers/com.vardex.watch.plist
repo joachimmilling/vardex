@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A template for running Vardex's scheduled work on a Mac. launchd, not cron: Apple has
+  called cron deprecated in favour of launchd for twenty years, and launchd is the only one
+  that knows about sleep, logging and per-user agents.
+
+  It asks Vardex every fifteen minutes whether anything is due. Vardex works out the answer
+  from the pack's own schedule and the last run that finished, so firing often is free and
+  missing a fire is survivable. Do not try to make this plist the schedule.
+
+  To use it, replace the two paths and the name, then:
+
+      cp examples/schedulers/com.vardex.watch.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vardex.watch.plist
+      launchctl kickstart -p gui/$(id -u)/com.vardex.watch     # run it now
+      launchctl print gui/$(id -u)/com.vardex.watch            # what it did last
+      launchctl bootout gui/$(id -u)/com.vardex.watch          # stop it
+
+  The job runs as you, with your environment, which is where the API key comes from. A job
+  that reads files under ~/Documents or ~/Desktop needs Full Disk Access for the program it
+  runs — give it to the shell, or keep the pack somewhere else.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vardex.watch</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>vardex</string>
+    <string>run</string>
+    <string>packs/norwegian-companies</string>
+    <string>--if-due</string>
+  </array>
+
+  <!-- The folder the command runs in: the project, so `uv run` finds it. -->
+  <key>WorkingDirectory</key>
+  <string>/Users/CHANGE-ME/Developer/vardex</string>
+
+  <!-- Every fifteen minutes. Vardex decides whether there is anything to do. -->
+  <key>StartInterval</key>
+  <integer>900</integer>
+
+  <!-- Keep what it printed. The run's own file holds the detail; this catches the rest. -->
+  <key>StandardOutPath</key>
+  <string>/Users/CHANGE-ME/Developer/vardex/logs/watch.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/CHANGE-ME/Developer/vardex/logs/watch.err.log</string>
+
+  <!-- Run once at load, so a mistake in this file shows up now rather than on Monday. -->
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

@@ -1,0 +1,65 @@
+# A template for running Vardex's scheduled work on a machine nobody owns.
+#
+# Copy it to .github/workflows/watch.yml in the repository that holds your pack, add
+# ANTHROPIC_API_KEY as a repository secret, and read the four things this scheduler will do
+# to you before you rely on it:
+#
+#   1. The cron is in UTC unless you say otherwise, and `schedule` cannot fire more often
+#      than every five minutes.
+#   2. A scheduled run is queued, not guaranteed. At a busy hour it can be tens of minutes
+#      late, and it is occasionally dropped altogether. Asking every hour and letting Vardex
+#      decide what is due is therefore more reliable than asking once a week at 06:30.
+#   3. In a public repository, scheduled workflows are switched off after 60 days with no
+#      activity. A watch that quietly stopped two months ago is worse than no watch.
+#   4. The runner is new every time, so a run's state has to be somewhere else. Here it is
+#      committed back into the repository, which works for one watch on one machine and is
+#      the wrong answer the moment there are two. Then the state belongs in a database.
+#      `data/` is git-ignored, so un-ignore what you want to keep:
+#          !data/<pack>/runs/   !data/<pack>/state/   !data/<pack>/inbox.jsonl
+name: Weekly company watch
+
+on:
+  schedule:
+    - cron: "0 * * * *" # every hour; Vardex runs only what the pack says is due
+  workflow_dispatch: # and a button, for testing and for catching up
+
+# One run at a time, whatever the schedule does. Vardex has its own lock, but a second
+# runner would still fetch, build and read the feed before finding out.
+concurrency:
+  group: vardex-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: write # to commit the run's state back
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+
+      - name: Run whatever is due
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          VARDEX_DATA_DIR: data
+        run: uv run vardex run packs/norwegian-companies --if-due --json | tee run.json
+
+      - name: Keep the run, the cursor and the inbox
+        if: always()
+        run: |
+          git config user.name "vardex"
+          git config user.email "vardex@users.noreply.github.com"
+          git add data/norwegian-companies/runs data/norwegian-companies/state \
+                  data/norwegian-companies/inbox.jsonl 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "Weekly watch: $(date -u +%FT%TZ)"
+          git push
+
+      # A run that stopped or failed exits 1, so the job goes red and somebody is told.
+      # A run that was not due exits 0 and says so.
+      - name: Say what is waiting for a person
+        if: always()
+        run: uv run vardex inbox packs/norwegian-companies --overdue

@@ -8,6 +8,7 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from string import Formatter
 
 import httpx2
 import pytest
@@ -30,6 +31,7 @@ from vardex.extraction import load_extraction
 from vardex.permissions import load_permissions
 from vardex.semantic import check, load_knowledge
 from vardex.warehouse import build
+from vardex.workflows import check_workflow, load_workflows
 
 PACK = Path(__file__).parent.parent / "packs" / "norwegian-companies"
 NOW = datetime(2026, 10, 5, 7, 0, tzinfo=UTC)
@@ -41,12 +43,21 @@ konkurs,underAvvikling,sisteInnsendteAarsregnskap
 100000008,DEMO LAKS AS,AS,03.211,120,4601,BERGEN,2001-05-02,false,false,false,2025
 100000016,DEMO DATA AS,AS,62.200,300,0301,OSLO,1990-01-15,false,false,false,2025
 100000024,DEMO ARKTIS AS,AS,00.000,,2100,SVALBARD,2019-03-01,false,false,false,
+100000032,DEMO BYGG AS,AS,62.200,60,0301,OSLO,2015-06-01,false,true,false,2025
 """
 
 
-def filing(filing_id: int, kind: str, year: int, currency: str, revenue: int, profit: int):
+def filing(
+    filing_id: int,
+    kind: str,
+    year: int,
+    currency: str,
+    revenue: int,
+    profit: int,
+    equity: int | None = None,
+):
     """One set of accounts as the accounts register's API returns it, trimmed to what the
-    pack reads."""
+    pack reads. Equity defaults to a year's revenue, which is healthy and dull."""
     return {
         "id": filing_id,
         "journalnr": f"{year + 1}{filing_id:06d}",
@@ -55,7 +66,9 @@ def filing(filing_id: int, kind: str, year: int, currency: str, revenue: int, pr
         "valuta": currency,
         "regnkapsprinsipper": {"regnskapsregler": "regnskapslovenAlminneligRegler"},
         "eiendeler": {"sumEiendeler": 3 * revenue},
-        "egenkapitalGjeld": {"egenkapital": {"sumEgenkapital": revenue}},
+        "egenkapitalGjeld": {
+            "egenkapital": {"sumEgenkapital": revenue if equity is None else equity}
+        },
         "resultatregnskapResultat": {
             "aarsresultat": profit // 2,
             "driftsresultat": {
@@ -77,12 +90,23 @@ def accounts(*rows: tuple[str, int, list | None]) -> str:
 LAST_WEEK = accounts(
     ("923609016", 200, [filing(7192429, "KONSERN", 2025, "USD", 106_462_000_000, 1)]),
     ("100000008", 200, [filing(500, "SELSKAP", 2025, "NOK", 1_480_312_000, 353_655_000)]),
+    # Demo Bygg AS: three bad years, and the register has now registered it as bankrupt
+    (
+        "100000032",
+        200,
+        [filing(600, "SELSKAP", 2025, "NOK", 84_000_000, -31_000_000, equity=-12_400_000)],
+    ),
 )
 TODAY = accounts(
     ("923609016", 200, [filing(7192429, "KONSERN", 2025, "USD", 106_462_000_000, 1)]),
     # Demo Laks AS filed corrected accounts for 2025 this week: the newest filing wins
     ("100000008", 200, [filing(501, "SELSKAP", 2025, "NOK", 1_480_312_000, 350_000_000)]),
     ("100000016", 500, None),
+    (
+        "100000032",
+        200,
+        [filing(600, "SELSKAP", 2025, "NOK", 84_000_000, -31_000_000, equity=-12_400_000)],
+    ),
 )
 INDUSTRIES = {
     "codes": [
@@ -162,12 +186,21 @@ def rows(warehouse: Path, sql: str) -> list[tuple]:
         connection.close()
 
 
+def columns_of(warehouse: Path, sql: str) -> list[str]:
+    connection = DuckDBWarehouse(warehouse)
+    try:
+        return connection.run(sql, max_rows=1).columns
+    finally:
+        connection.close()
+
+
 def test_companies_get_counties_and_svalbard(warehouse):
     sql = "select orgnr, county, industry_code from dim_companies order by orgnr"
     assert rows(warehouse, sql) == [
         ("100000008", "Vestland", "03.211"),
         ("100000016", "Oslo", "62.200"),  # the name valid today, without the Sami form
         ("100000024", "Svalbard", None),  # 00.000 means "not stated"
+        ("100000032", "Oslo", "62.200"),
         ("923609016", "Rogaland", "06.100"),
     ]
 
@@ -178,9 +211,10 @@ def test_the_newest_filing_wins_and_keeps_when_it_was_first_seen(warehouse):
                first_seen_at
         from fct_accounts order by orgnr
     """
-    laks, equinor = rows(warehouse, sql)
+    laks, bygg, equinor = rows(warehouse, sql)
     assert laks[:6] == ("100000008", 2025, "company", "NOK", 1480312000, 350000000)
     assert laks[6] == datetime(2026, 10, 5, 6, 0)  # the corrected filing arrived today
+    assert bygg[:6] == ("100000032", 2025, "company", "NOK", 84000000, -31000000)
     assert equinor[2:4] == ("group", "USD")
     assert equinor[6] == datetime(2026, 9, 28, 6, 0)
 
@@ -189,6 +223,7 @@ def test_amounts_are_converted_to_nok(warehouse):
     sql = "select orgnr, nok_per_unit, revenue_nok from fct_accounts order by orgnr"
     assert rows(warehouse, sql) == [
         ("100000008", 1, 1480312000),
+        ("100000032", 1, 84000000),
         ("923609016", Decimal("10.5"), 1117851000000),  # USD 106,462 million at 10.5
     ]
     sek = "select nok_per_unit from stg_exchange_rates where currency = 'SEK'"
@@ -214,7 +249,7 @@ def test_every_metric_has_a_value(warehouse):
     sql = "select sum(operating_profit) / nullif(sum(revenue), 0) from fct_accounts"
     sql += " where currency = 'NOK' and accounts_type = 'company'"
     [(margin,)] = rows(warehouse, sql)
-    assert round(margin, 3) == 0.236
+    assert round(margin, 3) == 0.204  # Demo Bygg's bad year drags the whole pack's margin down
 
 
 def test_every_column_is_documented(warehouse):
@@ -255,6 +290,49 @@ def test_every_golden_set_is_fit_to_measure_with(warehouse):
         for case in suite.cases:
             if case.sql:
                 rows(warehouse, case.sql)  # every reference query runs on the pack's tables
+
+
+def test_the_watch_finds_the_company_whose_equity_went_negative(warehouse):
+    """The find step is the pack's own judgement about what a person should look at, so it is
+    worth a test of its own: on this data it must pick out Demo Bygg and nothing else."""
+    from vardex.workflows import FindStep
+
+    [step] = [s for s in load_workflows(PACK)[0].steps if isinstance(s, FindStep)]
+    found = rows(warehouse, step.sql)
+    assert [(row[0], row[1]) for row in found] == [("100000032", "DEMO BYGG AS")]
+    assert found[0][2] == "The register has it as bankrupt."
+
+
+def test_the_pack_declares_a_weekly_watch_that_can_actually_run(warehouse):
+    knowledge = load_knowledge(PACK)
+    workflows = load_workflows(PACK)
+    assert [spec.name for spec in workflows] == ["weekly-watch"]
+    watch = workflows[0]
+    assert watch.schedule and watch.schedule.timezone == "Europe/Oslo"
+    assert check_workflow(watch, knowledge, load_permissions(PACK)) == []
+    # Every step's SQL runs on the pack's own tables, not only in sqlglot's opinion
+    for step in watch.steps:
+        for sql in (getattr(step, "sql", None), getattr(step, "follow", None)):
+            if sql:
+                rows(warehouse, sql)
+
+
+def test_the_watch_asks_for_figures_the_find_step_actually_returns(warehouse):
+    """The question's placeholders are filled from the case, so a name that is not a column
+    is a run that fails at half past six on a Monday. It is cheaper to catch it here."""
+    from vardex.workflows import BriefStep, FindStep
+
+    watch = load_workflows(PACK)[0]
+    columns = {
+        name
+        for step in watch.steps
+        if isinstance(step, FindStep)
+        for name in columns_of(warehouse, step.sql)
+    }
+    for step in watch.steps:
+        if isinstance(step, BriefStep):
+            wanted = {name for _, name, _, _ in Formatter().parse(step.question) if name}
+            assert wanted <= columns | {"key", "label", "reason"}, step.id
 
 
 def test_every_document_is_about_a_company_by_its_organisation_number():

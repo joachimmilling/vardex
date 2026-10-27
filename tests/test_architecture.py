@@ -76,3 +76,16 @@ def test_a_channel_holds_no_logic_of_its_own():
         text = (ENGINE / name).read_text(encoding="utf-8")
         for word in gate:
             assert word not in text, f"{name} looks like it decides permissions itself"
+
+
+def test_only_two_places_carry_a_change_out():
+    """A change to the world outside Vardex happens in exactly two places: the action tool,
+    when somebody is at the keyboard to say yes, and the approval, when they said yes later.
+    A third caller of a connector would be a way round the inbox, and the inbox is the record
+    anybody asking "who agreed to this?" is going to be shown."""
+    for file in ENGINE.rglob("*.py"):
+        if file.name in ("actions.py", "approvals.py"):
+            continue
+        text = file.read_text(encoding="utf-8")
+        for way in ("connector.carry_out(", "connector.undo("):
+            assert way not in text, f"{file.name} changes the outside world itself"
