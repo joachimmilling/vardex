@@ -30,6 +30,18 @@ All notable changes to Vardex are recorded here. The format follows
 
 ### Fixed
 
+- A workflow run that hits a bug is recorded as `failed`, with the error, before the error is
+  raised. It used to stay `running` in its file for ever.
+- The tools a model is offered are part of a recorded request's fingerprint, so a changed
+  tool description makes a replay fail instead of passing on an answer to another question.
+  The agent suite's recording is made again to match.
+- A recorded workflow run leaves out MCP servers as well as documents, since neither is in
+  the recording, and a replay runs in the period it was recorded in, so the proposals'
+  references are the ones the model was shown.
+- The weekly watch proposes a limit of 0 for a company the register has as bankrupt, with or
+  without accounts, and the `reason` of a credit-limit change is asked for as the rest of a
+  sentence after "because".
+- The launchd template says where to find `uv`, which launchd will not look up on the PATH.
 - A warehouse or index shared between threads is used by one at a time. Four cases looked
   into at once over one PostgreSQL index failed with `OutOfOrderTransactionNesting`, and a
   turn's tool calls running side by side could do the same.

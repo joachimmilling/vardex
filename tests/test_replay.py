@@ -185,3 +185,16 @@ def test_a_search_is_recorded_and_replayed_with_no_index_and_no_model(tmp_path):
     assert sum('"passage":' in line for line in lines) == 3  # each passage once
     with pytest.raises(NotRecorded, match="not embedded"):
         search(ReplayIndex(loaded), ReplayEmbedder(loaded), "gas")
+
+
+def test_a_changed_tool_description_is_a_different_request():
+    from vardex.llm import Message, Request, ToolSpec
+    from vardex.replay import request_key
+
+    def asking(description: str) -> Request:
+        tool = ToolSpec("run_sql", description, {"type": "object", "properties": {}})
+        return Request(system="s", messages=[Message("user", "q")], tools=(tool,))
+
+    plain = Request(system="s", messages=[Message("user", "q")])
+    assert request_key("m", asking("Run SQL.")) != request_key("m", asking("Run one query."))
+    assert request_key("m", plain) != request_key("m", asking("Run SQL."))

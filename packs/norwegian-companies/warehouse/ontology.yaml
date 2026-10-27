@@ -55,7 +55,8 @@ actions:
       - name: reason
         description: >-
           Why, in one sentence a credit controller can check: name the figures it rests on
-          and the year they are from.
+          and the year they are from. It follows the word "because", so start it in lower
+          case (unless it starts with a name) and leave out the full stop.
         type: text
       - name: urgency
         description: normal for the next review, urgent to be looked at today.

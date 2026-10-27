@@ -426,11 +426,22 @@ def is_due(spec: WorkflowSpec, store: RunStore, now: datetime | None = None) -> 
     return since < spec.schedule.due_before(moment)
 
 
-def start(spec: WorkflowSpec, connections: Connections, *, trigger: str, dry_run: bool) -> Run:
+def start(
+    spec: WorkflowSpec,
+    connections: Connections,
+    *,
+    trigger: str,
+    dry_run: bool,
+    period_of: datetime | None = None,
+) -> Run:
     """A new run, with a step for each of the workflow's steps, saved before anything runs.
 
     Saved first, on purpose. A run that dies in its first step has still left a file saying
     what it was trying to do, and that file is the only evidence anybody will have.
+
+    The period names the piece of work, and every proposal's reference is made from it.
+    `period_of` is for a replay, which has to be the period it was recorded in: next
+    week's references would be new ones, and the model was never shown them.
     """
     run = Run(
         id=new_run_id(spec.name),
@@ -441,7 +452,7 @@ def start(spec: WorkflowSpec, connections: Connections, *, trigger: str, dry_run
         dry_run=dry_run,
         steps=[Step(id=step.id, uses=step.uses) for step in spec.steps],
     )
-    run.facts["period"] = spec.period(datetime.now(UTC))
+    run.facts["period"] = spec.period(period_of or datetime.now(UTC))
     connections.store.save(run)
     return run
 
@@ -492,6 +503,12 @@ def run_workflow(
         except (WorkflowError, QueryError, PackError, ModelError, OSError) as err:
             _end(run, record, "failed", "failed", str(err), connections, spec, on_step)
             return run
+        except Exception as err:
+            # A bug, not a failure the pack can do anything about. It is still recorded, so
+            # the run's file does not say "running" for ever, and then raised in full.
+            reason = f"{type(err).__name__}: {err}"
+            _end(run, record, "failed", "failed", reason, connections, spec, on_step)
+            raise
         record.state = "done"
         record.ended_at = now_text()
         connections.store.save(run)

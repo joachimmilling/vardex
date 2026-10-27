@@ -58,6 +58,13 @@ def request_key(model: str, request: Request) -> str:
             "cache": [request.cache_system, request.cache_conversation],
             # A request without a tail keeps the key it had before tails existed
             **({"system_tail": request.system_tail} if request.system_tail else {}),
+            # The tools are part of what the model is told: a changed description changes the
+            # answer, so it changes the key. A request without tools keeps its old key.
+            **(
+                {"tools": [[t.name, t.description, t.schema] for t in request.tools]}
+                if request.tools
+                else {}
+            ),
         }
     )
 

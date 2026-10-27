@@ -397,6 +397,21 @@ def test_a_run_that_stops_on_its_budget_is_stopped_not_failed(tmp_path):
     assert (tmp_path / "reports" / f"{run.id}.md").is_file()
 
 
+def test_a_run_that_hits_a_bug_is_recorded_as_failed_and_the_bug_is_raised(tmp_path):
+    class Broken(FakeModel):
+        def send(self, request, on_text=None):
+            raise RuntimeError("a driver fell over")
+
+    connections, _ = wire(tmp_path, Broken())
+    workflow = spec()
+    run = start(workflow, connections, trigger="schedule", dry_run=False)
+    with pytest.raises(RuntimeError, match="a driver fell over"):
+        run_workflow(workflow, run, connections)
+    saved = connections.store.load(run.id)
+    assert saved.state == "failed"  # not "running" for ever
+    assert "RuntimeError: a driver fell over" in saved.note
+
+
 def test_a_run_stopped_by_its_budget_is_finished_when_the_budget_is_raised(tmp_path):
     from vardex.budgets import Budget
 
@@ -749,3 +764,12 @@ def test_a_recorded_feed_read_replays_without_the_network(tmp_path):
     moved.marks.set("changes", "99999")
     with pytest.raises(NotRecorded, match="which the recording does not have"):
         run_workflow(watching(), start(watching(), moved, trigger="manual", dry_run=False), moved)
+
+
+def test_a_run_can_be_started_in_the_period_it_was_recorded_in(tmp_path):
+    connections, _ = wire(tmp_path, FakeModel(note()))
+    workflow = spec()
+    recorded = datetime(2026, 1, 7, 12, tzinfo=UTC)  # a Wednesday in week 2
+    run = start(workflow, connections, trigger="manual", dry_run=False, period_of=recorded)
+    # Not this week's: the proposals' references are made from the period
+    assert run.facts["period"] == workflow.period(recorded) != workflow.period(datetime.now(UTC))

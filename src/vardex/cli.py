@@ -1875,7 +1875,9 @@ def connect_workflow(
     name = load_pack(pack).name
     sessions = (
         []
-        if replay  # a replayed run talks to nothing outside, not even an MCP server
+        # A replayed run talks to nothing outside, not even an MCP server, and a recorded
+        # run leaves them out too: their answers are not recorded, so could not be replayed.
+        if record or replay
         else [
             stack.enter_context(McpSession(server, environment=dict(os.environ)))
             for server in load_mcp_servers(pack).servers
@@ -2043,7 +2045,15 @@ def run_one_workflow(
             record=record,
             replay=replay,
         )
-        run = earlier or start(spec, connections, trigger=trigger, dry_run=dry_run)
+        # A replay runs in the period it was recorded in, whatever today is
+        recorded = (
+            datetime.fromisoformat(recording.recorded_on).replace(hour=12, tzinfo=UTC)
+            if replay and recording is not None
+            else None
+        )
+        run = earlier or start(
+            spec, connections, trigger=trigger, dry_run=dry_run, period_of=recorded
+        )
         done = run_workflow(
             spec,
             run,
