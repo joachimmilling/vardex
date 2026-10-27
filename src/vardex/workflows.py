@@ -492,6 +492,12 @@ def run_workflow(
         except (WorkflowError, QueryError, PackError, ModelError, OSError) as err:
             _end(run, record, "failed", "failed", str(err), connections, spec, on_step)
             return run
+        except Exception as err:
+            # A bug, not a failure the pack can do anything about. It is still recorded, so
+            # the run's file does not say "running" for ever, and then raised in full.
+            reason = f"{type(err).__name__}: {err}"
+            _end(run, record, "failed", "failed", reason, connections, spec, on_step)
+            raise
         record.state = "done"
         record.ended_at = now_text()
         connections.store.save(run)
