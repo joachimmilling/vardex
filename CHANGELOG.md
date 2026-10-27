@@ -6,6 +6,11 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- An action's sentence no longer ends in two full stops when the model ends a field, such as
+  the reason, with one of its own.
+
 ## [0.9.0] - 2026-10-27
 
 ### Added
