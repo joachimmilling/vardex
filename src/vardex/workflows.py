@@ -31,7 +31,9 @@ the approval — a separate command, run by a human being — makes the change.
 """
 
 import json
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -43,6 +45,7 @@ import httpx2
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from vardex.agent import MAX_STEPS, run_agent
+from vardex.agent import Run as AgentRun
 from vardex.approvals import Inbox, Item
 from vardex.events import FeedSpec, read_feed
 from vardex.llm import ModelClient, ModelError, ToolCall
@@ -60,6 +63,7 @@ STATE_DIR = "state"
 NAME = r"^[a-z0-9]+(-[a-z0-9]+)*$"
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 MAX_CASES = 50  # one run looks into this many cases at most, however many the SQL found
+MAX_WORKERS = 4  # cases looked into at the same time; beyond this the provider is the limit
 
 
 class Schedule(BaseModel):
@@ -181,6 +185,9 @@ class BriefStep(BaseModel):
     propose: str | None = None  # the action it may draft, by its name in the ontology
     max_steps: int = Field(default=MAX_STEPS, ge=1, le=40)
     cases: int = Field(default=MAX_CASES, ge=1, le=500)  # at most this many per run
+    # Cases looked into at the same time. They are independent — one company each — so this
+    # is wall-clock for free, up to the point where the rate limit answers instead.
+    workers: int = Field(default=1, ge=1, le=MAX_WORKERS)
 
 
 class ReportStep(BaseModel):
@@ -218,6 +225,10 @@ class WorkflowSpec(BaseModel):
         """The piece of work this moment belongs to. A workflow with no schedule is its own
         period every time, because nobody can say what a run by hand is one of."""
         return self.schedule.period(when) if self.schedule else when.strftime("%Y-%m-%dT%H%M%S")
+
+
+# Cases may be looked into in threads, and the journal is one dictionary shared between them.
+JOURNAL = threading.Lock()
 
 
 class WorkflowError(Exception):
@@ -639,7 +650,8 @@ def journalled(box: Toolbox, run: Run) -> Toolbox:
 
     def run_once(call: ToolCall) -> ToolResult:
         key = call_key(call.name, call.arguments)
-        remembered = run.journal.get(key)
+        with JOURNAL:
+            remembered = run.journal.get(key)
         if remembered is not None:
             return ToolResult(
                 content=remembered["content"] + "\n(Done by an earlier attempt at this run.)",
@@ -648,7 +660,8 @@ def journalled(box: Toolbox, run: Run) -> Toolbox:
             )
         result = original(call)
         if result.wrote or (result.structured or {}).get("state") == "proposed":
-            run.journal[key] = {"content": result.content, "structured": result.structured}
+            with JOURNAL:
+                run.journal[key] = {"content": result.content, "structured": result.structured}
         return result
 
     box.run = run_once  # type: ignore[method-assign]
@@ -664,7 +677,11 @@ def _brief(
     *,
     on_call: Callable[[ToolCall, ToolResult], None] | None = None,
 ) -> None:
-    """Look into each case with the agent, one at a time, saving after every one."""
+    """Look into each case with the agent, saving the run after every one of them.
+
+    One case at a time unless the pack asks for more, which it may because the cases are
+    independent: one company each.
+    """
     cases = [Case(**case) for case in run.facts.get("cases", [])][: step.cases]
     if not cases:
         record.note = "nothing to look into"
@@ -675,10 +692,12 @@ def _brief(
     period = run.facts.get("period", "")
     hours = connections.permissions.approvals.needed_within_hours
     spent = Decimal(record.cost_usd)
-    for case in cases:
-        done = f"{step.id}:{case.key}"
-        if done in run.journal:
-            continue  # this case was finished by an earlier attempt
+    todo = [case for case in cases if f"{step.id}:{case.key}" not in run.journal]
+
+    def look_into(case: Case) -> tuple[Case, AgentRun]:
+        """One case, in whatever thread. It touches the run only through the journal, which
+        has a lock of its own; everything else is written back by the thread that started
+        this one."""
         context = {
             "run": run.id,
             "step": step.id,
@@ -691,7 +710,7 @@ def _brief(
             "needed_by": (datetime.now(UTC) + timedelta(hours=hours)).isoformat(timespec="seconds"),
         }
         box = journalled(connections.toolbox(context), run)
-        answer = run_agent(
+        return case, run_agent(
             connections.client,
             box,
             case.filled(step.question),
@@ -699,6 +718,8 @@ def _brief(
             max_steps=step.max_steps,
             on_call=on_call,
         )
+
+    for case, answer in _look_into_each(todo, look_into, step.workers):
         run.spend(answer.cost_usd)
         spent += answer.cost_usd or Decimal(0)
         record.cost_usd = str(spent)
@@ -716,7 +737,7 @@ def _brief(
             reference = (result.structured or {}).get("reference")
             if reference and not result.is_error and reference not in proposals:
                 proposals.append(str(reference))
-        run.journal[done] = {
+        run.journal[f"{step.id}:{case.key}"] = {
             "steps": len(answer.steps),
             "cost_usd": str(answer.cost_usd) if answer.cost_usd else None,
             "stop": answer.stop,
@@ -726,6 +747,26 @@ def _brief(
     record.note = f"{len(notes)} note(s), {len(proposals)} proposal(s)" + (
         f", {len(failures)} case(s) failed" if failures else ""
     )
+
+
+def _look_into_each(
+    cases: list[Case],
+    look_into: Callable[[Case], tuple[Case, AgentRun]],
+    workers: int,
+) -> Iterator[tuple[Case, AgentRun]]:
+    """Each case's answer, in the order the cases came, however many threads did the work.
+
+    One at a time unless the pack asks for more. With more, the cases run in a pool and the
+    answers arrive here, in the thread that started them, in the order the `find` step put
+    them in — so the run's file is written from one thread and reads the same as a run that
+    was not in a hurry. A case that raises is raised here, after the ones before it have
+    been recorded.
+    """
+    if workers < 2 or len(cases) < 2:
+        yield from (look_into(case) for case in cases)
+        return
+    with ThreadPoolExecutor(max_workers=min(workers, len(cases))) as pool:
+        yield from pool.map(look_into, cases)
 
 
 def _report(

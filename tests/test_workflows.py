@@ -573,3 +573,74 @@ def test_a_second_run_reads_the_feed_from_where_the_first_one_stopped(tmp_path):
     )
     assert second.facts["changed"] == []  # nothing new since the cursor
     assert second.facts["cases"] == []
+
+
+# --- cases at the same time ------------------------------------------------------------
+
+
+def test_cases_are_looked_into_at_the_same_time_and_recorded_in_order(tmp_path):
+    import time
+
+    class Slow(FakeModel):
+        def send(self, request, on_text=None):
+            time.sleep(0.2)
+            return super().send(request, on_text)
+
+    connections, _ = wire(tmp_path, Slow(note("first"), note("second")))
+    workflow = spec(
+        steps=[
+            WORKFLOW["steps"][0],
+            dict(WORKFLOW["steps"][1]) | {"workers": 2},
+            WORKFLOW["steps"][2],
+        ]
+    )
+    started = time.monotonic()
+    run = run_workflow(
+        workflow, start(workflow, connections, trigger="manual", dry_run=False), connections
+    )
+    assert run.state == "done"
+    assert time.monotonic() - started < 0.38  # two 0.2 s cases, not 0.4 s of them
+    # The cases are written back in the order the find step put them in, whoever finished first
+    assert list(run.facts["notes"]) == [case["key"] for case in run.facts["cases"]]
+
+
+def test_one_cap_holds_however_many_threads_are_asking(tmp_path):
+    """Two calls in flight at once must not both be told there is room for the last one."""
+    import threading
+    import time
+    from decimal import Decimal
+
+    from vardex.budgets import Budget, BudgetError
+    from vardex.permissions import Budgets
+
+    inside = threading.Event()
+
+    class Slow(FakeModel):
+        def send(self, request, on_text=None):
+            inside.set()
+            time.sleep(0.2)
+            return super().send(request, on_text)
+
+    # Room for one call's worst case and not two
+    budget = Budget(Slow("one", "two"), caps=Budgets(per_run=Decimal("0.05")))
+    refused: list[Exception] = []
+
+    def ask():
+        try:
+            budget.send(a_request())
+        except BudgetError as err:
+            refused.append(err)
+
+    first = threading.Thread(target=ask)
+    first.start()
+    inside.wait(1)
+    ask()  # the second asks while the first is still in flight
+    first.join()
+    assert len(refused) == 1
+    assert "could cost up to" in str(refused[0])
+
+
+def a_request():
+    from vardex.llm import Message, Request
+
+    return Request(system="x" * 200, messages=[Message("user", "y" * 200)], max_tokens=4096)

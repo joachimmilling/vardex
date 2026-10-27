@@ -6,6 +6,14 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A `brief` step may look into several cases at the same time (`workers`, at most four). The
+  answers are written back in the order the `find` step put the cases in, so the run's file
+  reads the same however many threads did the work. `Budget` sets aside each call's worst
+  case while it is in flight, under a lock, so one cap holds however many threads ask, and
+  the journal has a lock of its own.
+
 ### Fixed
 
 - An action's sentence no longer ends in two full stops when the model ends a field, such as
