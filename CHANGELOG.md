@@ -22,6 +22,11 @@ All notable changes to Vardex are recorded here. The format follows
   key, no network and no warehouse, failing loudly when the recording does not cover what
   the run asks for. Recorded and replayed runs leave the documents out. CI replays the
   weekly watch into a throwaway data folder.
+- `vardex runs PACK --stats`: how each workflow has been doing. How many cadences since a
+  run last finished; the states of the last runs; the median and worst cost and the median
+  duration; and the proposals drafted, waiting, done, rejected and expired, with the share
+  agreed to. `--json` gives the same figures, from `workflows.Health`. It exits 1 when a
+  workflow has been silent for more than one cadence.
 
 ### Fixed
 

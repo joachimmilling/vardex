@@ -105,6 +105,7 @@ from vardex.workflows import (
     WorkflowError,
     WorkflowSpec,
     check_workflow,
+    health,
     is_due,
     live_feed,
     load_workflow,
@@ -2162,11 +2163,17 @@ def runs_command(
     run_id: Annotated[str | None, typer.Argument(help="One run, by its id.")] = None,
     workflow: Annotated[str | None, typer.Option(help="Only this workflow's runs.")] = None,
     limit: Annotated[int, typer.Option(help="How many to list.")] = 10,
+    stats: Annotated[
+        bool, typer.Option("--stats", help="How each workflow has been doing, not what it did.")
+    ] = False,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """List the pack's recent runs, or show one of them."""
+    """List the pack's recent runs, show one of them, or say how the pack is doing."""
     settings = load_settings()
     store = RunStore(runs_path(settings.data_dir, load_pack(pack).name))
+    if stats:
+        show_health(pack, settings, store, limit=limit, as_json=as_json)
+        return
     try:
         if run_id:
             run = store.load(run_id)
@@ -2231,6 +2238,49 @@ def schedule_command(
             f"{row['workflow']:<16} {row['schedule']:<34} "
             f"last {row['last_done'] or 'never':<22} {mark}"
         )
+
+
+def show_health(
+    pack: Path, settings: Settings, store: RunStore, *, limit: int, as_json: bool
+) -> None:
+    """Print how each of the pack's workflows has been doing, newest numbers first.
+
+    The first line of each is whether it has run at all lately. Everything else on the
+    screen is interesting; that line is the one that matters, because a monitor that has
+    quietly stopped looks exactly like a monitor with nothing to report.
+    """
+    inbox = connect_inbox(settings, pack)
+    try:
+        rows = [health(spec, store, inbox, limit=limit) for spec in load_workflows(pack)]
+    except PackError as err:
+        raise (fail_json(err) if as_json else fail(str(err))) from err
+    if as_json:
+        ok_json({"workflows": [row.as_dict() for row in rows]})
+        return
+    quiet = False
+    for row in rows:
+        if row.quiet:
+            quiet = True
+            typer.secho(
+                f"{row.workflow}: nothing has finished for {row.silent_for} cadences. "
+                "It is not running.",
+                fg=typer.colors.RED,
+            )
+        else:
+            typer.secho(f"{row.workflow}: last ran within its cadence", fg=typer.colors.GREEN)
+        states = ", ".join(f"{count} {state}" for state, count in sorted(row.states.items()))
+        typer.echo(f"  {row.runs} run(s): {states or 'none yet'}")
+        typer.echo(
+            f"  cost: ${row.median_cost:.4f} median, ${row.worst_cost:.4f} worst · "
+            f"{row.median_seconds:.0f} s median"
+        )
+        agreed = "—" if row.agreed is None else f"{row.agreed:.0%}"
+        typer.echo(
+            f"  proposals: {row.drafted} drafted, {row.waiting} waiting, {row.done} done, "
+            f"{row.rejected} rejected, {row.expired} expired · agreed {agreed}"
+        )
+    if quiet:
+        raise typer.Exit(code=1)
 
 
 def item_as_json(item: Item) -> dict[str, Any]:

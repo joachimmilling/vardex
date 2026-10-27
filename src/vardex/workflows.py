@@ -932,6 +932,131 @@ def digest(
     return "\n".join(lines)
 
 
+def median(values: list[Decimal]) -> Decimal:
+    """The middle value, or the lower of the two middles. Not the mean: one nine-step run
+    would drag that up and tell you nothing about a normal week."""
+    if not values:
+        return Decimal(0)
+    ordered = sorted(values)
+    return ordered[(len(ordered) - 1) // 2]
+
+
+def seconds_of(run: Run) -> float:
+    """How long a run took, from its own stamps. Zero when it has not finished."""
+    if not run.started_at or not run.ended_at:
+        return 0.0
+    try:
+        started = datetime.fromisoformat(run.started_at)
+        ended = datetime.fromisoformat(run.ended_at)
+    except ValueError:
+        return 0.0
+    return (ended - started).total_seconds()
+
+
+@dataclass
+class Health:
+    """How a workflow has been doing, as a few numbers a person can read in one line.
+
+    The first field is the one that matters. A monitor that stopped running produces no
+    output, no error and no alert — it looks exactly like a quiet week — so something has to
+    ask the question "when did this last work?" out loud, and that something is here.
+    """
+
+    workflow: str
+    silent_for: float | None  # cadences since the last run that finished; None with no schedule
+    runs: int
+    states: dict[str, int]
+    median_cost: Decimal
+    worst_cost: Decimal
+    median_seconds: float
+    drafted: int
+    waiting: int
+    done: int
+    rejected: int
+    expired: int
+
+    @property
+    def quiet(self) -> bool:
+        """True when more than one cadence has passed since a run finished."""
+        return self.silent_for is not None and self.silent_for > 1.0
+
+    @property
+    def agreed(self) -> float | None:
+        """The share of answered proposals that were agreed to. None when none were answered.
+
+        Worth watching rather than celebrating. Near zero means the `find` step is wrong;
+        near one, every week, usually means nobody is really reading them."""
+        answered = self.done + self.rejected
+        return self.done / answered if answered else None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "workflow": self.workflow,
+            "silent_for": self.silent_for,
+            "quiet": self.quiet,
+            "runs": self.runs,
+            "states": self.states,
+            "median_cost_usd": str(self.median_cost),
+            "worst_cost_usd": str(self.worst_cost),
+            "median_seconds": round(self.median_seconds, 1),
+            "proposals": {
+                "drafted": self.drafted,
+                "waiting": self.waiting,
+                "done": self.done,
+                "rejected": self.rejected,
+                "expired": self.expired,
+            },
+            "agreed": self.agreed,
+        }
+
+
+def health(
+    spec: WorkflowSpec,
+    store: RunStore,
+    inbox: Inbox,
+    *,
+    limit: int = 20,
+    now: datetime | None = None,
+) -> Health:
+    """What the last few runs of one workflow say about how it is doing."""
+    moment = now or datetime.now(UTC)
+    runs = store.recent(limit=limit, workflow=spec.name)
+    states: dict[str, int] = {}
+    for run in runs:
+        states[run.state] = states.get(run.state, 0) + 1
+    costs = [run.spent for run in runs]
+    silent = None
+    last = store.last_done(spec.name)
+    if spec.schedule is not None:
+        cadence = (
+            spec.schedule.next_after(moment) - spec.schedule.due_before(moment)
+        ).total_seconds()
+        since = (
+            (moment - datetime.fromisoformat(last.started_at)).total_seconds()
+            if last and last.started_at
+            else None
+        )
+        silent = round(since / cadence, 2) if since is not None else float("inf")
+    mine = [item for item in inbox.items() if item.proposal.action]
+    by_state: dict[str, int] = {}
+    for item in mine:
+        by_state[item.state] = by_state.get(item.state, 0) + 1
+    return Health(
+        workflow=spec.name,
+        silent_for=silent,
+        runs=len(runs),
+        states=states,
+        median_cost=median(costs),
+        worst_cost=max(costs) if costs else Decimal(0),
+        median_seconds=float(median([Decimal(str(seconds_of(run))) for run in runs])),
+        drafted=len(mine),
+        waiting=by_state.get("proposed", 0),
+        done=by_state.get("done", 0) + by_state.get("undone", 0),
+        rejected=by_state.get("rejected", 0),
+        expired=by_state.get("expired", 0),
+    )
+
+
 def reports_path(data_dir: Path, pack: str) -> Path:
     return data_dir / pack / REPORT_DIR
 
