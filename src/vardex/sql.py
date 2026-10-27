@@ -4,12 +4,32 @@ Everything in Vardex that queries data goes through a Warehouse. Only the module
 implement one for a database import that database's driver.
 """
 
+import functools
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol
 
 import sqlglot
 from sqlglot import exp
+
+
+def one_at_a_time[F: Callable[..., Any]](method: F) -> F:
+    """For a method that uses a connection two threads must not use at once.
+
+    A database connection is one conversation with the server: two threads talking over it
+    at the same time interleave their statements and transactions, and the driver fails in
+    ways that look nothing like the cause. The agent runs a turn's tool calls side by side
+    and a workflow its cases, so a warehouse or an index is shared between threads. The
+    object keeps a `gate`, an RLock, and every method that talks to the server holds it.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self.gate:
+            return method(self, *args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
 
 
 class QueryError(Exception):

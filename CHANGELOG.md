@@ -20,6 +20,9 @@ All notable changes to Vardex are recorded here. The format follows
 
 ### Fixed
 
+- A warehouse or index shared between threads is used by one at a time. Four cases looked
+  into at once over one PostgreSQL index failed with `OutOfOrderTransactionNesting`, and a
+  turn's tool calls running side by side could do the same.
 - An action's sentence no longer ends in two full stops when the model ends a field, such as
   the reason, with one of its own.
 
