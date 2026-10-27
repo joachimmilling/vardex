@@ -1,9 +1,10 @@
 """Record and replay: a run's model answers, query results and searches, saved and played back.
 
-A recording is taken at Vardex's own interfaces: ModelClient and Warehouse, and for documents
-Embedder, Reranker and Index. It holds Vardex's words only: no API key, no provider's wire
-format, no database driver. A replay needs no key, no warehouse, no index and no embedding
-model, costs nothing and gives the same answers every time.
+A recording is taken at Vardex's own interfaces: ModelClient and Warehouse, for documents
+Embedder, Reranker and Index, and for scheduled work the change feed. It holds Vardex's words
+only: no API key, no provider's wire format, no database driver. A replay needs no key, no
+warehouse, no index, no embedding model and no network, costs nothing and gives the same
+answers every time.
 
 A replayed request must match a recorded one exactly. Anything else means a prompt, the pack,
 the code that builds a request or the model has changed since the recording, and the run must
@@ -23,6 +24,7 @@ from typing import Any
 
 from vardex.documents import DocumentSpec
 from vardex.embeddings import Embedder, Reranker, Vector
+from vardex.events import Batch, Event, FeedSpec
 from vardex.llm import Answer, ModelClient, Reasoning, Request, ToolCall
 from vardex.pricing import Usage
 from vardex.retrieval import Filters, Index, Passage
@@ -62,6 +64,12 @@ def request_key(model: str, request: Request) -> str:
 
 def query_key(sql: str, max_rows: int) -> str:
     return digest([sql, max_rows])
+
+
+def feed_key(url: str, cursor: str | None) -> str:
+    """One read of one feed, by where it read from. A feed read twice from the same cursor
+    gives the same changes, which is what makes a recorded run repeatable."""
+    return digest([url, cursor or ""])
 
 
 def pack_vector(vector: Vector) -> str:
@@ -156,6 +164,7 @@ class Recording:
     scores: dict[str, list[float]] = field(default_factory=dict)  # by query and texts
     searches: dict[str, list[int]] = field(default_factory=dict)  # by search: passage ids
     passages: dict[int, dict[str, Any]] = field(default_factory=dict)  # each passage once
+    feeds: dict[str, dict[str, Any]] = field(default_factory=dict)  # by feed and cursor
 
     def save(self, path: Path) -> None:
         """Write it as JSON lines: what was recorded first, then one line per call or query,
@@ -177,6 +186,8 @@ class Recording:
         lines += [json.dumps({"vector": k, "values": v}) for k, v in self.vectors.items()]
         lines += [json.dumps({"scores": k, "values": v}) for k, v in self.scores.items()]
         lines += [json.dumps({"search": k, "passages": v}) for k, v in self.searches.items()]
+        for key, batch in self.feeds.items():
+            lines.append(json.dumps({"feed": key, **batch}, ensure_ascii=False))
         for pid, passage in self.passages.items():
             lines.append(json.dumps({"passage": pid, **passage}, ensure_ascii=False))
         for case, verdict in self.verdicts.items():
@@ -201,6 +212,8 @@ class Recording:
                 recording.scores[line["scores"]] = line["values"]
             elif "search" in line:
                 recording.searches[line["search"]] = line["passages"]
+            elif "feed" in line:
+                recording.feeds[line.pop("feed")] = line
             elif "passage" in line:
                 recording.passages[line.pop("passage")] = line
             else:
@@ -297,6 +310,56 @@ class ReplayWarehouse:
 
     def close(self) -> None:
         pass
+
+
+def dump_batch(batch: Batch) -> dict[str, Any]:
+    return {
+        "events": [asdict(event) for event in batch.events],
+        "cursor": batch.cursor,
+        "pages": batch.pages,
+        "more": batch.more,
+        "read": batch.read,
+    }
+
+
+def load_batch(data: dict[str, Any]) -> Batch:
+    return Batch(
+        events=[Event(**event) for event in data["events"]],
+        cursor=data["cursor"],
+        pages=data["pages"],
+        more=data["more"],
+        read=data["read"],
+    )
+
+
+class RecordingFeed:
+    """A feed reader that reads the real feed and records what came back."""
+
+    def __init__(self, read: Callable[[FeedSpec, str | None], Batch], recording: Recording) -> None:
+        self.read = read
+        self.recording = recording
+
+    def __call__(self, spec: FeedSpec, cursor: str | None) -> Batch:
+        batch = self.read(spec, cursor)
+        self.recording.feeds[feed_key(spec.url, cursor)] = dump_batch(batch)
+        return batch
+
+
+class ReplayFeed:
+    """A feed reader that answers from a recording, and never touches the network."""
+
+    def __init__(self, recording: Recording) -> None:
+        self.recording = recording
+
+    def __call__(self, spec: FeedSpec, cursor: str | None) -> Batch:
+        recorded = self.recording.feeds.get(feed_key(spec.url, cursor))
+        if recorded is None:
+            raise NotRecorded(
+                f"this run read {spec.url} from {cursor or 'the beginning'}, which the "
+                "recording does not have. The cursor has moved since it was recorded: "
+                "record the run again, or reset the cursor to the one in the recording."
+            )
+        return load_batch(recorded)
 
 
 class RecordingEmbedder:

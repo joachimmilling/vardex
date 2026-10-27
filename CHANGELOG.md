@@ -17,6 +17,11 @@ All notable changes to Vardex are recorded here. The format follows
   and the ones past their deadline are collected. The report leads with both: a section
   naming `escalate_to` ("Late — joachim, these are yours"), and one listing what was closed
   unanswered. A dry run closes nothing. The weekly watch tidies first.
+- `vardex run --record` and `--replay`: a run's model answers, queries and feed reads are
+  kept in `workflows/recordings/<name>.jsonl`, and a replay runs the whole workflow with no
+  key, no network and no warehouse, failing loudly when the recording does not cover what
+  the run asks for. Recorded and replayed runs leave the documents out. CI replays the
+  weekly watch into a throwaway data folder.
 
 ### Fixed
 

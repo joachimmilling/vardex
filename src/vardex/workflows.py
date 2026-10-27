@@ -38,16 +38,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import httpx2
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from vardex.agent import MAX_STEPS, run_agent
 from vardex.agent import Run as AgentRun
 from vardex.approvals import Inbox, Item
-from vardex.events import FeedSpec, read_feed
+from vardex.events import Batch, FeedSpec, read_feed
 from vardex.llm import ModelClient, ModelError, ToolCall
 from vardex.packs import PackError, read_yaml
 from vardex.permissions import Budgets, Permissions
@@ -56,6 +55,9 @@ from vardex.runs import Run, RunStore, Step, call_key, new_run_id, now_text
 from vardex.semantic import Knowledge
 from vardex.sql import QueryError, Warehouse, check_sql, format_value, transpile
 from vardex.tools import Toolbox, ToolResult
+
+if TYPE_CHECKING:  # only for the type of the client the live reader borrows
+    import httpx2
 
 WORKFLOW_DIR = "workflows"
 REPORT_DIR = "reports"
@@ -253,6 +255,16 @@ class WorkflowError(Exception):
     """Raised when a step cannot run at all: bad SQL, or a feed that has changed shape."""
 
 
+def live_feed(http: Callable[[], "httpx2.Client"]) -> Callable[[FeedSpec, str | None], Batch]:
+    """Reading a feed for real: one client per read, closed afterwards."""
+
+    def read(spec: FeedSpec, cursor: str | None) -> Batch:
+        with http() as client:
+            return read_feed(client, spec, cursor)
+
+    return read
+
+
 def workflows_dir(pack: Path) -> Path:
     return pack / WORKFLOW_DIR
 
@@ -391,7 +403,9 @@ class Connections:
     marks: Watermarks
     reports: Path
     toolbox: Callable[[dict[str, str]], Toolbox]  # a toolbox for one case, with its context
-    http: Callable[[], httpx2.Client]
+    # How this run reads a feed: live, live and recorded, or replayed from a recording. The
+    # runner does not know which, which is what makes a recorded run repeatable in CI.
+    feed: Callable[[FeedSpec, str | None], Batch]
 
 
 def is_due(spec: WorkflowSpec, store: RunStore, now: datetime | None = None) -> bool:
@@ -581,8 +595,7 @@ def keys_from_sql(warehouse: Warehouse, knowledge: Knowledge, sql: str) -> set[s
 def _watch(step: WatchStep, run: Run, record: Step, connections: Connections) -> None:
     """Read the feed from the saved cursor, keep what the pack follows, move the cursor."""
     cursor = connections.marks.get(step.id)
-    with connections.http() as client:
-        batch = read_feed(client, step.feed, cursor)
+    batch = connections.feed(step.feed, cursor)
     keys = batch.keys
     followed = None
     if step.follow:

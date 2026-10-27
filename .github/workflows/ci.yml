@@ -1,4 +1,4 @@
-# Lint, test and replay the evals on every push and pull request.
+# Lint, test and replay the evals and the scheduled work on every push and pull request.
 name: CI
 
 on:
@@ -37,3 +37,16 @@ jobs:
         # vectors and passages come from evals/recordings/.
         # Fails when a recording is stale, below a suite's threshold, or on a critical case.
         run: uv run vardex eval packs/norwegian-companies --replay
+      - name: The weekly watch, replayed from its recording
+        # Same bargain, for the work that runs on a schedule: no key, no network, no
+        # warehouse. It fails when a step, a prompt or the pack's SQL has changed since the
+        # recording was made — which is exactly when a Monday morning run would have failed.
+        # The data folder is a throwaway, so the replay's own proposals go nowhere.
+        env:
+          VARDEX_DATA_DIR: ${{ runner.temp }}/vardex-replay
+        run: |
+          if [ -f packs/norwegian-companies/workflows/recordings/weekly-watch.jsonl ]; then
+            uv run vardex run packs/norwegian-companies weekly-watch --replay
+          else
+            echo "No recording yet: make one with --record and commit it."
+          fi

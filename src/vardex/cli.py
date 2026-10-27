@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
@@ -33,6 +34,7 @@ from vardex.documents import (
 )
 from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.embeddings import Embedder, Reranker
+from vardex.events import Batch, FeedSpec
 from vardex.extraction import (
     ExtractionError,
     ExtractionSpec,
@@ -78,11 +80,13 @@ from vardex.replay import (
     Recording,
     RecordingClient,
     RecordingEmbedder,
+    RecordingFeed,
     RecordingIndex,
     RecordingReranker,
     RecordingWarehouse,
     ReplayClient,
     ReplayEmbedder,
+    ReplayFeed,
     ReplayIndex,
     ReplayReranker,
     ReplayWarehouse,
@@ -102,6 +106,7 @@ from vardex.workflows import (
     WorkflowSpec,
     check_workflow,
     is_due,
+    live_feed,
     load_workflow,
     load_workflows,
     marks_path,
@@ -1507,6 +1512,16 @@ def connect_inbox(settings: Settings, pack: Path) -> Inbox:
 
 
 @dataclass
+class Parts:
+    """Pieces a caller has already made, for Vardex to use instead of making its own."""
+
+    warehouse: Warehouse | None = None
+    index: Index | None = None
+    embedder: Embedder | None = None
+    reranker: Reranker | None = None
+
+
+@dataclass
 class Built:
     """Everything one run of the agent can reach, and what has to be closed afterwards."""
 
@@ -1528,15 +1543,22 @@ def build_agent(
     approve: Approver | None = None,
     sessions: list[McpSession] | None = None,
     context: dict[str, str] | None = None,
+    parts: "Parts | None" = None,
 ) -> Built:
-    """Everything the agent of one run can reach, and what has to be closed afterwards."""
+    """Everything the agent of one run can reach, and what has to be closed afterwards.
+
+    `parts` is for a caller that has already made a warehouse, an index or an embedder and
+    wants those used — because it has wrapped them in a recording, or because they are being
+    replayed from one. Whatever it supplies, it also closes.
+    """
     knowledge = load_knowledge(pack)
     permissions = load_permissions(pack)
-    connection = connect_warehouse(warehouse_url, pack, settings)
-    open_now: list[Warehouse | Index] = [connection]
-    index = embedder = None
-    if documents and (pack / "documents" / "sources.yaml").is_file():
-        embedder = connect_embedder(settings)
+    given = parts or Parts()
+    connection = given.warehouse or connect_warehouse(warehouse_url, pack, settings)
+    open_now: list[Warehouse | Index] = [] if given.warehouse else [connection]
+    index, embedder = given.index, given.embedder
+    if index is None and documents and (pack / "documents" / "sources.yaml").is_file():
+        embedder = embedder or connect_embedder(settings)
         index = connect_index(settings, pack, embedder)
         open_now.append(index)
     extra = action_tools(
@@ -1552,7 +1574,7 @@ def build_agent(
         knowledge=knowledge,
         index=index,
         embedder=embedder,
-        reranker=connect_reranker(settings, rerank) if index is not None else None,
+        reranker=given.reranker or (connect_reranker(settings, rerank) if index else None),
         charts=charts_path(settings.data_dir, pack.name),
         extra=extra,
         approve=approve,
@@ -1822,6 +1844,12 @@ WorkflowArgument = Annotated[
 ]
 
 
+def workflow_recording_path(pack: Path, workflow: str) -> Path:
+    """Where a recorded run of one workflow is kept. It is committed with the pack, like the
+    eval recordings, because its whole purpose is to be replayed by somebody with no key."""
+    return pack / "workflows" / "recordings" / f"{workflow}.jsonl"
+
+
 def connect_workflow(
     pack: Path,
     settings: Settings,
@@ -1833,7 +1861,9 @@ def connect_workflow(
     rerank: bool,
     dry_run: bool,
     spent: Decimal = Decimal(0),
-) -> EvalConnections:
+    record: bool = False,
+    replay: bool = False,
+) -> tuple[Connections, Recording | None]:
     """Everything one workflow run can reach. The one place a run is wired together.
 
     Note what the agent is given: no approver. There is nobody at the keyboard, so a tool
@@ -1842,19 +1872,27 @@ def connect_workflow(
     does not hand it a fresh allowance.
     """
     name = load_pack(pack).name
-    sessions = [
-        stack.enter_context(McpSession(server, environment=dict(os.environ)))
-        for server in load_mcp_servers(pack).servers
-    ]
+    sessions = (
+        []
+        if replay  # a replayed run talks to nothing outside, not even an MCP server
+        else [
+            stack.enter_context(McpSession(server, environment=dict(os.environ)))
+            for server in load_mcp_servers(pack).servers
+        ]
+    )
+    recording, parts, feed = workflow_recording(pack, spec, settings, stack, record, replay)
     built = build_agent(
         pack,
         settings,
         warehouse_url=warehouse,
-        documents=documents,
+        # Neither recorded nor replayed runs search the documents: the recording does not
+        # keep the index, so a recorded run that searched could not be played back.
+        documents=documents and not (record or replay),
         rerank=rerank,
         dry_run=dry_run,
         approve=None,
         sessions=sessions,
+        parts=parts,
     )
     for closing in built.open_now:
         stack.callback(closing.close)
@@ -1862,8 +1900,11 @@ def connect_workflow(
     caps = built.permissions.budgets.model_copy(
         update={"per_run": spec.budget.per_run or built.permissions.budgets.per_run}
     )
+    model: ModelClient = ReplayClient(recording) if replay and recording else connect(settings)
+    if record and recording:
+        model = RecordingClient(model, recording)
     client = Budget(
-        connect(settings),
+        model,
         caps=caps,
         spend=Spend(spend_path(settings.data_dir, name)),
         run_usd=spent,
@@ -1882,7 +1923,42 @@ def connect_workflow(
         # One toolbox, copied per case with that case's context. The tools themselves hold
         # the open warehouse and index, so this costs nothing but the dataclass.
         toolbox=lambda context: replace(built.toolbox, context=context, calls=[]),
-        http=http_client,
+        feed=feed,
+    ), recording
+
+
+def workflow_recording(
+    pack: Path,
+    spec: WorkflowSpec,
+    settings: Settings,
+    stack: ExitStack,
+    record: bool,
+    replay: bool,
+) -> tuple[Recording | None, Parts | None, Callable[[FeedSpec, str | None], Batch]]:
+    """The recording a run is being taken into or played back from, and the parts that go
+    with it: the warehouse it reads and the feed it watches.
+
+    A replayed run touches nothing outside the recording — no key, no network, no database —
+    which is what lets CI run the whole watch on a machine that has none of them.
+    """
+    live = live_feed(http_client)
+    if replay:
+        path = workflow_recording_path(pack, spec.name)
+        if not path.is_file():
+            raise PackError(f"No recording at {path}. Make one with --record.")
+        recorded = Recording.load(path)
+        return recorded, Parts(warehouse=ReplayWarehouse(recorded)), ReplayFeed(recorded)
+    if not record:
+        return None, None, live
+    warehouse = connect_warehouse(None, pack, settings)
+    stack.callback(warehouse.close)
+    recording = Recording(
+        settings.model, warehouse.name, warehouse.dialect, date.today().isoformat()
+    )
+    return (
+        recording,
+        Parts(warehouse=RecordingWarehouse(warehouse, recording)),
+        RecordingFeed(live, recording),
     )
 
 
@@ -1943,6 +2019,8 @@ def run_one_workflow(
     dry_run: bool,
     resume: str | None,
     show_steps: bool,
+    record: bool = False,
+    replay: bool = False,
 ) -> WorkflowRun:
     """Start or resume one run of one workflow, under its own lock."""
     name = load_pack(pack).name
@@ -1951,7 +2029,7 @@ def run_one_workflow(
     with ExitStack() as stack:
         stack.enter_context(lock)
         earlier = store.load(resume) if resume else None
-        connections = connect_workflow(
+        connections, recording = connect_workflow(
             pack,
             settings,
             spec,
@@ -1961,14 +2039,21 @@ def run_one_workflow(
             rerank=rerank,
             dry_run=dry_run,
             spent=earlier.spent if earlier else Decimal(0),
+            record=record,
+            replay=replay,
         )
         run = earlier or start(spec, connections, trigger=trigger, dry_run=dry_run)
-        return run_workflow(
+        done = run_workflow(
             spec,
             run,
             connections,
             on_call=show_call if show_steps else None,
         )
+        if record and recording is not None:
+            path = workflow_recording_path(pack, spec.name)
+            recording.save(path)
+            typer.secho(f"Recorded {path}", fg="bright_black", err=True)
+        return done
 
 
 @app.command(name="run")
@@ -1991,6 +2076,13 @@ def run_command(
     rerank: Annotated[bool, typer.Option("--rerank/--no-rerank")] = True,
     show_steps: Annotated[
         bool, typer.Option("--steps-shown", help="Print each tool call as it happens.")
+    ] = False,
+    record: Annotated[
+        bool, typer.Option("--record", help="Keep everything this run was told, for replaying.")
+    ] = False,
+    replay: Annotated[
+        bool,
+        typer.Option("--replay", help="Run it again from a recording: no key, no network."),
     ] = False,
     as_json: Annotated[bool, typer.Option("--json", help="Print the runs as JSON.")] = False,
 ) -> None:
@@ -2029,9 +2121,19 @@ def run_command(
                     dry_run=dry_run,
                     resume=resume,
                     show_steps=show_steps and not as_json,
+                    record=record,
+                    replay=replay,
                 )
             )
-    except (PackError, RunError, WorkflowError, ModelError, SearchError, WarehouseError) as err:
+    except (
+        PackError,
+        RunError,
+        WorkflowError,
+        ModelError,
+        SearchError,
+        WarehouseError,
+        NotRecorded,
+    ) as err:
         raise (fail_json(err) if as_json else fail(str(err))) from err
     worst = next((run for run in runs if run.state in ("failed", "stopped")), None)
     if as_json:

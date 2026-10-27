@@ -354,3 +354,52 @@ def test_a_stopped_run_can_be_resumed_and_asks_for_nothing_twice(pack, monkeypat
         )
         == 1
     )
+
+
+# --- recorded and replayed -------------------------------------------------------------
+
+
+def test_a_recorded_run_replays_with_no_key_no_network_and_no_warehouse(pack, monkeypatch):
+    use(monkeypatch, propose(), NOTE)
+    recorded = runner.invoke(cli.app, ["run", str(pack), "--record"])
+    assert recorded.exit_code == 0, recorded.output
+    recording = pack / "workflows" / "recordings" / "weekly-watch.jsonl"
+    assert recording.is_file()
+
+    # Nothing live is reachable: no model, no warehouse file, no feed
+    monkeypatch.setattr(
+        cli, "connect", lambda settings: pytest.fail("a replay must not ask a model")
+    )
+    monkeypatch.setattr(
+        cli,
+        "connect_warehouse",
+        lambda *a, **k: pytest.fail("a replay must not open a warehouse"),
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    again = runner.invoke(cli.app, ["run", str(pack), "--replay", "--json"])
+    assert again.exit_code == 0, again.output
+    body = json.loads(again.stdout)["data"]["runs"][0]
+    assert body["state"] == "done"
+    assert body["cases"] == 1
+
+
+def test_a_replay_with_no_recording_says_how_to_make_one(pack, monkeypatch):
+    result = runner.invoke(cli.app, ["run", str(pack), "--replay"])
+    assert result.exit_code == 1
+    assert "Make one with --record" in result.output
+
+
+def test_a_recording_that_does_not_cover_what_the_run_asks_for_fails_loudly(pack, monkeypatch):
+    use(monkeypatch, propose(), NOTE)
+    runner.invoke(cli.app, ["run", str(pack), "--record"])
+    # The question changes, so the recorded answer no longer matches what is asked
+    (pack / "workflows" / "weekly-watch.yaml").write_text(
+        WORKFLOW.replace("{reason} Equity {equity}.", "{reason} Equity {equity}. Be brief."),
+        encoding="utf-8",
+    )
+    result = runner.invoke(cli.app, ["run", str(pack), "--replay"])
+    assert result.exit_code == 1
+    assert "not recorded" in result.output.lower() or "recording" in result.output.lower()
+
+
+# --- how is it doing? ------------------------------------------------------------------
