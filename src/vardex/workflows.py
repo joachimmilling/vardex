@@ -190,6 +190,22 @@ class BriefStep(BaseModel):
     workers: int = Field(default=1, ge=1, le=MAX_WORKERS)
 
 
+class TidyStep(BaseModel):
+    """Close what nobody answered, and say what is late.
+
+    A monitor that only ever adds to the inbox teaches people to stop reading it. This step
+    is the other direction: proposals older than the pack's `expire_after_days` are closed,
+    and anything past its deadline is put at the top of the report with the name of whoever
+    is supposed to be chasing it. Escalation is not a notification system; it is making the
+    overdue thing impossible to miss in the place people already look.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=NAME)
+    uses: Literal["tidy"]
+
+
 class ReportStep(BaseModel):
     """Write down what the run found, as something a person reads over coffee."""
 
@@ -200,7 +216,9 @@ class ReportStep(BaseModel):
     title: str
 
 
-AnyStep = Annotated[WatchStep | FindStep | BriefStep | ReportStep, Field(discriminator="uses")]
+AnyStep = Annotated[
+    WatchStep | FindStep | BriefStep | TidyStep | ReportStep, Field(discriminator="uses")
+]
 
 
 class WorkflowSpec(BaseModel):
@@ -548,6 +566,8 @@ def _run_step(
         _find(step, run, record, connections)
     elif isinstance(step, BriefStep):
         _brief(spec, step, run, record, connections, on_call=on_call)
+    elif isinstance(step, TidyStep):
+        _tidy(step, run, record, connections)
 
 
 def keys_from_sql(warehouse: Warehouse, knowledge: Knowledge, sql: str) -> set[str]:
@@ -769,6 +789,24 @@ def _look_into_each(
         yield from pool.map(look_into, cases)
 
 
+def _tidy(step: TidyStep, run: Run, record: Step, connections: Connections) -> None:
+    """Expire what nobody answered in time, and write down what is late."""
+    rules = connections.permissions.approvals
+    closed = (
+        []
+        if run.dry_run  # a rehearsal decides nothing, not even to give up on something
+        else connections.inbox.expire(after_days=rules.expire_after_days, by=run.id)
+    )
+    overdue = connections.inbox.overdue()
+    run.facts["expired"] = [item.reference for item in closed]
+    run.facts["overdue"] = [item.reference for item in overdue]
+    run.facts["escalate_to"] = rules.escalate_to
+    record.items = len(closed) + len(overdue)
+    record.note = f"{len(closed)} expired, {len(overdue)} overdue" + (
+        f", to chase: {rules.escalate_to}" if overdue and rules.escalate_to else ""
+    )
+
+
 def _report(
     spec: WorkflowSpec, step: ReportStep, run: Run, record: Step, connections: Connections
 ) -> None:
@@ -815,6 +853,27 @@ def digest(
                 + (", and more waiting for the next run" if feed.get("more") else "")
             )
         lines.append("")
+    late = [item for item in waiting if item.reference in run.facts.get("overdue", [])]
+    if late:
+        chase = run.facts.get("escalate_to") or "whoever owns this pack"
+        lines += [f"## Late — {chase}, these are yours ({len(late)})", ""]
+        lines += [
+            f"- `{item.reference}` {item.proposal.label}: proposed {item.made_at}, "
+            f"due {item.needed_by}"
+            for item in late
+        ]
+        lines.append("")
+    expired = run.facts.get("expired", [])
+    if expired:
+        lines += [
+            f"## Closed, unanswered ({len(expired)})",
+            "",
+            "Nobody decided these in time, so they are closed. The figures they rested on are "
+            "too old to act on now; the watch will raise them again if they still hold.",
+            "",
+        ]
+        lines += [f"- `{reference}`" for reference in expired]
+        lines.append("")
     lines += [f"## Needs a decision ({len(mine)})", ""]
     if mine:
         for item in mine:
@@ -848,7 +907,7 @@ def digest(
         lines += ["## What went wrong", ""]
         lines += [f"- {key}: {why}" for key, why in failures.items()]
         lines.append("")
-    overdue = [item for item in waiting if item.overdue()]
+    overdue = [item for item in waiting if item.overdue() and item not in late]
     if overdue:
         lines += ["## Overdue, from earlier runs", ""]
         lines += [

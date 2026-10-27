@@ -13,6 +13,10 @@ All notable changes to Vardex are recorded here. The format follows
   reads the same however many threads did the work. `Budget` sets aside each call's worst
   case while it is in flight, under a lock, so one cap holds however many threads ask, and
   the journal has a lock of its own.
+- A `tidy` step: proposals nobody answered within the pack's `expire_after_days` are closed,
+  and the ones past their deadline are collected. The report leads with both: a section
+  naming `escalate_to` ("Late — joachim, these are yours"), and one listing what was closed
+  unanswered. A dry run closes nothing. The weekly watch tidies first.
 
 ### Fixed
 
