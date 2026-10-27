@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
@@ -1122,7 +1123,8 @@ def eval_suite(
 
     def agent_toolbox() -> Toolbox:
         """The agent's tools for one case. No MCP servers and nobody to approve: an eval
-        measures what the pack can do on its own, with nothing outside it and no person."""
+        measures what the pack can do on its own, with nothing outside it and no person.
+        What it drafts goes to an inbox of its own, never the one people read."""
         knowledge_now = knowledge or load_knowledge(pack)
         return build_toolbox(
             load_permissions(pack),
@@ -1132,7 +1134,12 @@ def eval_suite(
             embedder=c.embedder,
             reranker=c.reranker,
             charts=charts_path(settings.data_dir, pack.name),
-            extra=action_tools(knowledge_now, c.warehouse, connect_connectors(settings, pack))
+            extra=action_tools(
+                knowledge_now,
+                c.warehouse,
+                connect_connectors(settings, pack),
+                Inbox(Path(tempfile.mkdtemp(prefix="vardex-eval-")) / "inbox.jsonl"),
+            )
             if c.warehouse
             else [],
         )
