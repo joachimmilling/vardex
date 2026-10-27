@@ -36,6 +36,7 @@ from vardex.workflows import (
     WorkflowSpec,
     check_workflow,
     is_due,
+    live_feed,
     run_workflow,
     start,
 )
@@ -166,6 +167,8 @@ def wire(tmp_path, client, *, level: str = "approve", feed_pages=None, dry_run=F
 
         return httpx2.Client(transport=httpx2.MockTransport(handler))
 
+    feed = live_feed(http)
+
     return Connections(
         pack="demo",
         folder="packs/demo",
@@ -178,7 +181,7 @@ def wire(tmp_path, client, *, level: str = "approve", feed_pages=None, dry_run=F
         marks=Watermarks(tmp_path / "state" / "weekly-watch.json"),
         reports=tmp_path / "reports",
         toolbox=lambda context: replace(box, context=context, calls=[]),
-        http=http,
+        feed=feed,
     ), connector
 
 
@@ -713,3 +716,36 @@ def test_a_dry_run_does_not_even_decide_to_give_up(tmp_path):
         workflow, start(workflow, connections, trigger="manual", dry_run=True), connections
     )
     assert connections.inbox.get(stale).state == "proposed"
+
+
+def test_a_recorded_feed_read_replays_without_the_network(tmp_path):
+    from datetime import date
+
+    from vardex.replay import NotRecorded, Recording, RecordingFeed, ReplayFeed
+
+    pages = {None: [change(1, "100000008")], "2": []}
+    connections, _ = wire(tmp_path, FakeModel(note()), feed_pages=pages)
+    recording = Recording("claude-sonnet-5-5", "DuckDB", "duckdb", date.today().isoformat())
+    workflow = watching()
+
+    taped = replace(connections, feed=RecordingFeed(connections.feed, recording))
+    first = run_workflow(workflow, start(workflow, taped, trigger="schedule", dry_run=False), taped)
+    assert first.facts["changed"] == ["100000008"]
+    assert len(recording.feeds) == 1
+
+    saved = tmp_path / "weekly-watch.jsonl"
+    recording.save(saved)
+    played = replace(
+        connections,
+        feed=ReplayFeed(Recording.load(saved)),
+        marks=Watermarks(tmp_path / "state" / "again.json"),  # reading from the start again
+        client=FakeModel(note()),
+    )
+    again = run_workflow(workflow, start(workflow, played, trigger="manual", dry_run=False), played)
+    assert again.facts["changed"] == ["100000008"]
+
+    # And a read the recording does not cover is a loud failure, not a quiet empty feed
+    moved = replace(played, marks=Watermarks(tmp_path / "state" / "moved.json"))
+    moved.marks.set("changes", "99999")
+    with pytest.raises(NotRecorded, match="which the recording does not have"):
+        run_workflow(watching(), start(watching(), moved, trigger="manual", dry_run=False), moved)
