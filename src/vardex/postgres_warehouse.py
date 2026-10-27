@@ -5,13 +5,14 @@ a test enforces it. Connect with an account that may only read: everything here 
 hard, but only the database's own permissions make it impossible.
 """
 
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
 
 import psycopg
 
-from vardex.sql import Column, QueryError, Result, Table
+from vardex.sql import Column, QueryError, Result, Table, one_at_a_time
 
 
 class PostgresWarehouse:
@@ -26,6 +27,7 @@ class PostgresWarehouse:
         timeout_seconds: float = 30.0,
         connect: Callable[..., Any] = psycopg.connect,
     ) -> None:
+        self.gate = threading.RLock()  # one query at a time: see one_at_a_time
         try:
             self.con = connect(url, autocommit=True, connect_timeout=10)
             # Every query runs in a transaction that cannot write, and stops after the limit.
@@ -37,6 +39,7 @@ class PostgresWarehouse:
         self.name = f"PostgreSQL {info.user}@{info.host}:{info.port}/{info.dbname}"
         self.timeout_seconds = timeout_seconds
 
+    @one_at_a_time
     def tables(self) -> list[Table]:
         """The tables and views in the current schema that this account may read."""
         try:
@@ -51,6 +54,7 @@ class PostgresWarehouse:
             tables.setdefault(table, []).append(Column(column, data_type))
         return [Table(name, columns) for name, columns in tables.items()]
 
+    @one_at_a_time
     def run(self, sql: str, max_rows: int = 1000) -> Result:
         """Run one query and fetch at most max_rows rows.
 

@@ -5,6 +5,7 @@ it. Unlike a warehouse, the index is Vardex's own: it creates its tables and wri
 a schema of its own for each pack, so it may share a database with anything else.
 """
 
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -14,6 +15,7 @@ from psycopg import sql
 from vardex.documents import DocumentSpec
 from vardex.embeddings import Vector
 from vardex.retrieval import Filters, Passage, SearchError
+from vardex.sql import one_at_a_time
 
 # Each language's stemmer: "rapporterte" and "rapporten" share the stem "rapport" in Norwegian.
 STEMMERS = {"en": "english", "nb": "norwegian", "nn": "norwegian"}
@@ -35,6 +37,7 @@ class PostgresIndex:
         *,
         connect: Callable[..., Any] = psycopg.connect,
     ) -> None:
+        self.gate = threading.RLock()  # one statement at a time: see one_at_a_time
         self.schema = sql.Identifier("pack_" + pack.replace("-", "_"))
         try:
             self.con = connect(url, autocommit=True, connect_timeout=10)
@@ -90,12 +93,14 @@ class PostgresIndex:
             ).format(s=self.schema, d=sql.Literal(dimensions))
         )
 
+    @one_at_a_time
     def documents(self) -> dict[str, str]:
         rows = self.con.execute(
             sql.SQL("select id, fingerprint from {}.documents").format(self.schema)
         ).fetchall()
         return dict(rows)
 
+    @one_at_a_time
     def put(
         self,
         document: DocumentSpec,
@@ -133,11 +138,13 @@ class PostgresIndex:
                 for (page, text), vector in zip(pages, vectors, strict=True):
                     rows.write_row((document.id, page, text, stemmer, as_text(vector)))
 
+    @one_at_a_time
     def remove(self, document: str) -> None:
         self.con.execute(
             sql.SQL("delete from {}.documents where id = %s").format(self.schema), (document,)
         )
 
+    @one_at_a_time
     def by_meaning(self, vector: Vector, filters: Filters, limit: int) -> list[Passage]:
         where, params = conditions(filters)
         query = sql.SQL(
@@ -154,6 +161,7 @@ class PostgresIndex:
         # relaxed_order may return two close passages in the wrong order; put them right
         return [passage(row[:-1]) for row in sorted(rows, key=lambda row: (row[-1], row[0]))]
 
+    @one_at_a_time
     def by_words(self, query: str, filters: Filters, limit: int) -> list[Passage]:
         where, params = conditions(filters)
         # Any of the query's words, stemmed for each language, rather than all of them: a

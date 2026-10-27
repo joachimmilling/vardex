@@ -81,3 +81,49 @@ def test_sql_is_rewritten_for_another_dialect():
     # DuckDB's / divides with decimals; PostgreSQL's divides two integers into an integer
     assert transpile("7 / 2", "duckdb", "postgres") == "CAST(7 AS DOUBLE PRECISION) / 2"
     assert transpile("year(d)", "duckdb", "duckdb") == "year(d)"
+
+
+def test_a_connection_shared_between_threads_is_used_by_one_at_a_time():
+    """The agent runs a turn's tool calls side by side, and a workflow its cases: a driver's
+    connection is shared between threads, and two statements over it at once interleave."""
+    import threading
+    import time
+
+    from vardex.duckdb_warehouse import DuckDBWarehouse
+    from vardex.pgvector_index import PostgresIndex
+    from vardex.postgres_warehouse import PostgresWarehouse
+    from vardex.sql import one_at_a_time
+
+    class Connection:
+        def __init__(self):
+            self.gate = threading.RLock()
+            self.inside = 0
+            self.most = 0
+
+        @one_at_a_time
+        def run(self):
+            self.inside += 1
+            self.most = max(self.most, self.inside)
+            time.sleep(0.01)
+            self.inside -= 1
+
+    con = Connection()
+    threads = [threading.Thread(target=con.run) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert con.most == 1
+    # And every driver's methods that talk to the server are guarded
+    for method in (
+        DuckDBWarehouse.run,
+        DuckDBWarehouse.tables,
+        PostgresWarehouse.run,
+        PostgresWarehouse.tables,
+        PostgresIndex.by_meaning,
+        PostgresIndex.by_words,
+        PostgresIndex.put,
+        PostgresIndex.remove,
+        PostgresIndex.documents,
+    ):
+        assert hasattr(method, "__wrapped__"), method.__qualname__

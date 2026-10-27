@@ -10,7 +10,7 @@ from pathlib import Path
 
 import duckdb
 
-from vardex.sql import Column, QueryError, Result, Table
+from vardex.sql import Column, QueryError, Result, Table, one_at_a_time
 
 # Read-only, and nothing outside the file: no reading or writing other files, no URLs, no
 # extensions. Locked, so a query cannot turn any of it back on.
@@ -30,10 +30,12 @@ class DuckDBWarehouse:
     def __init__(self, path: Path, *, timeout_seconds: float = 30.0) -> None:
         if not path.is_file():
             raise QueryError(f"No warehouse at {path}. Run vardex ingest first.")
+        self.gate = threading.RLock()  # one query at a time: see one_at_a_time
         self.name = f"DuckDB {path}"
         self.timeout_seconds = timeout_seconds
         self.con = duckdb.connect(path, read_only=True, config=SETTINGS)
 
+    @one_at_a_time
     def tables(self) -> list[Table]:
         """The tables and views in the file's main schema, with their columns, by name."""
         rows = self.con.execute(
@@ -45,6 +47,7 @@ class DuckDBWarehouse:
             tables.setdefault(table, []).append(Column(column, data_type))
         return [Table(name, columns) for name, columns in tables.items()]
 
+    @one_at_a_time
     def run(self, sql: str, max_rows: int = 1000) -> Result:
         """Run one query and fetch at most max_rows rows. A query that runs past the time
         limit is interrupted."""
