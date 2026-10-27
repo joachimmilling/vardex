@@ -6,6 +6,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-27
+
 ### Added
 
 - A `brief` step may look into several cases at the same time (`workers`, at most four). The
