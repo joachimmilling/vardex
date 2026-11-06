@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from vardex.dashboard import Figures
+from vardex.dashboard import Figures, compare
 from vardex.monitoring import Monitoring, breaches, load_monitoring
 from vardex.packs import PackError
 
@@ -56,3 +56,11 @@ def test_a_misspelt_limit_is_an_error(tmp_path):
     with pytest.raises(PackError, match="eror_rate"):
         load_monitoring(tmp_path)
     assert load_monitoring(tmp_path / "elsewhere") is None
+
+
+def test_a_comparison_says_only_what_the_numbers_allow():
+    worse = compare(row(requests=400, repaired=20), row(requests=400, repaired=80))
+    assert worse[1].endswith(": worse")
+    small = compare(row(requests=20, repaired=1), row(requests=20, repaired=3))
+    assert small[1].endswith("not enough requests to tell")
+    assert small[0].startswith("failed: 0% (0%–16%) → 0%")

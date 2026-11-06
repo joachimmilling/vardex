@@ -15,6 +15,7 @@ from html import escape
 from pathlib import Path
 
 from vardex.charts import Series, render
+from vardex.evals import wilson
 from vardex.pricing import format_usd
 from vardex.traces import Trace
 
@@ -226,3 +227,30 @@ def write_dashboard(
         PAGE.format(title=escape(title), meta=escape(meta), body=body), encoding="utf-8"
     )
     return path
+
+
+def compare(old: Figures, new: Figures) -> list[str]:
+    """What changed between two groups, such as two versions of a pack, said only as strongly
+    as the numbers allow. A rate is given with its 95% interval; when the intervals of the two
+    overlap, the honest verdict is that there are not yet enough requests to tell."""
+    lines = []
+    for what, of in (("failed", lambda r: r.failed), ("needed a second try", lambda r: r.repaired)):
+        low_old, high_old = wilson(of(old), old.requests)
+        low_new, high_new = wilson(of(new), new.requests)
+        share_old = of(old) / old.requests if old.requests else 0.0
+        share_new = of(new) / new.requests if new.requests else 0.0
+        if high_new < low_old:
+            verdict = "better"
+        elif low_new > high_old:
+            verdict = "worse"
+        else:
+            verdict = "not enough requests to tell"
+        lines.append(
+            f"{what}: {share_old:.0%} ({low_old:.0%}–{high_old:.0%}) → {share_new:.0%} "
+            f"({low_new:.0%}–{high_new:.0%}): {verdict}"
+        )
+    lines.append(
+        f"cost per request: {format_usd(old.cost_per_request)} → {format_usd(new.cost_per_request)}"
+    )
+    lines.append(f"p95: {old.p95_seconds:.1f} s → {new.p95_seconds:.1f} s")
+    return lines
