@@ -15,6 +15,8 @@ main design choice in docs/decisions/.
   Tesseract for scanned pages): `uv run vardex index packs/norwegian-companies`
 - Search them, or answer from them with citations: `uv run vardex search packs/… "…"`,
   `uv run vardex cite packs/norwegian-companies "…"`
+- See what a request did: `uv run vardex traces packs/norwegian-companies`, then
+  `uv run vardex trace packs/norwegian-companies <id>`; the figures: `vardex dashboard`
 - Run the evals offline, as CI does: `uv run vardex eval packs/norwegian-companies --replay`
 - Run and record them live (needs a key and the warehouse; costs about a dollar):
   `uv run vardex eval packs/norwegian-companies --record`
@@ -49,6 +51,10 @@ main design choice in docs/decisions/.
 - A pack's sources, SQL models, tests, metrics, ontology and example questions live in its
   warehouse/ folder. Every column of a model in models/marts is described;
   tests/test_norwegian_companies.py checks it.
+- Only src/vardex/tracing.py imports opentelemetry; everything else asks it for a span.
+  Every model call is traced by the hook `watched` adds, so never call a client that has not
+  been through it from the CLI. An attribute that carries what was asked or answered goes in
+  tracing.CONTENT, or it is sent to backends that were never meant to see it.
 - Validate all external data (files, API responses, model output) with Pydantic.
 - Tests never call real APIs or load real embedding models. Pass fake model clients,
   FakeEmbedder, FakeReranker and MemoryIndex from tests/fakes.py, PDFs made by tests/pdfs.py,

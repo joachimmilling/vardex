@@ -26,6 +26,7 @@ from pydantic import (
 from vardex.llm import Answer, Effort, Message, ModelClient, Request
 from vardex.packs import PackError, describe_problem
 from vardex.prompts import EXTRACT, REPAIR
+from vardex.tracing import ATTEMPT, failed, passed, span
 
 FieldType = Literal["text", "integer", "amount", "choice"]
 # An amount is a JSON number in the schema, so the model cannot answer "1 480 312" as text,
@@ -207,16 +208,19 @@ def extract(
     """
     request = build_request(spec, document, effort)
     answers: list[Answer] = []
-    for _ in range(repairs + 1):
-        answer = client.send(request)
-        answers.append(answer)
-        if answer.stop_reason != "end":
-            raise ExtractionError(f"the model stopped early ({answer.stop_reason})", answers)
-        problems, values = read_values(spec, answer.text, document)
-        if not problems:
-            return Extraction(values=values or {}, answers=answers)
-        if values and values["problem"]:
-            raise ExtractionError("; ".join(problems), answers, reported=True)
+    for number in range(1, repairs + 2):
+        with span("extract", {ATTEMPT: number}) as attempt:
+            answer = client.send(request)
+            answers.append(answer)
+            if answer.stop_reason != "end":
+                raise ExtractionError(f"the model stopped early ({answer.stop_reason})", answers)
+            problems, values = read_values(spec, answer.text, document)
+            if not problems:
+                passed(attempt, "extraction_checks")
+                return Extraction(values=values or {}, answers=answers)
+            failed(attempt, "extraction_checks", problems)
+            if values and values["problem"]:
+                raise ExtractionError("; ".join(problems), answers, reported=True)
         request = replace(
             request,
             messages=[

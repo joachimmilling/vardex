@@ -1,6 +1,7 @@
 """The agent through the CLI: what a person sees, and what a program reads."""
 
 import json
+import re
 
 import duckdb
 import pytest
@@ -133,6 +134,8 @@ def test_a_failure_in_json_carries_a_code_a_program_can_branch_on(pack, monkeypa
     result = runner.invoke(cli.app, ["agent", str(pack), "Anything?", "--json"])
     assert result.exit_code == 1
     body = json.loads(result.stdout)
+    trace_id = body.pop("trace_id")  # so a program can report exactly which request failed
+    assert re.fullmatch(r"[0-9a-f]{32}", trace_id)
     assert body == {"ok": False, "error": {"code": "model_failed", "message": "the API is down"}}
 
 

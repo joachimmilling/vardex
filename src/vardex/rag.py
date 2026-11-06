@@ -21,6 +21,7 @@ from vardex.packs import describe_problem
 from vardex.prompts import CITE, CITE_REPAIR
 from vardex.provenance import Figure, Quote, trace_quotes
 from vardex.retrieval import Filters, Index, Passage, Search, search
+from vardex.tracing import ATTEMPT, failed, passed, span
 
 MARKER = re.compile(r"\[(\d+)\]")  # a citation in the text, such as [2]
 Kind = Literal["answer", "not_found"]
@@ -158,20 +159,23 @@ def answer(
         )
     request = build_request(question, found.passages, effort)
     answers: list[Answer] = []
-    for _ in range(repairs + 1):
-        answer = client.send(request)
-        answers.append(answer)
-        if answer.stop_reason != "end":
-            raise CiteError(f"the model stopped early ({answer.stop_reason})", answers, found)
-        try:
-            cited = CitedAnswer.model_validate_json(answer.text)
-        except ValidationError as err:
-            problems = [describe_problem(e) for e in err.errors()]
-        else:
-            problems, citations, figures = check(cited, found.passages, question)
-            if not problems:
-                kind: Kind = "answer" if cited.found else "not_found"
-                return Reply(kind, cited.answer.strip(), citations, figures, found, answers)
+    for number in range(1, repairs + 2):
+        with span("cite", {ATTEMPT: number}) as attempt:
+            answer = client.send(request)
+            answers.append(answer)
+            if answer.stop_reason != "end":
+                raise CiteError(f"the model stopped early ({answer.stop_reason})", answers, found)
+            try:
+                cited = CitedAnswer.model_validate_json(answer.text)
+            except ValidationError as err:
+                problems = [describe_problem(e) for e in err.errors()]
+            else:
+                problems, citations, figures = check(cited, found.passages, question)
+                if not problems:
+                    passed(attempt, "citations")
+                    kind: Kind = "answer" if cited.found else "not_found"
+                    return Reply(kind, cited.answer.strip(), citations, figures, found, answers)
+            failed(attempt, "citations", problems)
         repair = CITE_REPAIR.format(problems="\n".join(f"- {p}" for p in problems))
         request = replace(
             request,

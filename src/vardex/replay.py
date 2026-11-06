@@ -28,7 +28,7 @@ from vardex.events import Batch, Event, FeedSpec
 from vardex.llm import Answer, ModelClient, Reasoning, Request, ToolCall
 from vardex.pricing import Usage
 from vardex.retrieval import Filters, Index, Passage
-from vardex.sql import Column, QueryError, Result, Table, Warehouse
+from vardex.sql import Column, QueryError, Result, Table, Warehouse, traced_query
 
 
 class NotRecorded(Exception):
@@ -307,6 +307,7 @@ class ReplayWarehouse:
             raise NotRecorded("the warehouse's tables were not recorded")
         return self.recording.tables
 
+    @traced_query
     def run(self, sql: str, max_rows: int = 1000) -> Result:
         recorded = self.recording.queries.get(query_key(sql, max_rows))
         if recorded is None:

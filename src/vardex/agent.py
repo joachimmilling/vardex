@@ -35,6 +35,7 @@ from vardex.llm import (
 from vardex.pricing import Usage
 from vardex.prompts import AGENT
 from vardex.tools import Toolbox, ToolResult
+from vardex.tracing import AGENT_NAME, COST, OPERATION, carry, span
 
 MAX_STEPS = 12  # model calls in one run; beyond this a question is not getting answered
 AGENT_WORKERS = 4  # tool calls from one turn run at once; a turn rarely asks for more
@@ -115,6 +116,35 @@ def run_agent(
     model itself. A caller gets the steps either way, because a run that failed half way is
     exactly the one you need to read.
     """
+    attributes = {OPERATION: "invoke_agent", AGENT_NAME: "vardex", "vardex.max_steps": max_steps}
+    with span("invoke_agent vardex", attributes) as agent:
+        run = _loop(
+            client, toolbox, question, system, max_steps, max_tokens, workers, on_text, on_call
+        )
+        agent.update(
+            {
+                "vardex.stop": run.stop,
+                "vardex.steps": len(run.steps),
+                "vardex.tool_calls": len(run.tool_calls),
+                COST: run.cost_usd,
+            }
+        )
+        if run.stop not in ("answered", "refused"):  # a refusal is an answer of its kind
+            agent.fail(run.note, run.stop)
+        return run
+
+
+def _loop(
+    client: ModelClient,
+    toolbox: Toolbox,
+    question: str,
+    system: str,
+    max_steps: int,
+    max_tokens: int,
+    workers: int,
+    on_text: Callable[[str], None] | None,
+    on_call: Callable[[ToolCall, ToolResult], None] | None,
+) -> Run:
     messages = [Message("user", question)]
     steps: list[Step] = []
     specs = toolbox.specs  # built once: a tool list that changes costs the whole prompt cache
@@ -175,7 +205,8 @@ def _run_calls(toolbox: Toolbox, calls: list[ToolCall], workers: int) -> list[To
     if len(calls) < 2 or workers < 2:
         return [toolbox.call(call) for call in calls]
     with ThreadPoolExecutor(max_workers=min(workers, len(calls))) as pool:
-        results = list(pool.map(toolbox.run, calls))
+        # carry: each call's span belongs under this turn, not in a trace of its own
+        results = list(pool.map(carry(toolbox.run), calls))
     for call, result in zip(calls, results, strict=True):
         toolbox.record(call, result)
     return results

@@ -8,6 +8,7 @@ import base64
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlparse
 
 import anthropic
 
@@ -23,6 +24,7 @@ from vardex.llm import (
     ToolCall,
 )
 from vardex.pricing import UnknownModelError, Usage, cost_usd
+from vardex.tracing import HTTP_METHOD, HTTP_RESEND, HTTP_STATUS, SERVER, span
 
 MODELS_WITHOUT_EFFORT = ("claude-haiku-4-5",)  # these reject output_config.effort
 STOP_REASONS: dict[str, StopReason] = {  # Anthropic's stop_reason → Vardex's StopReason
@@ -36,6 +38,30 @@ STOP_REASONS: dict[str, StopReason] = {  # Anthropic's stop_reason → Vardex's 
 # Statuses that say "not now" rather than "not this request": timeout, conflict, rate limit.
 # Every 5xx, including 529 (overloaded), is retryable too.
 RETRYABLE_STATUSES = (408, 409, 429)
+PROVIDER = "anthropic"  # as OpenTelemetry names it in gen_ai.provider.name
+
+
+def trace_attempts(request: Any, call_next: Callable[[Any], Any]) -> Any:
+    """SDK middleware: a span for each HTTP attempt, inside the span of the model call.
+
+    The SDK retries a rate limit or an overload itself, inside one call to messages.create,
+    so from outside a call that took 40 seconds looks like a slow model. The SDK runs its
+    middleware once per attempt, inside its retry loop, so each attempt gets a span with its
+    status and its number: 0 for the first try, 1 for the first retry. The wait between
+    attempts is then the gap between two spans.
+    """
+    attributes = {
+        HTTP_METHOD: request.method,
+        SERVER: urlparse(str(request.url)).hostname,
+        HTTP_RESEND: request.retries_taken,
+    }
+    with span(request.method, attributes, kind="client") as attempt:
+        response = call_next(request)  # a connection that fails raises, and fails the span
+        attempt.set(HTTP_STATUS, response.status_code)
+        attempt.set("anthropic.request.id", response.headers.get("request-id"))
+        if response.status_code >= 400:
+            attempt.fail(f"HTTP {response.status_code}", str(response.status_code))
+        return response
 
 
 class AnthropicClient:
@@ -51,6 +77,7 @@ class AnthropicClient:
                 api_key=settings.anthropic_api_key,
                 timeout=settings.timeout_seconds,
                 max_retries=settings.max_retries,  # the SDK waits and retries 429, 5xx and drops
+                middleware=[trace_attempts],
             )
         self.sdk = sdk
         self.model = settings.model
@@ -148,6 +175,7 @@ class AnthropicClient:
         except UnknownModelError:
             cost = None
         return Answer(
+            id=getattr(response, "id", "") or "",
             text="".join(block.text for block in response.content if block.type == "text"),
             model=response.model,
             usage=usage,

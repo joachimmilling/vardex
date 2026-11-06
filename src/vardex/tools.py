@@ -31,8 +31,17 @@ from vardex.permissions import WRITING, Permission, Permissions
 from vardex.retrieval import Filters, Index, Passage, SearchError, search
 from vardex.semantic import Knowledge
 from vardex.sql import QueryError, Warehouse, check_sql, format_table, transpile
+from vardex.tracing import (
+    OPERATION,
+    TOOL_ARGUMENTS,
+    TOOL_CALL_ID,
+    TOOL_NAME,
+    TOOL_RESULT,
+    span,
+)
 
 SEARCH_LIMIT = 8  # passages one search gives back
+MAX_ROWS = 1000  # one query's rows, whatever the model asks for
 PREVIEW_WORDS = 60  # of a passage, before the agent asks to read the whole of it
 
 
@@ -140,8 +149,20 @@ class Toolbox:
         is still written in the order the model asked, which keeps transcripts and recordings
         the same from run to run.
         """
-        started = time.monotonic()
-        result = self._call(call)
+        attributes = {
+            OPERATION: "execute_tool",
+            TOOL_NAME: call.name,
+            TOOL_CALL_ID: call.id,
+            TOOL_ARGUMENTS: call.arguments,
+            "vardex.permission": self.level(call.name),
+            "vardex.dry_run": self.dry_run,
+        }
+        with span(f"execute_tool {call.name}", attributes) as tool:
+            started = time.monotonic()
+            result = self._call(call)
+            tool.update({TOOL_RESULT: result.content, "vardex.wrote": result.wrote})
+            if result.is_error:
+                tool.fail(result.content.strip().splitlines()[0][:200] if result.content else "")
         return replace(result, seconds=time.monotonic() - started)
 
     def record(self, call: ToolCall, result: ToolResult) -> None:
@@ -274,7 +295,7 @@ def warehouse_tools(warehouse: Warehouse, knowledge: Knowledge) -> list[Tool]:
 
     def run_sql(call: Invocation) -> ToolResult:
         sql = str(call.argument("sql", ""))
-        max_rows = int(call.argument("max_rows", 100) or 100)
+        max_rows = min(max(int(call.argument("max_rows", 100) or 100), 1), MAX_ROWS)
         problems = check_sql(sql, knowledge.questions.dialect, described)
         if problems:
             # Checked before it runs, in the pack's own dialect, so the model is told what is
@@ -342,7 +363,7 @@ def warehouse_tools(warehouse: Warehouse, knowledge: Knowledge) -> list[Tool]:
                     "sql": {"type": "string", "description": "One SELECT statement."},
                     "max_rows": {
                         "type": "integer",
-                        "description": "Rows to fetch, at most 1000. Default 100.",
+                        "description": f"Rows to fetch, at most {MAX_ROWS}. Default 100.",
                     },
                 },
                 ["sql"],

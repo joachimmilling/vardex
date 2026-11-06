@@ -1,6 +1,6 @@
 [project]
 name = "vardex"
-version = "0.9.1"
+version = "0.10.0"
 description = "Blocks, recipes and packs for enterprise AI apps"
 readme = "README.md"
 authors = [
@@ -15,6 +15,8 @@ dependencies = [
     "fastembed>=0.9.0",
     "httpx2>=2.13.1",
     "mcp>=2.3.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.2",
+    "opentelemetry-sdk>=1.45.2",
     "pillow>=12.3.0",
     "psycopg[binary]>=3.3.6",
     "pydantic>=2.13.5",

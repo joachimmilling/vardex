@@ -82,7 +82,7 @@ def test_cite_prints_the_answer_and_its_sources(index, monkeypatch):
     monkeypatch.setattr(cli, "connect", lambda settings: FakeModel(answer))
     result = runner.invoke(app, ["cite", PACK, "What dividend is proposed?"])
     assert result.exit_code == 0, result.output
-    assert result.output.splitlines() == [
+    assert result.stdout.splitlines() == [
         "The board proposes NOK 4.20 per share [1].",
         "",
         "Sources",

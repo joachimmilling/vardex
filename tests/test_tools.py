@@ -10,6 +10,7 @@ from vardex.llm import ToolCall
 from vardex.permissions import Permissions
 from vardex.semantic import ColumnDoc, Knowledge, Metric, ModelDoc, Ontology, Questions
 from vardex.tools import (
+    MAX_ROWS,
     Invocation,
     Tool,
     Toolbox,
@@ -110,6 +111,25 @@ def test_run_sql_refuses_a_write(tmp_path):
     result = box(tmp_path, run_sql="read").call(call("run_sql", sql="delete from companies"))
     assert result.is_error
     assert "only a query may run" in result.content
+
+
+def test_run_sql_fetches_no_more_than_max_rows_whatever_the_model_asks(tmp_path):
+    asked = []
+
+    class Counting(DuckDBWarehouse):
+        def run(self, sql: str, max_rows: int = 1000):
+            asked.append(max_rows)
+            return super().run(sql, max_rows)
+
+    path = tmp_path / "warehouse.duckdb"
+    with duckdb.connect(path) as con:
+        con.execute(TABLES)
+    toolbox = build_toolbox(
+        Permissions(tools={"run_sql": "read"}), warehouse=Counting(path), knowledge=knowledge()
+    )
+    toolbox.call(call("run_sql", sql="select name from companies", max_rows=10_000_000))
+    toolbox.call(call("run_sql", sql="select name from companies", max_rows=-5))
+    assert asked == [MAX_ROWS, 1]
 
 
 def test_a_tool_with_no_permission_level_refuses_to_run(tmp_path):

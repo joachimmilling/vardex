@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -6,9 +7,11 @@ import httpx2
 import pytest
 from pydantic import BaseModel
 
-from vardex.anthropic_client import AnthropicClient
+from vardex import tracing
+from vardex.anthropic_client import PROVIDER, AnthropicClient, trace_attempts
 from vardex.config import Settings
-from vardex.llm import Image, Message, MissingAPIKeyError, ModelError, Request
+from vardex.llm import Hooked, Image, Message, MissingAPIKeyError, ModelError, Request
+from vardex.traces import FileTraces, traces
 
 SETTINGS = Settings(anthropic_api_key="test", model="claude-sonnet-5-5")
 REQUEST = Request(system="Be brief.", messages=[Message("user", "What is an organisation number?")])
@@ -211,3 +214,48 @@ def test_a_system_tail_comes_after_the_cache_breakpoint():
         {"type": "text", "text": "Tables.", "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": "Examples."},
     ]
+
+
+def test_each_http_attempt_is_a_span_inside_the_call(tmp_path):
+    """The SDK retries an overloaded API itself. Each attempt gets its own span, numbered,
+    inside the model call's span, so a slow call shows whether it was slow or retried."""
+    statuses = iter([529, 200])
+    message = {
+        "id": "msg_01",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-5-5",
+        "content": [{"type": "text", "text": "Ni siffer."}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 12, "output_tokens": 4},
+    }
+
+    def handler(request):
+        status = next(statuses)
+        if status != 200:  # retry-after-ms keeps the test fast; the SDK honours it
+            error = {"type": "error", "error": {"type": "overloaded_error", "message": "busy"}}
+            return httpx2.Response(status, json=error, headers={"retry-after-ms": "1"})
+        return httpx2.Response(200, json=message, headers={"request-id": "req_01"})
+
+    sdk = anthropic.Anthropic(
+        api_key="test",
+        http_client=httpx2.Client(transport=httpx2.MockTransport(handler)),
+        middleware=[trace_attempts],
+        max_retries=2,
+    )
+    tracing.setup(tmp_path / "traces")
+    client = Hooked(AnthropicClient(SETTINGS, sdk=sdk), (tracing.trace_calls(PROVIDER),))
+    answer = client.send(REQUEST)
+    assert answer.id == "msg_01"
+
+    (trace,) = traces(FileTraces(tmp_path / "traces"), datetime.now(UTC) - timedelta(hours=1))
+    chat = trace.root
+    attempts = trace.children(chat)
+    assert chat.name == "chat claude-sonnet-5-5" and chat.get("gen_ai.response.id") == "msg_01"
+    tried = [
+        (a.get("http.request.resend_count"), a.get("http.response.status_code")) for a in attempts
+    ]
+    assert tried == [(0, 529), (1, 200)]
+    assert attempts[0].failed and not attempts[1].failed
+    assert attempts[1].get("anthropic.request.id") == "req_01"

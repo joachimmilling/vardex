@@ -13,6 +13,11 @@ from typing import Any, Protocol
 import sqlglot
 from sqlglot import exp
 
+from vardex.tracing import DB_QUERY, DB_ROWS, DB_SYSTEM, span
+
+# Each dialect as OpenTelemetry names the database in db.system.name
+SYSTEMS = {"duckdb": "duckdb", "postgres": "postgresql"}
+
 
 def one_at_a_time[F: Callable[..., Any]](method: F) -> F:
     """For a method that uses a connection two threads must not use at once.
@@ -28,6 +33,24 @@ def one_at_a_time[F: Callable[..., Any]](method: F) -> F:
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         with self.gate:
             return method(self, *args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
+
+
+def traced_query[F: Callable[..., Any]](method: F) -> F:
+    """For a Warehouse's `run`: a span for each query, with its text and how many rows came
+    back. The span is named after the database, as OpenTelemetry names a query it cannot
+    summarise, and it includes any wait for the connection, because that wait is real."""
+
+    @functools.wraps(method)
+    def wrapper(self: Any, sql: str, max_rows: int = 1000) -> Any:
+        system = SYSTEMS.get(self.dialect, "other_sql")
+        attributes = {DB_SYSTEM: system, DB_QUERY: sql, "vardex.max_rows": max_rows}
+        with span(system, attributes, kind="client") as query:
+            result = method(self, sql, max_rows)
+            query.set(DB_ROWS, len(result.rows))
+            query.set("vardex.truncated", result.truncated)
+            return result
 
     return wrapper  # type: ignore[return-value]
 
