@@ -4,6 +4,7 @@ import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import httpx2
 import pytest
 
 from vardex.dashboard import (
@@ -22,7 +23,15 @@ from vardex.feedback import (
     candidate_from,
     sample,
 )
-from vardex.traces import FileTraces, SpanRecord, Trace, TraceError, as_traces
+from vardex.traces import (
+    FileTraces,
+    LangfuseTraces,
+    SpanRecord,
+    Trace,
+    TraceError,
+    as_traces,
+    traces,
+)
 
 NOW = datetime(2026, 10, 27, 9, 0, tzinfo=UTC)
 
@@ -225,3 +234,119 @@ def test_a_sample_is_random_repeatable_and_only_of_questions_answered():
     assert len(picked) == 3
     assert [t.trace_id for t in picked] == [t.trace_id for t in sample(found, 3, seed=7)]
     assert all(t.question for t in sample(found, 50, seed=1))
+
+
+def observation(oid, parent=None, **more):
+    return {
+        "id": oid,
+        "traceId": "f" * 32,
+        "parentObservationId": parent,
+        "name": "vardex answer" if parent is None else "chat claude-sonnet-5-5",
+        "type": "SPAN" if parent is None else "GENERATION",
+        "startTime": "2026-10-27T09:00:00.000Z",
+        "endTime": "2026-10-27T09:00:04.000Z",
+        "level": "DEFAULT",
+        **more,
+    }
+
+
+def langfuse(pages, seen):
+    """A Langfuse that answers with the pages given, one per request, and keeps each query."""
+
+    def handler(request):
+        seen.append(dict(request.url.params))
+        return httpx2.Response(200, json=pages[len(seen) - 1])
+
+    return LangfuseTraces(
+        "https://cloud.langfuse.com",
+        "pk",
+        "sk",
+        http=lambda: httpx2.Client(
+            base_url="https://cloud.langfuse.com", transport=httpx2.MockTransport(handler)
+        ),
+    )
+
+
+def test_langfuse_observations_come_back_as_the_spans_that_were_sent():
+    root = observation(
+        "r", metadata={"attributes": {"vardex.question": "Hvor mange?", "vardex.command": "answer"}}
+    )
+    call = observation(
+        "c",
+        parent="r",
+        model="claude-sonnet-5-5",
+        usageDetails={"input": 6200, "output": 50, "cache_read_input_tokens": 6000},
+        metadata={"attributes": {"vardex.cost_usd": "0.004", "vardex.attempt": "1"}},
+    )
+    seen = []
+    store = langfuse([{"data": [root], "meta": {"cursor": "next"}}, {"data": [call]}], seen)
+    found = traces(store, NOW - timedelta(hours=1))
+    assert seen[0]["fromStartTime"] == "2026-10-27T08:00:00.000Z"
+    assert seen[0]["expandMetadata"] == "attributes"  # or the attributes are cut at 200
+    assert seen[1]["cursor"] == "next"
+    (trace,) = found
+    assert trace.question == "Hvor mange?" and trace.command == "answer"
+    (chat_span,) = trace.calls  # a generation is a model call, whatever it was named
+    assert chat_span.get("gen_ai.usage.input_tokens") == 6200
+    assert chat_span.get("gen_ai.usage.cache_read.input_tokens") == 6000
+    assert chat_span.get("gen_ai.request.model") == "claude-sonnet-5-5"
+    assert chat_span.get("vardex.attempt") == 1
+    assert trace.cost_usd == Decimal("0.004")
+
+
+def test_langfuse_attributes_flattened_into_the_metadata_are_read_too():
+    # The shape Langfuse's cloud answers with: every attribute a key of the metadata itself
+    root = observation(
+        "r",
+        metadata={
+            "attributes.vardex.command": "answer",
+            "attributes.vardex.outcome": "answer",
+            "resourceAttributes.vardex.pack": "norwegian-companies",
+            "resourceAttributes.vardex.pack.version": "b37856758845",
+        },
+    )
+    call = observation(
+        "c",
+        parent="r",
+        model="claude-sonnet-5-5",
+        usageDetails={"input": 911, "output": 340},
+        metadata={
+            "attributes.vardex.cost_usd": 0.005222,
+            "attributes.gen_ai.usage.input_tokens": 911,
+            "resourceAttributes.vardex.pack": "norwegian-companies",
+        },
+    )
+    (trace,) = traces(langfuse([{"data": [root, call]}], []), NOW - timedelta(hours=1))
+    assert trace.command == "answer" and trace.outcome == "answer"
+    assert trace.pack == "norwegian-companies" and trace.pack_version == "b37856758845"
+    assert trace.cost_usd == Decimal("0.005222")
+
+
+def test_langfuse_finds_a_trace_by_the_first_characters_of_its_id():
+    seen = []
+    store = langfuse([{"data": [observation("r")]}], seen)
+    assert store.trace("ffff").trace_id == "f" * 32
+    assert "traceId" not in seen[0] and "fromStartTime" in seen[0]
+
+
+def test_langfuse_finds_a_trace_by_its_whole_id_and_says_so_when_it_cannot():
+    seen = []
+    store = langfuse([{"data": [observation("r")]}, {"data": []}], seen)
+    assert store.trace("f" * 32).trace_id == "f" * 32
+    assert seen[0]["traceId"] == "f" * 32
+    with pytest.raises(TraceError, match="no trace"):
+        store.trace("e" * 32)
+
+
+def test_langfuse_that_is_down_is_a_trace_error():
+    def handler(request):
+        return httpx2.Response(503)
+
+    store = LangfuseTraces(
+        "https://cloud.langfuse.com",
+        "pk",
+        "sk",
+        http=lambda: httpx2.Client(transport=httpx2.MockTransport(handler)),
+    )
+    with pytest.raises(TraceError, match="did not answer"):
+        store.spans(NOW)
