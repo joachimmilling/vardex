@@ -10,17 +10,22 @@ which every backend keeps as it was sent. A backend's own vocabulary — its obs
 its levels, its idea of a generation — is translated in its store and goes no further.
 """
 
+import base64
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
+import httpx2
+
 from vardex.tracing import (
     ANSWER,
     ATTEMPT,
+    CACHE_READ,
+    CACHE_WRITE,
     COMMAND,
     COST,
     EVALUATION,
@@ -33,6 +38,7 @@ from vardex.tracing import (
     PACK,
     PACK_VERSION,
     QUESTION,
+    REQUEST_MODEL,
     SQL,
     day_file,
 )
@@ -289,3 +295,150 @@ def one_trace(spans: list[SpanRecord], trace_id: str) -> Trace:
     if len(ids) > 1:
         raise TraceError(f"{trace_id} names {len(ids)} traces: give more of the id")
     return as_traces(spans)[0]
+
+
+PAGE = 1000  # the most observations Langfuse gives back in one page
+TRACE_ID_LENGTH = 32  # hex digits in a whole OpenTelemetry trace id
+SEARCH_DAYS = 30  # how far back a trace named by part of its id is looked for
+# Where Langfuse moved an attribute it understood, out of the attributes and into a field of
+# its own: the field, its key, and the name the attribute was sent under
+MOVED = (
+    ("usageDetails", "input", INPUT_TOKENS),
+    ("usageDetails", "output", OUTPUT_TOKENS),
+    ("usageDetails", "cache_read_input_tokens", CACHE_READ),
+    ("usageDetails", "cache_creation_input_tokens", CACHE_WRITE),
+)
+
+
+@dataclass
+class LangfuseTraces:
+    """Traces kept in Langfuse, read back through its public API.
+
+    Langfuse calls a span an observation. It keeps the attributes it does not understand in
+    the observation's metadata, and moves the ones it does — the model, the token counts —
+    into fields of its own. Reading a trace back means putting those back under the names
+    they were sent with, so the rest of Vardex reads a Langfuse trace exactly as it reads
+    one of its own files. That translation happens here and nowhere else.
+    """
+
+    host: str  # such as https://cloud.langfuse.com
+    public_key: str
+    secret_key: str
+    http: Callable[[], httpx2.Client] | None = None  # for tests: a client on a mock transport
+
+    @property
+    def name(self) -> str:
+        return f"Langfuse at {self.host}"
+
+    def client(self) -> httpx2.Client:
+        if self.http is not None:
+            return self.http()
+        token = base64.b64encode(f"{self.public_key}:{self.secret_key}".encode()).decode()
+        return httpx2.Client(
+            base_url=self.host.rstrip("/"),
+            headers={"Authorization": f"Basic {token}"},
+            timeout=30.0,
+        )
+
+    def observations(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Every observation matching the filters, following the cursor page by page."""
+        query = {
+            **params,
+            "limit": PAGE,
+            "fields": "core,basic,metadata,model,usage",
+            # Metadata is cut to 200 characters unless asked for in full, and the attributes
+            # are the part of it this reads
+            "expandMetadata": "attributes",
+        }
+        found: list[dict[str, Any]] = []
+        with self.client() as client:
+            while True:
+                try:
+                    response = client.get("/api/public/v2/observations", params=query)
+                    response.raise_for_status()
+                    body = response.json()
+                except (httpx2.HTTPError, ValueError) as err:
+                    raise TraceError(f"Langfuse did not answer: {err}") from err
+                found += body.get("data", [])
+                cursor = (body.get("meta") or {}).get("cursor")
+                if not cursor:
+                    return found
+                query["cursor"] = cursor
+
+    def spans(self, since: datetime, until: datetime | None = None) -> list[SpanRecord]:
+        params = {"fromStartTime": iso(since)}
+        if until is not None:
+            params["toStartTime"] = iso(until)
+        return [span for o in self.observations(params) if (span := from_observation(o))]
+
+    def trace(self, trace_id: str) -> Trace:
+        """One trace, by its id or the first characters of it. Langfuse finds a trace only by
+        its whole id, so a part is looked for among the traces of the last SEARCH_DAYS days."""
+        if len(trace_id) < TRACE_ID_LENGTH:
+            since = datetime.now(UTC) - timedelta(days=SEARCH_DAYS)
+            found = [s for s in self.spans(since) if s.trace_id.startswith(trace_id)]
+            return one_trace(found, trace_id)
+        observations = self.observations({"traceId": trace_id})
+        return one_trace([s for o in observations if (s := from_observation(o))], trace_id)
+
+
+def iso(when: datetime) -> str:
+    return when.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def from_observation(observation: dict[str, Any]) -> SpanRecord | None:
+    """One Langfuse observation as the span it was sent as, or None while it has no end."""
+    if not observation.get("endTime"):
+        return None
+    metadata = observation.get("metadata") or {}
+    attributes = kept(metadata, "attributes")
+    resource = kept(metadata, "resourceAttributes")
+    for field_name, key, name in MOVED:
+        value = (observation.get(field_name) or {}).get(key)
+        if value is not None and name not in attributes:
+            attributes[name] = value
+    if observation.get("model") and REQUEST_MODEL not in attributes:
+        attributes[REQUEST_MODEL] = observation["model"]
+    if observation.get("type") == "GENERATION":
+        attributes.setdefault(OPERATION, "chat")
+    return SpanRecord(
+        trace_id=observation["traceId"],
+        span_id=observation["id"],
+        parent_id=observation.get("parentObservationId"),
+        name=observation.get("name") or "",
+        start=moment(observation["startTime"]),
+        end=moment(observation["endTime"]),
+        status="error" if observation.get("level") == "ERROR" else "unset",
+        error=observation.get("statusMessage"),
+        attributes=attributes,
+        resource=resource,
+        events=[],  # verdicts on a span are in Langfuse's scores, which this does not read
+    )
+
+
+def kept(metadata: dict[str, Any], part: str) -> dict[str, Any]:
+    """The attributes Langfuse kept in an observation's metadata under `part`, as sent.
+
+    Langfuse may keep them nested, as `{"attributes": {"vardex.pack": …}}`, or flattened into
+    the metadata, as `{"attributes.vardex.pack": …}`; its cloud flattens them. Both are read.
+    """
+    nested = metadata.get(part) or {}
+    if isinstance(nested, str):
+        nested = json.loads(nested)
+    prefix = f"{part}."
+    flat = {k.removeprefix(prefix): v for k, v in metadata.items() if k.startswith(prefix)}
+    return {name: as_sent(value) for name, value in {**nested, **flat}.items()}
+
+
+def as_sent(value: Any) -> Any:
+    """An attribute as it was sent. Langfuse may keep a number or a list as its JSON text."""
+    if (
+        isinstance(value, str)
+        and value[:1] in ("[", "{")
+        or (isinstance(value, str) and value.lstrip("-").replace(".", "", 1).isdigit())
+    ):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value

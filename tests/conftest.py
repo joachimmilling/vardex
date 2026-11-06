@@ -42,10 +42,19 @@ def no_real_models(monkeypatch):
 def traces_in_tmp(tmp_path, monkeypatch):
     """Every command keeps its traces in the test's own folder, and no trace outlives its
     test: the next test starts with nothing being traced. Both the setting and the default
-    are pointed there, because some tests replace the settings with their own."""
+    are pointed there, because some tests replace the settings with their own.
+
+    Nothing is sent to a backend or read from one. The variables are set empty rather than
+    removed: a removed one comes back from the developer's .env the moment the settings are
+    loaded, and the tests' traces would go to their real Langfuse."""
     monkeypatch.setenv("VARDEX_TRACE_DIR", str(tmp_path / "traces"))
     monkeypatch.setattr(cli, "traces_path", lambda data_dir, pack: tmp_path / "traces")
-    for name in ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"):
-        monkeypatch.delenv(name, raising=False)
+    for name in (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "VARDEX_TRACE_STORE",
+    ):
+        monkeypatch.setenv(name, "")
     yield
     tracing.stop()
