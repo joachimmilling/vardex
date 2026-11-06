@@ -112,7 +112,7 @@ from vardex.semantic import Knowledge, check, check_documents, find_key, load_kn
 from vardex.sql import QueryError, Result, Warehouse, format_table, format_value
 from vardex.text_to_sql import AnswerError
 from vardex.tools import Approver, Tool, Toolbox, ToolResult, build_toolbox
-from vardex.traces import FileTraces, Trace, TraceError, TraceStore, traces
+from vardex.traces import FileTraces, LangfuseTraces, Trace, TraceError, TraceStore, traces
 from vardex.tracing import (
     ANSWER,
     COMMAND,
@@ -2576,6 +2576,15 @@ def undo_command(
 def connect_traces(settings: Settings, pack: Path) -> TraceStore:
     """Where a pack's traces are read back from. This is the one place that chooses."""
     name = load_pack(pack).name
+    if settings.trace_store == "langfuse":
+        if not (settings.langfuse_public_key and settings.langfuse_secret_key):
+            raise TraceError(
+                "VARDEX_TRACE_STORE is langfuse, but LANGFUSE_PUBLIC_KEY or "
+                "LANGFUSE_SECRET_KEY is not set"
+            )
+        return LangfuseTraces(
+            settings.langfuse_host, settings.langfuse_public_key, settings.langfuse_secret_key
+        )
     return FileTraces(settings.trace_dir or traces_path(settings.data_dir, name))
 
 

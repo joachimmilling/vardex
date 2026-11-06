@@ -6,6 +6,13 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `VARDEX_TRACE_STORE=langfuse` reads traces back from Langfuse's public API
+  (`/api/public/v2/observations`, with `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY` and
+  `LANGFUSE_SECRET_KEY`), so `traces`, `trace`, `dashboard`, `feedback` and `sample` work where a
+  company keeps its traces.
+
 ## [0.10.0] - 2026-11-06
 
 ### Added
