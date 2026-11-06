@@ -73,6 +73,7 @@ from vardex.llm import (
 from vardex.llm import ask as ask_model
 from vardex.mcp_client import McpSession, load_mcp_servers, outside_tools
 from vardex.mcp_server import build_server, serve_stdio
+from vardex.monitoring import breaches, load_monitoring
 from vardex.packs import Language, PackError, fingerprint, load_pack
 from vardex.permissions import Permissions, load_permissions, unlisted
 from vardex.pgvector_index import PostgresIndex
@@ -579,6 +580,7 @@ def check_command(pack: PackArgument, warehouse: WarehouseOption = None) -> None
             problems += check_documents(connection, knowledge.ontology, load_documents(pack))
         problems += check_permissions(pack, connection)
         problems += check_workflows(pack, knowledge)
+        load_monitoring(pack)  # a typo in the limits fails here, not in the first hourly check
     except PackError as err:
         raise fail(str(err)) from err
     finally:
@@ -2675,7 +2677,14 @@ def trace_command(
 @app.command(name="dashboard")
 def dashboard_command(
     pack: PackArgument,
-    days: DaysOption = 7,
+    days: Annotated[
+        float | None,
+        typer.Option(
+            min=0.01,
+            help="Look back this many days. Default: 7, or the window of "
+            "monitoring.yaml with --check.",
+        ),
+    ] = None,
     by: Annotated[
         Literal["command", "model", "version", "day"],
         typer.Option(help="One row per command, model, pack version or day."),
@@ -2683,30 +2692,48 @@ def dashboard_command(
     html: Annotated[
         bool, typer.Option("--html", help="Also write a page with charts, and print its path.")
     ] = False,
+    check_limits: Annotated[
+        bool,
+        typer.Option(
+            "--check", help="Compare with the limits in monitoring.yaml; exit 1 past one."
+        ),
+    ] = False,
 ) -> None:
     """Requests, failures, repairs, cost, time and feedback, from the pack's traces."""
     settings = load_settings()
     try:
         name = load_pack(pack).name
-        found = traces(connect_traces(settings, pack), since(days))
+        monitoring = load_monitoring(pack) if check_limits else None
+        if check_limits and monitoring is None:
+            raise PackError(f"{pack} has no monitoring.yaml, so there are no limits to check")
+        window = days or (monitoring.window_days if monitoring else 7)
+        found = traces(connect_traces(settings, pack), since(window))
     except (PackError, TraceError) as err:
         raise fail(str(err)) from err
     verdicts = FeedbackLog(feedback_path(settings.data_dir, name)).verdicts()
     if not found:
-        typer.secho(f"No traces in the last {days:g} days.", fg="bright_black", err=True)
+        typer.secho(f"No traces in the last {window:g} days.", fg="bright_black", err=True)
         return
-    typer.echo(format_figures(figures(found, GROUPINGS[by], verdicts)))
+    rows = figures(found, GROUPINGS["command" if check_limits else by], verdicts)
+    typer.echo(format_figures(rows))
     if html:
         today = datetime.now(UTC).date()
         page = write_dashboard(
             settings.data_dir / name / "dashboard.html",
-            f"{name}: the last {days:g} days",
+            f"{name}: the last {window:g} days",
             found,
-            since(days).date(),
+            since(window).date(),
             today,
             verdicts,
         )
         typer.secho(f"Wrote {page}", fg="bright_black", err=True)
+    if monitoring is not None:
+        broken = breaches(rows, monitoring)
+        for line in broken:
+            typer.secho(line, fg=typer.colors.RED, err=True)
+        if broken:
+            raise typer.Exit(code=1)
+        typer.secho("Every command is within its limits.", fg=typer.colors.GREEN, err=True)
 
 
 @app.command(name="feedback")

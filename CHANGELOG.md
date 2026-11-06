@@ -6,6 +6,13 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A pack's `monitoring.yaml` sets limits per command (`error_rate`, `repair_rate`,
+  `p95_seconds`, `cost_per_request`, `bad_feedback`) over a window of days, and
+  `vardex dashboard --check` exits 1 when one is passed, so a scheduler can run it. `vardex check`
+  reads the file too.
+
 ## [0.10.0] - 2026-11-06
 
 ### Added

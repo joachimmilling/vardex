@@ -1,0 +1,21 @@
+# What this pack promises in production. `vardex dashboard packs/norwegian-companies --check`
+# compares the last window of traces with these limits and exits 1 when one is passed, so a
+# scheduler can run it every hour and somebody hears about it. No rate or time is judged on
+# fewer than min_requests requests: a share of five says nothing.
+window_days: 7
+min_requests: 20
+commands:
+  answer:
+    error_rate: 0.05        # no query that could run, or numbers that did not trace
+    repair_rate: 0.15       # needed a second attempt at the SQL or the answer
+    p95_seconds: 30
+    cost_per_request: 0.02  # about three times what a question cost when this was set
+    bad_feedback: 3
+  cite:
+    error_rate: 0.05
+    p95_seconds: 30
+  agent:
+    error_rate: 0.10
+    cost_per_request: 0.15
+  run:
+    error_rate: 0.0         # a scheduled run that fails is always worth hearing about
