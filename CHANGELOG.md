@@ -20,6 +20,9 @@ All notable changes to Vardex are recorded here. The format follows
 - `vardex ingest` and `vardex index` are traced: a span per source, never one per key, with
   the rows loaded; spans for `dbt build`, `dbt source freshness` and the check of the semantic
   layer; and a span per document with its pages, passages and scanned pages.
+- `vardex dashboard --compare OLD NEW` sets two pack versions side by side, with each one's
+  failure and repair rates and their 95% Wilson intervals, and says *better* or *worse* only
+  when the intervals do not overlap.
 
 ### Fixed
 

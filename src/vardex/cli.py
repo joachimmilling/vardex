@@ -25,7 +25,7 @@ from vardex.budgets import Budget, BudgetError, Spend, spend_path
 from vardex.calllog import log_calls
 from vardex.charts import charts_path
 from vardex.config import Settings, load_settings
-from vardex.dashboard import GROUPINGS, figures, format_figures, write_dashboard
+from vardex.dashboard import GROUPINGS, compare, figures, format_figures, write_dashboard
 from vardex.documents import (
     document_path,
     find_page,
@@ -2708,6 +2708,10 @@ def dashboard_command(
             "--check", help="Compare with the limits in monitoring.yaml; exit 1 past one."
         ),
     ] = False,
+    versions: Annotated[
+        tuple[str, str] | None,
+        typer.Option("--compare", help="Two pack versions, old then new, or their starts."),
+    ] = None,
 ) -> None:
     """Requests, failures, repairs, cost, time and feedback, from the pack's traces."""
     settings = load_settings()
@@ -2723,6 +2727,17 @@ def dashboard_command(
     verdicts = FeedbackLog(feedback_path(settings.data_dir, name)).verdicts()
     if not found:
         typer.secho(f"No traces in the last {window:g} days.", fg="bright_black", err=True)
+        return
+    if versions:
+        rows = {r.group: r for r in figures(found, GROUPINGS["version"], verdicts)}
+        try:
+            old, new = (one_version(rows, start) for start in versions)
+        except ValueError as err:
+            raise fail(str(err)) from err
+        typer.echo(format_figures([old, new]))
+        typer.echo("")
+        for line in compare(old, new):
+            typer.echo(line)
         return
     rows = figures(found, GROUPINGS["command" if check_limits else by], verdicts)
     typer.echo(format_figures(rows))
@@ -2744,6 +2759,15 @@ def dashboard_command(
         if broken:
             raise typer.Exit(code=1)
         typer.secho("Every command is within its limits.", fg=typer.colors.GREEN, err=True)
+
+
+def one_version(rows: dict[str, Any], start: str) -> Any:
+    """The figures of the one pack version whose fingerprint starts with `start`."""
+    found = [row for version, row in rows.items() if version.startswith(start)]
+    if len(found) != 1:
+        known = ", ".join(sorted(rows)) or "none"
+        raise ValueError(f"{start} names {len(found)} versions in this window. Known: {known}")
+    return found[0]
 
 
 @app.command(name="feedback")

@@ -273,3 +273,18 @@ def test_the_dashboard_checks_the_packs_limits(pack, tmp_path, monkeypatch):
     result = runner.invoke(cli.app, ["dashboard", str(pack), "--check"])
     assert result.exit_code == 1
     assert "answer: failed 100% over 1 requests (limit 0%)" in result.stderr
+
+
+def test_the_dashboard_compares_two_versions_of_the_pack(pack, tmp_path, monkeypatch):
+    use(monkeypatch, FakeModel(plan(), "DEMO LAKS AS: 1,480,312,000."))
+    runner.invoke(cli.app, ["answer", str(pack), "Largest revenue?"])
+    (pack / "warehouse" / "metrics.yaml").write_text(METRICS + "# a changed pack\n")
+    use(monkeypatch, FakeModel(plan(), "DEMO LAKS AS: 1,480,312,000."))
+    runner.invoke(cli.app, ["answer", str(pack), "Largest revenue?"])
+    old, new = (t.pack_version for t in recorded(tmp_path))
+    assert old != new
+    result = runner.invoke(cli.app, ["dashboard", str(pack), "--compare", old[:6], new[:6]])
+    assert result.exit_code == 0, result.output
+    assert "not enough requests to tell" in result.stdout
+    unknown = runner.invoke(cli.app, ["dashboard", str(pack), "--compare", "zzz", new])
+    assert unknown.exit_code == 1 and "names 0 versions" in unknown.output
