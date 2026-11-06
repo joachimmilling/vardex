@@ -6,6 +6,12 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `vardex ingest` and `vardex index` are traced: a span per source, never one per key, with
+  the rows loaded; spans for `dbt build`, `dbt source freshness` and the check of the semantic
+  layer; and a span per document with its pages, passages and scanned pages.
+
 ## [0.10.0] - 2026-11-06
 
 ### Added

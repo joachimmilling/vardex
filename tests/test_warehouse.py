@@ -1,14 +1,16 @@
 """Builds of a small pack made here, with every request answered by the test itself."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx2
 import pytest
 
+from vardex import tracing
 from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.packs import PackError
 from vardex.semantic import load_metrics
+from vardex.traces import FileTraces
 from vardex.warehouse import WarehouseError, build
 
 NOW = datetime(2026, 10, 5, 6, 0, tzinfo=UTC)
@@ -177,3 +179,22 @@ def test_an_ontology_that_does_not_hold_fails_the_build(tmp_path):
     with pytest.raises(WarehouseError) as caught:
         build(pack, tmp_path / "data", answer(), now=NOW)
     assert "object Person: team repeats in 1 row" in str(caught.value)
+
+
+def test_a_build_is_traced_one_span_per_source_and_none_per_key(tmp_path):
+    tracing.setup(tmp_path / "traces")
+    with tracing.span("vardex ingest"):
+        build(make_pack(tmp_path), tmp_path / "data", answer(), now=NOW)
+    spans = FileTraces(tmp_path / "traces").spans(datetime.now(UTC) - timedelta(hours=1))
+    names = {s.name for s in spans}
+    assert names == {
+        "vardex ingest",
+        "ingest people",
+        "ingest badges",  # three keys, and still one span: none per key
+        "dbt build",
+        "dbt source freshness",
+        "check semantic layer",
+        "duckdb",  # the checks' queries on the new warehouse
+    }
+    badges = next(s for s in spans if s.name == "ingest badges")
+    assert badges.get("vardex.keys") == 3 and badges.get("db.response.returned_rows") == 3

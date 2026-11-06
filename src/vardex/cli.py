@@ -518,6 +518,7 @@ def extract_command(
 
 
 @app.command()
+@traced("ingest")
 def ingest(
     pack: PackArgument,
     refresh: Annotated[
