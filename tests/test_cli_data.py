@@ -96,7 +96,8 @@ def test_answer_shows_the_answer_the_sql_the_rows_and_where_each_number_came_fro
     assert SQL in result.stdout
     assert "DEMO LAKS AS        120" in lines
     assert "  120              row 1, employees = 120" in lines
-    assert result.stderr == ""
+    assert result.stderr.startswith("(trace ")  # nothing on stderr but which trace it was
+    assert "--bad)" in result.stderr and result.stderr.count("\n") == 1
 
 
 def test_answer_warns_about_a_name_spelt_unlike_the_rows(data, monkeypatch):

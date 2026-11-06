@@ -137,6 +137,7 @@ class Answer:
     first_text_seconds: float | None = None  # set when the answer was streamed
     tool_calls: tuple[ToolCall, ...] = ()  # set when stop_reason is tool_use
     reasoning: tuple[Reasoning, ...] = ()  # to send back with the turn, untouched
+    id: str = ""  # the provider's id for this answer, to quote when asking them about it
 
     @property
     def truncated(self) -> bool:
@@ -160,6 +161,55 @@ class ModelClient(Protocol):
     def count_tokens(self, text: str) -> int:
         """Count the tokens a text uses when sent as a question."""
         ...
+
+
+Send = Callable[[Request], Answer]
+
+
+class Hook(Protocol):
+    """Code that runs around every model call: it gets the model's name, the request, and
+    `send`, which makes the call, and returns the answer.
+
+    A hook can look at the request before it goes, at the answer when it comes back, and at
+    the exception when it fails, and it can refuse a call by raising instead of sending. It
+    must return what `send` returned: a hook watches the call, it does not change it.
+    """
+
+    def __call__(self, model: str, request: Request, send: Send) -> Answer: ...
+
+
+@dataclass
+class Hooked:
+    """A ModelClient with hooks around every call, the first hook outermost.
+
+    This is the one place to watch every call a client makes: tracing, the call log, and
+    whatever comes next go here, and neither the client nor anything that uses it changes.
+    """
+
+    client: ModelClient
+    hooks: tuple[Hook, ...] = ()
+
+    @property
+    def model(self) -> str:
+        return self.client.model
+
+    def send(self, request: Request, on_text: Callable[[str], None] | None = None) -> Answer:
+        def call(request: Request) -> Answer:
+            return self.client.send(request, on_text)
+
+        chain: Send = call
+        for hook in reversed(self.hooks):
+            chain = self._around(hook, chain)
+        return chain(request)
+
+    def _around(self, hook: Hook, inner: Send) -> Send:
+        # A function of its own, so each link keeps its own hook and inner. Built inline in
+        # the loop above, every link would see the last hook: Python's closures bind names,
+        # not values.
+        return lambda request: hook(self.model, request, inner)
+
+    def count_tokens(self, text: str) -> int:
+        return self.client.count_tokens(text)
 
 
 @dataclass

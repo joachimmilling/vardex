@@ -18,6 +18,7 @@ from vardex.prompts import ANSWER, ANSWER_REPAIR, NO_ROWS, SQL_REPAIR, WRITE_SQL
 from vardex.provenance import Figure, misspelt, trace
 from vardex.semantic import Example, Knowledge, Questions
 from vardex.sql import QueryError, Result, Table, Warehouse, check_sql, format_value, transpile
+from vardex.tracing import ATTEMPT, failed, passed, span
 
 DIALECTS = {"duckdb": "DuckDB", "postgres": "PostgreSQL", "snowflake": "Snowflake"}
 MAX_VALUES = 50  # list a column's values only when it has at most this many
@@ -251,40 +252,51 @@ def plan_and_run(
 ) -> tuple[Plan, Result | None, list[Answer]]:
     """Ask for a plan; when it is a query, check it and run it. When either fails, show the
     model what went wrong and ask again, up to `repairs` times. A query that returns no rows
-    is shown to the model once, in case a filter is spelt differently in the data."""
+    is shown to the model once, in case a filter is spelt differently in the data.
+
+    Each attempt is a span of its own, with its number and whether it passed the checks, so
+    a trace shows which answers needed a second try and what was wrong with the first."""
     answers: list[Answer] = []
     allowed = set(knowledge.tables)
     failures = 0
     looked = False
+    number = 0
     while True:
-        answer = client.send(request)
-        answers.append(answer)
-        if answer.stop_reason != "end":
-            raise AnswerError(f"the model stopped early ({answer.stop_reason})", answers)
-        try:
-            plan = Plan.model_validate_json(answer.text)
-        except ValidationError as err:
-            problems = [describe_problem(e) for e in err.errors()]
-        else:
-            if plan.action != "query":
-                return plan, None, answers
-            problems = check_sql(plan.sql or "", warehouse.dialect, allowed)
-            if not problems:
-                try:
-                    result = warehouse.run(plan.sql or "", max_rows=max_rows)
-                except QueryError as err:
-                    problems = [f"the warehouse refused it: {err}"]
-                else:
-                    if result.rows or looked:
-                        return plan, result, answers
-                    looked = True
-                    request = with_reply(request, answer.text, NO_ROWS)
-                    continue
-        failures += 1
-        if failures > repairs:
-            raise AnswerError("no query that could run: " + "; ".join(problems), answers)
-        problems_text = "\n".join(f"- {p}" for p in problems)
-        request = with_reply(request, answer.text, SQL_REPAIR.format(problems=problems_text))
+        number += 1
+        with span("write_sql", {ATTEMPT: number}) as attempt:
+            answer = client.send(request)
+            answers.append(answer)
+            if answer.stop_reason != "end":
+                raise AnswerError(f"the model stopped early ({answer.stop_reason})", answers)
+            try:
+                plan = Plan.model_validate_json(answer.text)
+            except ValidationError as err:
+                problems = [describe_problem(e) for e in err.errors()]
+            else:
+                attempt.set("vardex.plan", plan.action)
+                if plan.action != "query":
+                    passed(attempt, "sql_checks")
+                    return plan, None, answers
+                problems = check_sql(plan.sql or "", warehouse.dialect, allowed)
+                if not problems:
+                    try:
+                        result = warehouse.run(plan.sql or "", max_rows=max_rows)
+                    except QueryError as err:
+                        problems = [f"the warehouse refused it: {err}"]
+                    else:
+                        if result.rows or looked:
+                            passed(attempt, "sql_checks")
+                            return plan, result, answers
+                        looked = True
+                        failed(attempt, "rows_found", ["the query returned no rows"])
+                        request = with_reply(request, answer.text, NO_ROWS)
+                        continue
+            failed(attempt, "sql_checks", problems)
+            failures += 1
+            if failures > repairs:
+                raise AnswerError("no query that could run: " + "; ".join(problems), answers)
+            problems_text = "\n".join(f"- {p}" for p in problems)
+            request = with_reply(request, answer.text, SQL_REPAIR.format(problems=problems_text))
 
 
 def answer_prompt(style: list[str]) -> str:
@@ -317,15 +329,18 @@ def answer_from_rows(
         effort="low",
     )
     answers: list[Answer] = []
-    for _ in range(repairs + 1):
-        answer = client.send(request)
-        answers.append(answer)
-        figures = trace(answer.text, [result], question, plan.assumptions)
-        untraced = [f.text for f in figures if not f.traced]
-        if not untraced:
-            return answer.text.strip(), figures, answers
-        repair = ANSWER_REPAIR.format(figures=", ".join(untraced))
-        request = with_reply(request, answer.text, repair)
+    for number in range(1, repairs + 2):
+        with span("answer_from_rows", {ATTEMPT: number}) as attempt:
+            answer = client.send(request)
+            answers.append(answer)
+            figures = trace(answer.text, [result], question, plan.assumptions)
+            untraced = [f.text for f in figures if not f.traced]
+            if not untraced:
+                passed(attempt, "numbers_traced")
+                return answer.text.strip(), figures, answers
+            failed(attempt, "numbers_traced", [f"no query returned {', '.join(untraced)}"])
+            repair = ANSWER_REPAIR.format(figures=", ".join(untraced))
+            request = with_reply(request, answer.text, repair)
     raise AnswerError(
         f"the answer has numbers no query returned: {', '.join(untraced)}", answers, result
     )

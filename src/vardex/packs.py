@@ -1,5 +1,6 @@
 """The pack format, version 0: what a pack.yaml may contain, and how to load one."""
 
+import hashlib
 from pathlib import Path
 from typing import Any, Literal
 
@@ -78,3 +79,23 @@ def load_pack(folder: Path) -> PackManifest:
     if not manifest.is_file():
         raise PackError(f"No pack.yaml found in {folder}")
     return read_yaml(manifest, PackManifest, "pack")
+
+
+# What a pack is made of, for its fingerprint: its declarations, SQL and prompts. Not its golden
+# sets, which change no answer, and not what dbt builds from it.
+PACK_FILES = (".yaml", ".yml", ".sql", ".md", ".txt")
+NOT_THE_PACK = ("evals", "target", "logs", "dbt_packages", "__pycache__")
+
+
+def fingerprint(folder: Path) -> str:
+    """A short name for the exact contents of a pack, which changes when any file that can
+    change an answer changes. Two traces with the same fingerprint ran the same pack."""
+    digest = hashlib.sha256()
+    for path in sorted(folder.rglob("*")):
+        relative = path.relative_to(folder)
+        if not path.is_file() or path.suffix not in PACK_FILES:
+            continue
+        if any(part in NOT_THE_PACK or part.startswith(".") for part in relative.parts):
+            continue
+        digest.update(relative.as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()[:12]

@@ -12,7 +12,7 @@ from typing import Any
 
 import psycopg
 
-from vardex.sql import Column, QueryError, Result, Table, one_at_a_time
+from vardex.sql import Column, QueryError, Result, Table, one_at_a_time, traced_query
 
 
 class PostgresWarehouse:
@@ -54,6 +54,7 @@ class PostgresWarehouse:
             tables.setdefault(table, []).append(Column(column, data_type))
         return [Table(name, columns) for name, columns in tables.items()]
 
+    @traced_query
     @one_at_a_time
     def run(self, sql: str, max_rows: int = 1000) -> Result:
         """Run one query and fetch at most max_rows rows.

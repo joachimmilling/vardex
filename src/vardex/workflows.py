@@ -55,6 +55,7 @@ from vardex.runs import Run, RunStore, Step, call_key, new_run_id, now_text
 from vardex.semantic import Knowledge
 from vardex.sql import QueryError, Warehouse, check_sql, format_value, transpile
 from vardex.tools import Toolbox, ToolResult
+from vardex.tracing import COST, OPERATION, WORKFLOW_NAME, carry, span
 
 if TYPE_CHECKING:  # only for the type of the client the live reader borrows
     import httpx2
@@ -482,6 +483,28 @@ def run_workflow(
     the other needs somebody to fix something. Either way the report is still written, so a
     run that got half way says what it found.
     """
+    attributes = {
+        OPERATION: "invoke_workflow",
+        WORKFLOW_NAME: spec.name,
+        "vardex.run": run.id,
+        "vardex.dry_run": run.dry_run,
+    }
+    with span(f"invoke_workflow {spec.name}", attributes) as traced:
+        _run_steps(spec, run, connections, on_step=on_step, on_call=on_call)
+        traced.update({"vardex.state": run.state, COST: run.cost_usd})
+        if run.state == "failed":  # stopped is a decision about money, not a failure
+            traced.fail(run.note, run.state)
+        return run
+
+
+def _run_steps(
+    spec: WorkflowSpec,
+    run: Run,
+    connections: Connections,
+    *,
+    on_step: Callable[[Step], None] | None,
+    on_call: Callable[[ToolCall, ToolResult], None] | None,
+) -> Run:
     run.state = "running"
     if _has_run_before(run):
         run.attempts += 1  # this is a resume, and the count belongs in the record
@@ -496,7 +519,9 @@ def run_workflow(
         record.started_at = now_text()
         connections.store.save(run)
         try:
-            _run_step(spec, spec_step, run, record, connections, on_call=on_call)
+            with span(f"step {spec_step.id}", {"vardex.step": spec_step.id}) as traced:
+                _run_step(spec, spec_step, run, record, connections, on_call=on_call)
+                traced.set("vardex.items", record.items)
         except StopRun as stop:
             _end(run, record, "stopped", "stopped", stop.reason, connections, spec, on_step)
             return run
@@ -760,14 +785,15 @@ def _brief(
             "needed_by": (datetime.now(UTC) + timedelta(hours=hours)).isoformat(timespec="seconds"),
         }
         box = journalled(connections.toolbox(context), run)
-        return case, run_agent(
-            connections.client,
-            box,
-            case.filled(step.question),
-            system=WATCH,
-            max_steps=step.max_steps,
-            on_call=on_call,
-        )
+        with span("case", {"vardex.case": case.key}):
+            return case, run_agent(
+                connections.client,
+                box,
+                case.filled(step.question),
+                system=WATCH,
+                max_steps=step.max_steps,
+                on_call=on_call,
+            )
 
     for case, answer in _look_into_each(todo, look_into, step.workers):
         run.spend(answer.cost_usd)
@@ -816,7 +842,8 @@ def _look_into_each(
         yield from (look_into(case) for case in cases)
         return
     with ThreadPoolExecutor(max_workers=min(workers, len(cases))) as pool:
-        yield from pool.map(look_into, cases)
+        # carry: a case's agent run belongs in this run's trace, not in one of its own
+        yield from pool.map(carry(look_into), cases)
 
 
 def _tidy(step: TidyStep, run: Run, record: Step, connections: Connections) -> None:

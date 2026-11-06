@@ -37,6 +37,7 @@ from vardex.retrieval import Filters, Index, Passage, search
 from vardex.semantic import Knowledge
 from vardex.sql import QueryError, Result, Warehouse, check_sql, is_number, transpile
 from vardex.tools import Toolbox
+from vardex.tracing import CASE, OUTCOME, QUESTION, SUITE, evaluation, span
 
 Expect = Literal["answer", "clarify", "refuse"]
 Kind = Literal["answer", "clarify", "refuse", "values", "problem", "passages", "not_found", "error"]
@@ -884,12 +885,34 @@ def run(
     for case in suite.cases:
         if only and case.id not in only:
             continue
-        for _ in range(repeat):
-            result = run_case(case)
+        for number in range(1, repeat + 1):
+            result = traced_case(name, case, number, run_case)
             results.append(result)
             if on_result:
                 on_result(result)
     return Report(name, model, results)
+
+
+def traced_case(
+    suite: str, case: AnyCase, number: int, run_case: Callable[[AnyCase], CaseResult]
+) -> CaseResult:
+    """Run one case as a request of its own: a trace per case, linked to the eval that ran
+    it, with each grade as an evaluation event. A case that fails can then be read exactly
+    as a production request is read, in the same viewer."""
+    attributes = {
+        SUITE: suite,
+        CASE: case.id,
+        QUESTION: getattr(case, "question", None),  # an extraction case has a document
+        "vardex.repeat": number,
+    }
+    with span(f"eval {suite}", attributes, new_trace=True) as traced:
+        result = run_case(case)
+        for grade in result.grades:
+            evaluation(traced, grade.grader, grade.passed, grade.reason)
+        traced.set(OUTCOME, result.outcome.kind)
+        if not result.passed:
+            traced.fail(f"case {case.id} failed", "case_failed")
+        return result
 
 
 def new_case_id(question: str, taken: set[str]) -> str:

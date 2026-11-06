@@ -10,7 +10,7 @@ from pathlib import Path
 
 import duckdb
 
-from vardex.sql import Column, QueryError, Result, Table, one_at_a_time
+from vardex.sql import Column, QueryError, Result, Table, one_at_a_time, traced_query
 
 # Read-only, and nothing outside the file: no reading or writing other files, no URLs, no
 # extensions. Locked, so a query cannot turn any of it back on.
@@ -47,6 +47,7 @@ class DuckDBWarehouse:
             tables.setdefault(table, []).append(Column(column, data_type))
         return [Table(name, columns) for name, columns in tables.items()]
 
+    @traced_query
     @one_at_a_time
     def run(self, sql: str, max_rows: int = 1000) -> Result:
         """Run one query and fetch at most max_rows rows. A query that runs past the time

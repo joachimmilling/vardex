@@ -3,6 +3,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 
@@ -23,6 +24,11 @@ class Settings:
     index_url: str | None = None  # PostgreSQL with pgvector, for the index of documents
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     rerank_model: str | None = DEFAULT_RERANK_MODEL  # None: search without reranking
+    trace_dir: Path | None = None  # None: each pack's traces beside its data
+    # Where what people asked and what the model wrote may go: into the local trace files
+    # only, into every backend too, or nowhere
+    trace_content: Literal["local", "all", "none"] = "local"
+    export_traces: bool = False  # True when an OTLP endpoint is set, in OpenTelemetry's words
 
 
 def load_settings() -> Settings:
@@ -36,6 +42,13 @@ def load_settings() -> Settings:
         index_url=os.getenv("VARDEX_INDEX_URL") or None,
         embedding_model=os.getenv("VARDEX_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL,
         rerank_model=rerank_model(os.getenv("VARDEX_RERANK_MODEL")),
+        trace_dir=Path(os.environ["VARDEX_TRACE_DIR"]) if os.getenv("VARDEX_TRACE_DIR") else None,
+        trace_content=trace_content(os.getenv("VARDEX_TRACE_CONTENT")),
+        # OpenTelemetry's own variables, which the exporter reads for the address and headers
+        export_traces=bool(
+            os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+            or os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        ),
     )
 
 
@@ -44,3 +57,10 @@ def rerank_model(value: str | None) -> str | None:
     if not value:
         return DEFAULT_RERANK_MODEL
     return None if value.lower() == "none" else value
+
+
+def trace_content(value: str | None) -> Literal["local", "all", "none"]:
+    """Where content may go. Anything but all or none means local: a misspelt setting must not
+    send questions to a backend nobody agreed to send them to."""
+    value = (value or "").strip().lower()
+    return "all" if value == "all" else "none" if value == "none" else "local"

@@ -12,6 +12,7 @@ from typing import Protocol
 
 from vardex.documents import DocumentSpec
 from vardex.embeddings import Embedder, Reranker, Vector
+from vardex.tracing import OPERATION, RETRIEVAL_QUERY, span
 
 FUSION_K = 60  # reciprocal rank fusion's constant: larger flattens the gap between ranks
 RERANK = 20  # the fused passages a reranker reads: each costs about 0.3 s on a laptop's CPU
@@ -142,20 +143,27 @@ def search(
     """Search by meaning and by words, `candidates` passages each, and fuse the two rankings.
     With a reranker, reorder the best `rerank` of them by reading each with the query.
     Returns the best `limit`."""
-    filters = filters or Filters()
-    by_meaning = index.by_meaning(embedder.embed_query(query), filters, candidates)
-    by_words = index.by_words(query, filters, candidates)
-    meaning_ranks = {p.id: rank for rank, p in enumerate(by_meaning, start=1)}
-    words_ranks = {p.id: rank for rank, p in enumerate(by_words, start=1)}
-    hits = [
-        Hit(passage, meaning_ranks.get(passage.id), words_ranks.get(passage.id), score)
-        for passage, score in fuse([by_meaning, by_words])[:candidates]
-    ]
-    if reranker and hits:
-        top, rest = hits[:rerank], hits[rerank:]
-        texts = [in_context(h.passage.document.title, h.passage.page, h.passage.text) for h in top]
-        scores = reranker.score(query, texts)
-        ranked = sorted(zip(top, scores, strict=True), key=lambda pair: -pair[1])
-        hits = [Hit(h.passage, h.meaning_rank, h.words_rank, h.fused, score) for h, score in ranked]
-        hits += rest  # below the reranked ones, in their fused order
-    return Search(query, filters, hits[:limit])
+    attributes = {OPERATION: "retrieval", RETRIEVAL_QUERY: query, "vardex.limit": limit}
+    with span("retrieval", attributes) as retrieval:
+        filters = filters or Filters()
+        by_meaning = index.by_meaning(embedder.embed_query(query), filters, candidates)
+        by_words = index.by_words(query, filters, candidates)
+        meaning_ranks = {p.id: rank for rank, p in enumerate(by_meaning, start=1)}
+        words_ranks = {p.id: rank for rank, p in enumerate(by_words, start=1)}
+        hits = [
+            Hit(passage, meaning_ranks.get(passage.id), words_ranks.get(passage.id), score)
+            for passage, score in fuse([by_meaning, by_words])[:candidates]
+        ]
+        if reranker and hits:
+            top, rest = hits[:rerank], hits[rerank:]
+            texts = [
+                in_context(h.passage.document.title, h.passage.page, h.passage.text) for h in top
+            ]
+            scores = reranker.score(query, texts)
+            ranked = sorted(zip(top, scores, strict=True), key=lambda pair: -pair[1])
+            hits = [
+                Hit(h.passage, h.meaning_rank, h.words_rank, h.fused, score) for h, score in ranked
+            ]
+            hits += rest  # below the reranked ones, in their fused order
+        retrieval.update({"vardex.passages": len(hits[:limit]), "vardex.reranked": bool(reranker)})
+        return Search(query, filters, hits[:limit])

@@ -57,6 +57,9 @@ DRIVERS = {
     # MCP is a protocol like any other outside system: one module offers Vardex's tools over
     # it, one uses other people's, and the engine itself knows nothing about it.
     "mcp": {"mcp_server.py", "mcp_client.py"},
+    # Tracing is a standard, not a library choice spread through the engine: one module
+    # speaks OpenTelemetry, and everything else asks it for a span.
+    "opentelemetry": {"tracing.py"},
 }
 
 

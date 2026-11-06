@@ -1,5 +1,7 @@
 """The vardex command-line tool."""
 
+import functools
+import getpass
 import json
 import os
 import sys
@@ -7,22 +9,23 @@ import tempfile
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import typer
 
-from vardex import __version__, evals, rag, text_to_sql
+from vardex import __version__, evals, rag, text_to_sql, tracing
 from vardex.actions import Connector, FileConnector, action_tools, connector_path
 from vardex.agent import MAX_STEPS, Run, run_agent
-from vardex.anthropic_client import AnthropicClient
+from vardex.anthropic_client import PROVIDER, AnthropicClient
 from vardex.approvals import ApprovalError, Inbox, Item, inbox_path
 from vardex.budgets import Budget, BudgetError, Spend, spend_path
-from vardex.calllog import log_call
+from vardex.calllog import log_calls
 from vardex.charts import charts_path
 from vardex.config import Settings, load_settings
+from vardex.dashboard import GROUPINGS, figures, format_figures, write_dashboard
 from vardex.documents import (
     document_path,
     find_page,
@@ -43,12 +46,23 @@ from vardex.extraction import (
     load_extraction,
 )
 from vardex.fastembed_models import FastEmbedder, FastReranker
+from vardex.feedback import (
+    Candidates,
+    Feedback,
+    FeedbackError,
+    FeedbackLog,
+    candidate_from,
+    candidates_path,
+    feedback_path,
+    sample,
+)
 from vardex.indexing import index_pack
 from vardex.ingest import http_client
 from vardex.llm import (
     Answer,
     Conversation,
     Effort,
+    Hooked,
     Ledger,
     Message,
     MissingAPIKeyError,
@@ -59,7 +73,7 @@ from vardex.llm import (
 from vardex.llm import ask as ask_model
 from vardex.mcp_client import McpSession, load_mcp_servers, outside_tools
 from vardex.mcp_server import build_server, serve_stdio
-from vardex.packs import Language, PackError, load_pack
+from vardex.packs import Language, PackError, fingerprint, load_pack
 from vardex.permissions import Permissions, load_permissions, unlisted
 from vardex.pgvector_index import PostgresIndex
 from vardex.postgres_warehouse import PostgresWarehouse
@@ -98,6 +112,20 @@ from vardex.semantic import Knowledge, check, check_documents, find_key, load_kn
 from vardex.sql import QueryError, Result, Warehouse, format_table, format_value
 from vardex.text_to_sql import AnswerError
 from vardex.tools import Approver, Tool, Toolbox, ToolResult, build_toolbox
+from vardex.traces import FileTraces, Trace, TraceError, TraceStore, traces
+from vardex.tracing import (
+    ANSWER,
+    COMMAND,
+    OUTCOME,
+    PACK,
+    PACK_VERSION,
+    QUESTION,
+    SQL,
+    VERSION,
+    current,
+    trace_calls,
+    traces_path,
+)
 from vardex.warehouse import WarehouseError, build, warehouse_path
 from vardex.workflows import (
     Connections,
@@ -153,6 +181,80 @@ def settings_for(model: str | None) -> Settings:
 def connect(settings: Settings) -> ModelClient:
     """The model client. This is the one place that chooses a provider."""
     return AnthropicClient(settings)
+
+
+def watched(client: ModelClient, *, log: bool = True) -> ModelClient:
+    """The client with Vardex's hooks around every call: a span in the trace, and a line in
+    the call log. A replay is traced and not logged: it called nobody and cost nothing."""
+    hooks = (trace_calls(PROVIDER), log_calls(CALL_LOG)) if log else (trace_calls(PROVIDER),)
+    return Hooked(client, hooks)
+
+
+def traced[F: Callable[..., Any]](command: str) -> Callable[[F], F]:
+    """Run a command as one trace, under one root span, with the pack it ran on and the
+    exact version of that pack. Everything the command does, in any module, nests under it
+    without being handed anything: the root span is the current span while it runs.
+
+    The traces go to the pack's folder, and to a backend when OpenTelemetry's endpoint is set.
+    An exit with code 0 or 2 (a question back) is not a failure; exit 1 is.
+    """
+
+    def decorate(function: F) -> F:
+        @functools.wraps(function)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            settings = load_settings()
+            attributes: dict[str, Any] = {COMMAND: command, VERSION: __version__}
+            name = None
+            pack = kwargs.get("pack")
+            if isinstance(pack, Path):
+                try:
+                    name = load_pack(pack).name
+                    attributes |= {PACK: name, PACK_VERSION: fingerprint(pack)}
+                except PackError:
+                    pass  # the command itself says what is wrong with the pack
+            folder = settings.trace_dir or traces_path(settings.data_dir, name)
+            tracing.setup(
+                folder,
+                content=settings.trace_content,
+                export=settings.export_traces,
+                # On every span this process makes, including those that start a trace of
+                # their own, such as an eval case
+                resource={k: v for k, v in attributes.items() if k in (PACK, PACK_VERSION)},
+            )
+            ended: typer.Exit | None = None
+            try:
+                with tracing.span(f"vardex {command}", attributes) as root:
+                    try:
+                        return function(*args, **kwargs)
+                    except typer.Exit as exit_:
+                        ended = exit_
+                        root.set("vardex.exit_code", exit_.exit_code)
+                        if exit_.exit_code == 1:
+                            root.fail("the command failed", "exit_1")
+            finally:
+                if tracing.flush() and settings.export_traces:
+                    typer.secho(
+                        f"Warning: the traces could not all be sent to the OTLP endpoint; "
+                        f"every span is in {folder}.",
+                        fg="yellow",
+                        err=True,
+                    )
+            raise ended
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorate
+
+
+def show_trace_id(pack: Path) -> None:
+    """Say which trace this was, and how to give feedback on it, on stderr."""
+    short = current().trace_id[:12]
+    if short:
+        typer.secho(
+            f"(trace {short}; if this is wrong: vardex feedback {pack} {short} --bad)",
+            fg="bright_black",
+            err=True,
+        )
 
 
 def connect_warehouse(url: str | None, pack: Path, settings: Settings) -> Warehouse:
@@ -223,11 +325,8 @@ def describe(answer: Answer) -> str:
 
 
 def record(answer: Answer, stats: bool) -> None:
-    """Log a call, warn if it was cut off, and show its statistics when asked."""
-    try:
-        log_call(answer, CALL_LOG)
-    except OSError as err:
-        typer.secho(f"Warning: could not write to {CALL_LOG}: {err}", fg="yellow", err=True)
+    """Warn if a call was cut off, and show its statistics when asked. The call is already in
+    the call log and the trace: the hooks put it there."""
     if answer.truncated:
         typer.secho("Warning: the answer was cut off at max_tokens.", fg="yellow", err=True)
     if stats:
@@ -241,6 +340,7 @@ def version() -> None:
 
 
 @app.command()
+@traced("ask")
 def ask(
     question: Annotated[str, typer.Argument(help="The question to ask.")],
     model: ModelOption = None,
@@ -254,7 +354,7 @@ def ask(
 ) -> None:
     """Send a question to the model and print the answer."""
     try:
-        client = connect(settings_for(model))
+        client = watched(connect(settings_for(model)))
         answer = ask_model(client, question, effort=effort, on_text=echo_piece if stream else None)
     except ModelError as err:
         raise fail(str(err)) from err
@@ -266,13 +366,14 @@ def ask(
 
 
 @app.command()
+@traced("chat")
 def chat(
     model: ModelOption = None,
     stats: StatsOption = False,
 ) -> None:
     """Talk with the model. The history is sent with every message; an empty line ends it."""
     try:
-        conversation = Conversation(connect(settings_for(model)))
+        conversation = Conversation(watched(connect(settings_for(model))))
     except ModelError as err:
         raise fail(str(err)) from err
     typer.secho("Chat with Vardex. Press Enter on an empty line to stop.", fg="bright_black")
@@ -325,6 +426,7 @@ def pages_to_extract(
 
 
 @app.command(name="extract")
+@traced("extract")
 def extract_command(
     pack: PackArgument,
     name: Annotated[str, typer.Argument(help="An extraction in the pack, such as key-figures.")],
@@ -379,7 +481,7 @@ def extract_command(
         typer.echo(f"=== output schema ===\n{json.dumps(schema, indent=2, ensure_ascii=False)}")
         return
     try:
-        client = connect(settings_for(model))
+        client = watched(connect(settings_for(model)))
     except ModelError as err:
         raise fail(str(err)) from err
 
@@ -442,6 +544,7 @@ def ingest(
 
 
 @app.command(name="sql")
+@traced("sql")
 def sql_command(
     pack: PackArgument,
     statement: Annotated[str, typer.Argument(help="The SQL to run, such as 'select 1'.")],
@@ -623,6 +726,7 @@ def reply_as_json(reply: text_to_sql.Reply) -> dict[str, Any]:
 
 
 @app.command(name="answer")
+@traced("answer")
 def answer_command(
     pack: PackArgument,
     question: Annotated[str, typer.Argument(help="A question about the pack's data.")],
@@ -656,6 +760,7 @@ def answer_command(
     except (PackError, QueryError) as err:
         raise (fail_json(err) if as_json else fail(str(err))) from err
     spent: list[Answer] = []  # the calls for the question in hand, still logged if one fails
+    current().set(QUESTION, question)  # the first question: what a candidate case would ask
     try:
         if show_prompt:
             request = text_to_sql.build_request(
@@ -669,7 +774,7 @@ def answer_command(
             system = "\n\n".join(part for part in (request.system, request.system_tail) if part)
             typer.echo(f"=== system ===\n{system}\n\n=== user ===\n{question}")
             return
-        client = connect(settings)
+        client = watched(connect(settings))
         embedder = connect_embedder(settings)
         earlier: list[Message] = []
         while True:
@@ -702,6 +807,7 @@ def answer_command(
     except AnswerError as err:
         for call in err.answers:
             record(call, stats)
+        current().update({OUTCOME: "error", SQL: err.result.sql if err.result else None})
         if as_json:
             raise fail_json(
                 err,
@@ -713,6 +819,15 @@ def answer_command(
     finally:
         connection.close()
 
+    current().update(
+        {
+            OUTCOME: reply.kind,
+            ANSWER: reply.text,
+            SQL: reply.result.sql if reply.result else None,
+            "vardex.asked_back": len(earlier) // 2,
+            "vardex.warnings": len(reply.warnings),
+        }
+    )
     if as_json:
         # A question back is the one outcome that is not an answer, and it already exits 2.
         if reply.kind == "clarify":
@@ -729,6 +844,7 @@ def answer_command(
             typer.echo(f"- {assumption}")
     if reply.result:
         show_sources(reply.result, reply.figures)
+        show_trace_id(pack)
     elif reply.kind == "clarify":
         note = "(a question back: ask again, with the answer in your question)"
         typer.secho(note, fg="bright_black", err=True)
@@ -753,6 +869,7 @@ RerankOption = Annotated[
 
 
 @app.command(name="index")
+@traced("index")
 def index_command(
     pack: PackArgument,
     rebuild: Annotated[
@@ -775,7 +892,7 @@ def index_command(
     except (PackError, SearchError, QueryError) as err:
         raise fail(str(err)) from err
     try:
-        client: ModelClient | None = connect(settings)
+        client: ModelClient | None = watched(connect(settings))
     except ModelError:
         client = None  # scanned pages are left unread, and the user is warned
     try:
@@ -879,6 +996,7 @@ def cite_as_json(reply: rag.Reply) -> dict[str, Any]:
 
 
 @app.command(name="search")
+@traced("search")
 def search_command(
     pack: PackArgument,
     query: Annotated[str, typer.Argument(help="What to look for, in any words.")],
@@ -925,6 +1043,7 @@ def search_command(
 
 
 @app.command(name="cite")
+@traced("cite")
 def cite_command(
     pack: PackArgument,
     question: Annotated[str, typer.Argument(help="A question the pack's documents answer.")],
@@ -944,6 +1063,7 @@ def cite_command(
 ) -> None:
     """Answer a question from the pack's documents, citing the page of every claim."""
     settings = settings_for(model)
+    current().set(QUESTION, question)
     try:
         filters = document_filters(
             pack, settings, company, about, (kind, period, language, document)
@@ -953,7 +1073,7 @@ def cite_command(
     except (PackError, SearchError, QueryError) as err:
         raise (fail_json(err) if as_json else fail(str(err))) from err
     try:
-        client = connect(settings)
+        client = watched(connect(settings))
         reply = rag.answer(
             client,
             index,
@@ -973,6 +1093,7 @@ def cite_command(
         index.close()
     for call in reply.answers:
         record(call, stats)
+    current().update({OUTCOME: reply.kind, ANSWER: reply.text})
     if as_json:
         ok_json(cite_as_json(reply))
         return
@@ -989,6 +1110,7 @@ def cite_command(
             typer.echo(f"[{citation.number}] {quote.title}, page {quote.page}")
             typer.echo(f"    {quote.link}")
         typer.echo(f'    "{" ".join(quote.text.split())}"')
+    show_trace_id(pack)
 
 
 @dataclass
@@ -1037,7 +1159,7 @@ def eval_connections(
             raise PackError(f"No recording at {path}. Make one with --record.")
         recording = Recording.load(path)
         return EvalConnections(
-            client=ReplayClient(recording) if "model" in needs else None,
+            client=watched(ReplayClient(recording), log=False) if "model" in needs else None,
             warehouse=ReplayWarehouse(recording) if "warehouse" in needs else None,
             embedder=ReplayEmbedder(recording) if "embedder" in needs else None,
             index=ReplayIndex(recording) if "index" in needs else None,
@@ -1055,7 +1177,7 @@ def eval_connections(
         if "reranker" in needs:
             live.reranker = connect_reranker(settings)
         if "model" in needs:
-            live.client = connect(settings)
+            live.client = watched(connect(settings))
     except (PackError, QueryError, SearchError, ModelError):
         live.close()
         raise
@@ -1229,6 +1351,7 @@ def eval_suite(
 
 
 @app.command(name="eval")
+@traced("eval")
 def eval_command(
     pack: PackArgument,
     suites: Annotated[
@@ -1304,6 +1427,7 @@ def eval_command(
 
 
 @app.command(name="add-case")
+@traced("add-case")
 def add_case_command(
     pack: PackArgument,
     suite: Annotated[str, typer.Argument(help="The suite to add to, such as answer.")],
@@ -1338,7 +1462,7 @@ def add_case_command(
             raise fail(str(err)) from err
         try:
             reply = text_to_sql.answer(
-                connect(settings),
+                watched(connect(settings)),
                 connection,
                 knowledge,
                 question,
@@ -1610,6 +1734,9 @@ def print_json(body: dict[str, Any]) -> None:
     One object and nothing else. Everything a person would want to read — warnings, statistics,
     the rows in a table — goes to stderr, so `vardex … --json | jq` never chokes on prose.
     """
+    trace_id = current().trace_id
+    if trace_id:  # so a program can give feedback on exactly this answer
+        body = {**body, "trace_id": trace_id}
     typer.echo(json.dumps(body, ensure_ascii=False, default=str))
 
 
@@ -1672,6 +1799,7 @@ def run_as_json(run: Run, toolbox: Toolbox) -> dict[str, Any]:
 
 
 @app.command(name="agent")
+@traced("agent")
 def agent_command(
     pack: PackArgument,
     question: Annotated[str, typer.Argument(help="The question to answer.")],
@@ -1698,6 +1826,7 @@ def agent_command(
 ) -> None:
     """Answer a question by letting the model use the pack's tools."""
     settings = settings_for(model)
+    current().set(QUESTION, question)
     if not as_json:
         warn_if_prices_are_stale()
     sessions: list[McpSession] = []
@@ -1728,7 +1857,7 @@ def agent_command(
             for closing in built.open_now:
                 stack.callback(closing.close)
             budget = Budget(
-                connect(settings),
+                watched(connect(settings)),
                 caps=permissions.budgets,
                 spend=Spend(spend_path(settings.data_dir, load_pack(pack).name)),
             )
@@ -1742,6 +1871,7 @@ def agent_command(
             )
     except (PackError, ModelError, SearchError, WarehouseError, QueryError) as err:
         raise (fail_json(err) if as_json else fail(str(err))) from err
+    current().update({OUTCOME: run.stop, ANSWER: run.answer})
     if as_json:
         body = run_as_json(run, toolbox)
         if not run.answered:
@@ -1753,6 +1883,7 @@ def agent_command(
     if not run.answered:
         typer.secho(run.note, fg=typer.colors.RED, err=True)
     typer.echo(run.answer)
+    show_trace_id(pack)
     if stats:
         cost = format_usd(run.cost_usd) if run.cost_usd is not None else "cost unknown"
         typer.secho(
@@ -1903,7 +2034,11 @@ def connect_workflow(
     caps = built.permissions.budgets.model_copy(
         update={"per_run": spec.budget.per_run or built.permissions.budgets.per_run}
     )
-    model: ModelClient = ReplayClient(recording) if replay and recording else connect(settings)
+    model: ModelClient = (
+        watched(ReplayClient(recording), log=False)
+        if replay and recording
+        else watched(connect(settings))
+    )
     if record and recording:
         model = RecordingClient(model, recording)
     client = Budget(
@@ -2068,6 +2203,7 @@ def run_one_workflow(
 
 
 @app.command(name="run")
+@traced("run")
 def run_command(
     pack: PackArgument,
     workflow: WorkflowArgument = None,
@@ -2432,3 +2568,339 @@ def undo_command(
     except (ApprovalError, PackError) as err:
         raise fail(str(err)) from err
     typer.secho(f"Undone: {undone.proposal.sentence}", fg=typer.colors.GREEN)
+
+
+# Watching it in production: traces, figures, feedback, and the cases they become
+
+
+def connect_traces(settings: Settings, pack: Path) -> TraceStore:
+    """Where a pack's traces are read back from. This is the one place that chooses."""
+    name = load_pack(pack).name
+    return FileTraces(settings.trace_dir or traces_path(settings.data_dir, name))
+
+
+DaysOption = Annotated[float, typer.Option(min=0.01, help="Look back this many days.")]
+ByOption = Annotated[str | None, typer.Option("--by", help="Who decided: a name, for the record.")]
+
+
+def since(days: float) -> datetime:
+    return datetime.now(UTC) - timedelta(days=days)
+
+
+def money(trace: Trace) -> str:
+    return format_usd(trace.cost_usd) if trace.calls else "-"
+
+
+@app.command(name="traces")
+def traces_command(
+    pack: PackArgument,
+    days: DaysOption = 1,
+    command: Annotated[str | None, typer.Option(help="Only this command, such as answer.")] = None,
+    failed: Annotated[bool, typer.Option("--failed", help="Only requests that failed.")] = False,
+    limit: Annotated[int, typer.Option(min=1, help="Show at most this many, newest first.")] = 20,
+) -> None:
+    """List recent requests: when, what, how it ended, how long it took and what it cost."""
+    settings = load_settings()
+    try:
+        found = traces(connect_traces(settings, pack), since(days))
+    except (PackError, TraceError) as err:
+        raise fail(str(err)) from err
+    found = [t for t in found if (not command or t.command == command) and (not failed or t.failed)]
+    if not found:
+        typer.secho("No traces in that window.", fg="bright_black", err=True)
+        return
+    for trace in reversed(found[-limit:]):
+        mark = "!" if trace.failed else "↻" if trace.repaired else " "
+        what = " ".join((trace.question or "").split())[:60]
+        typer.echo(
+            f"{trace.start:%Y-%m-%d %H:%M}  {trace.trace_id[:12]} {mark} {trace.command:<8} "
+            f"{trace.outcome or '-':<9} {trace.seconds:6.1f} s  {money(trace):>8}  {what}"
+        )
+    typer.secho("! failed   ↻ needed a second attempt", fg="bright_black", err=True)
+
+
+def span_line(span: Any) -> str:
+    """One span as one line: name, time, and the few facts that say what happened in it."""
+    facts = [f"{span.seconds:.2f} s"]
+    if span.get("gen_ai.operation.name") == "chat":
+        facts.append(f"{span.get('gen_ai.usage.input_tokens', 0):,} in")
+        facts.append(f"{span.get('gen_ai.usage.output_tokens', 0):,} out")
+        if span.get("vardex.cost_usd"):
+            facts.append(format_usd(Decimal(str(span.get("vardex.cost_usd")))))
+    if span.get("db.response.returned_rows") is not None:
+        facts.append(f"{span.get('db.response.returned_rows')} rows")
+    if span.get("http.response.status_code") is not None:
+        facts.append(f"HTTP {span.get('http.response.status_code')}")
+    if span.get("vardex.attempt") is not None:
+        facts.insert(0, f"attempt {span.get('vardex.attempt')}")
+    for name, passed in span.verdicts():
+        facts.append(f"{name} {'passed' if passed else 'FAILED'}")
+    if span.failed and span.error:
+        facts.append(span.error[:100])
+    return f"{span.name}  " + " · ".join(facts)
+
+
+@app.command(name="trace")
+def trace_command(
+    pack: PackArgument,
+    trace_id: Annotated[str, typer.Argument(help="A trace's id, or its first characters.")],
+    show_content: Annotated[
+        bool, typer.Option("--content", help="Also print each model call's prompt and answer.")
+    ] = False,
+) -> None:
+    """Show one request as a tree: every model call, query and attempt, in the order they ran."""
+    settings = load_settings()
+    try:
+        trace = connect_traces(settings, pack).trace(trace_id)
+    except (PackError, TraceError) as err:
+        raise fail(str(err)) from err
+    typer.echo(f"{trace.trace_id}  {trace.start:%Y-%m-%d %H:%M:%S} UTC")
+    for label, value in (("Question", trace.question), ("Answer", trace.answer)):
+        if value:
+            typer.echo(f"{label}: {' '.join(value.split())}")
+    typer.echo(
+        f"{len(trace.calls)} model calls · {trace.input_tokens:,} in · {trace.output_tokens:,} out"
+        f" · {money(trace)} · pack {trace.pack_version or '?'}\n"
+    )
+    for depth, span in trace.walk():
+        colour = typer.colors.RED if span.failed else None
+        typer.secho("  " * depth + span_line(span), fg=colour)
+        if show_content and span.get("gen_ai.operation.name") == "chat":
+            for name in ("gen_ai.input.messages", "gen_ai.output.messages"):
+                text = span.get(name)
+                if text:
+                    typer.secho("  " * (depth + 1) + f"{name}: {text}", fg="bright_black")
+
+
+@app.command(name="dashboard")
+def dashboard_command(
+    pack: PackArgument,
+    days: DaysOption = 7,
+    by: Annotated[
+        Literal["command", "model", "version", "day"],
+        typer.Option(help="One row per command, model, pack version or day."),
+    ] = "command",
+    html: Annotated[
+        bool, typer.Option("--html", help="Also write a page with charts, and print its path.")
+    ] = False,
+) -> None:
+    """Requests, failures, repairs, cost, time and feedback, from the pack's traces."""
+    settings = load_settings()
+    try:
+        name = load_pack(pack).name
+        found = traces(connect_traces(settings, pack), since(days))
+    except (PackError, TraceError) as err:
+        raise fail(str(err)) from err
+    verdicts = FeedbackLog(feedback_path(settings.data_dir, name)).verdicts()
+    if not found:
+        typer.secho(f"No traces in the last {days:g} days.", fg="bright_black", err=True)
+        return
+    typer.echo(format_figures(figures(found, GROUPINGS[by], verdicts)))
+    if html:
+        today = datetime.now(UTC).date()
+        page = write_dashboard(
+            settings.data_dir / name / "dashboard.html",
+            f"{name}: the last {days:g} days",
+            found,
+            since(days).date(),
+            today,
+            verdicts,
+        )
+        typer.secho(f"Wrote {page}", fg="bright_black", err=True)
+
+
+@app.command(name="feedback")
+def feedback_command(
+    pack: PackArgument,
+    trace_id: Annotated[str, typer.Argument(help="The trace of the answer, or its start.")],
+    good: Annotated[
+        bool, typer.Option("--good/--bad", help="Was the answer right?", show_default=False)
+    ],
+    note: Annotated[str, typer.Option(help="What was wrong, in a sentence.")] = "",
+    by: ByOption = None,
+) -> None:
+    """Say whether an answer was right. A bad one becomes a candidate case for the golden set,
+    which waits for a person to give the right answer before it joins."""
+    settings = load_settings()
+    try:
+        name = load_pack(pack).name
+        trace = connect_traces(settings, pack).trace(trace_id)
+    except (PackError, TraceError) as err:
+        raise fail(str(err)) from err
+    who = by or getpass.getuser()
+    verdict = "good" if good else "bad"
+    FeedbackLog(feedback_path(settings.data_dir, name)).add(
+        Feedback(trace.trace_id, verdict, who, note)
+    )
+    typer.secho(f"Marked {trace.trace_id[:12]} {verdict}.", fg=typer.colors.GREEN)
+    if good:
+        return
+    try:
+        candidate, new = Candidates(candidates_path(settings.data_dir, name)).add(
+            candidate_from(trace, "flagged", note)
+        )
+    except FeedbackError as err:
+        raise fail(str(err)) from err
+    if new:
+        typer.echo(
+            f"Candidate {candidate.id} waits for a reference: vardex promote {pack} "
+            f"{candidate.id} --type …"
+        )
+
+
+@app.command(name="sample")
+def sample_command(
+    pack: PackArgument,
+    days: DaysOption = 7,
+    size: Annotated[int, typer.Option(min=1, help="How many answers to pick.")] = 10,
+    seed: Annotated[int | None, typer.Option(help="Pick the same ones again.")] = None,
+) -> None:
+    """Pick answered questions at random for a person to read, as candidate cases. Feedback
+    finds the failures people notice; a sample finds the ones they do not."""
+    settings = load_settings()
+    try:
+        name = load_pack(pack).name
+        found = traces(connect_traces(settings, pack), since(days))
+    except (PackError, TraceError) as err:
+        raise fail(str(err)) from err
+    store = Candidates(candidates_path(settings.data_dir, name))
+    added = 0
+    for trace in sample([t for t in found if t.command == "answer"], size, seed=seed):
+        _, new = store.add(candidate_from(trace, "sampled"))
+        added += new
+    typer.echo(f"Added {added} candidate(s); `vardex candidates {pack}` lists them.")
+
+
+@app.command(name="candidates")
+def candidates_command(
+    pack: PackArgument,
+    every: Annotated[bool, typer.Option("--all", help="Also those already decided.")] = False,
+) -> None:
+    """List candidate cases: flagged by a person, or sampled, and what each one said."""
+    settings = load_settings()
+    try:
+        name = load_pack(pack).name
+    except PackError as err:
+        raise fail(str(err)) from err
+    store = Candidates(candidates_path(settings.data_dir, name))
+    found = store.all() if every else store.open()
+    if not found:
+        typer.secho("No candidates.", fg="bright_black", err=True)
+        return
+    for candidate in found:
+        state = "" if candidate.state == "open" else f" [{candidate.state}]"
+        typer.echo(f"{candidate.id}  {candidate.reason:<8} {candidate.asked_on}{state}")
+        typer.echo(f"  Q: {' '.join(candidate.question.split())}")
+        if candidate.answer:
+            typer.echo(f"  A: {' '.join(candidate.answer.split())[:160]}")
+        if candidate.note:
+            typer.echo(f"  Note: {candidate.note}")
+
+
+@app.command(name="promote")
+def promote_command(
+    pack: PackArgument,
+    candidate_id: Annotated[str, typer.Argument(help="The candidate, or its first characters.")],
+    type_: Annotated[str, typer.Option("--type", help="The case's type, such as lookup.")],
+    suite: Annotated[str, typer.Option(help="The golden set to add it to.")] = "answer",
+    sql: Annotated[
+        str | None, typer.Option(help="The reference SQL, when Vardex's own was wrong.")
+    ] = None,
+    expect: Annotated[
+        Literal["clarify", "refuse"] | None,
+        typer.Option(help="The right answer is a question back, or a refusal."),
+    ] = None,
+    language: Annotated[Language, typer.Option(help="The question's language.")] = "en",
+    yes: Annotated[
+        bool, typer.Option("--yes", help="I have checked the rows; do not ask.")
+    ] = False,
+    by: ByOption = None,
+    warehouse: WarehouseOption = None,
+) -> None:
+    """Make a candidate a case in the golden set, once a person has confirmed its reference:
+    the rows a right answer gives, or that the right answer is a question back or a refusal."""
+    settings = load_settings()
+    try:
+        name = load_pack(pack).name
+        knowledge = load_knowledge(pack)
+        suites = evals.load_suites(pack)
+        store = Candidates(candidates_path(settings.data_dir, name))
+        candidate = store.get(candidate_id)
+    except (PackError, FeedbackError) as err:
+        raise fail(str(err)) from err
+    golden = suites.get(suite)
+    if not isinstance(golden, evals.Suite):
+        raise fail(f"No answer suite {suite} in {pack}.")
+    if candidate.state != "open":
+        raise fail(f"Candidate {candidate.id} is already {candidate.state}.")
+    typer.echo(f"Q: {candidate.question}")
+    if candidate.answer:
+        typer.echo(f"Vardex said: {' '.join(candidate.answer.split())}")
+    reference = None
+    if expect is None:
+        reference = sql or candidate.sql
+        if not reference:
+            raise fail("That request ran no query. Give the right one with --sql, or --expect.")
+        if candidate.asked_on[:4] != golden.today.isoformat()[:4]:
+            typer.secho(
+                f"Asked on {candidate.asked_on}, but the suite's today is {golden.today}: a "
+                "question that says 'this year' or 'last year' means a different year there. "
+                "Check the SQL's years.",
+                fg="yellow",
+                err=True,
+            )
+        try:
+            connection = connect_warehouse(warehouse, pack, settings)
+            try:
+                rows = connection.run(reference, max_rows=100)
+            finally:
+                connection.close()
+        except QueryError as err:
+            raise fail(f"The reference SQL fails: {err}") from err
+        typer.echo(f"\nReference SQL{' (yours)' if sql else ' (what Vardex ran)'}\n{reference}")
+        typer.echo(f"\nRows\n{format_table(rows)}")
+    if not yes:
+        if not interactive():
+            raise fail("Confirming a reference needs a keyboard, or --yes. Nothing was added.")
+        question = "Is this the right answer?" if expect is None else f"Should Vardex {expect}?"
+        if not typer.confirm(f"\n{question}", default=False):
+            typer.echo("Nothing was added.")
+            return
+    try:
+        case = evals.Case(
+            id=evals.new_case_id(candidate.question, {c.id for c in golden.cases}),
+            type=type_,
+            language=language,
+            question=candidate.question,
+            expect=expect or "answer",
+            sql=reference,
+        )
+        evals.add_case(pack / "evals" / f"{suite}.yaml", case, knowledge)
+        store.decide(candidate, "promoted", by or getpass.getuser(), case=case.id)
+    except (ValueError, PackError, FeedbackError) as err:
+        raise fail(str(err)) from err
+    typer.secho(f"Added case {case.id} to {suite}.", fg=typer.colors.GREEN)
+    typer.secho(
+        f"The suite changed: record it again with vardex eval {pack} {suite} --record",
+        fg="yellow",
+        err=True,
+    )
+
+
+@app.command(name="dismiss")
+def dismiss_command(
+    pack: PackArgument,
+    candidate_id: Annotated[str, typer.Argument(help="The candidate, or its first characters.")],
+    note: Annotated[str, typer.Option(help="Why it does not belong in the golden set.")],
+    by: ByOption = None,
+) -> None:
+    """Decide that a candidate does not become a case, and say why."""
+    settings = load_settings()
+    try:
+        store = Candidates(candidates_path(settings.data_dir, load_pack(pack).name))
+        candidate = store.decide(
+            store.get(candidate_id), "dismissed", by or getpass.getuser(), note
+        )
+    except (PackError, FeedbackError) as err:
+        raise fail(str(err)) from err
+    typer.secho(f"Dismissed {candidate.id}.", fg=typer.colors.GREEN)

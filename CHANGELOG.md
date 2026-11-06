@@ -6,6 +6,43 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-06
+
+### Added
+
+- Tracing with OpenTelemetry (`vardex.tracing`, the only module that imports it). Each
+  command is one trace, and everything it does nests under it without being passed a trace
+  id: every model call, query, tool call, agent run, workflow step and case, search, and
+  each attempt at writing SQL, answering from rows, citing or extracting, with whether its
+  checks passed.
+- Every span goes to `data/<pack>/traces/<day>.jsonl`, kept 30 days, and to an OTLP backend
+  such as Langfuse when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. The export gives up after three
+  seconds and says so, so a backend that is down never costs an answer.
+- `VARDEX_TRACE_CONTENT` (`local`, `all` or `none`) decides where questions, prompts and
+  answers may go; the default keeps them on the machine and sends only timings, tokens and
+  costs. `VARDEX_TRACE_DIR` sets where the files go.
+- Model calls follow OpenTelemetry's GenAI conventions, with cache reads and writes counted
+  in the input tokens, and `vardex.cost_usd` and `vardex.prompt.sha` beside them. Each HTTP
+  attempt inside a call is its own span with its retry number and the provider's request id.
+- Hooks around every model call: `llm.Hooked`, `llm.Hook`, and `Answer.id`.
+- The pack's fingerprint on every trace, so figures can be compared across versions.
+- Each eval case is its own trace, with its grades as evaluation events.
+- `vardex traces`, `trace` and `dashboard` (`--by`, `--html`): requests, failures, repairs,
+  cost, p50 and p95 time, and feedback per command, model, pack version or day.
+- `vardex feedback`, `sample`, `candidates`, `promote` and `dismiss`: a verdict on an answer
+  makes a candidate case, and a person decides whether it joins the golden set.
+
+### Changed
+
+- The JSON envelope of `answer`, `cite`, `agent` and `search` carries `trace_id`, and the
+  commands print the trace's id on stderr.
+- The call log is written by a hook, so it has every call, and `trace_id` on each line.
+
+### Fixed
+
+- `run_sql` fetches at most 1,000 rows, as its description always said, whatever `max_rows`
+  the model asks for.
+
 ## [0.9.1] - 2026-10-27
 
 ### Added
