@@ -1,10 +1,14 @@
 """Indexing a pack: fetch, read, cut, embed and store; then only what changed."""
 
+from datetime import UTC, datetime, timedelta
+
 import httpx2
 from fakes import FakeEmbedder, FakeModel, MemoryIndex
 from pdfs import scanned_pdf, text_pdf
 
+from vardex import tracing
 from vardex.indexing import index_pack
+from vardex.traces import FileTraces
 
 SOURCES = """
 about: Company
@@ -118,3 +122,12 @@ def test_a_new_passage_size_reads_every_document_again(tmp_path):
     done, _, _ = run(make_pack(tmp_path / "again", smaller), tmp_path, index, FakeModel("Side 1"))
     assert (done.documents, done.unchanged) == (2, 0)
     assert all(fp.endswith("-50") for fp in index.documents().values())
+
+
+def test_each_document_is_a_span_with_the_scans_read_inside_it(tmp_path):
+    tracing.setup(tmp_path / "traces")
+    with tracing.span("vardex index"):
+        run(make_pack(tmp_path), tmp_path / "data", MemoryIndex(), FakeModel("Side 1"))
+    spans = FileTraces(tmp_path / "traces").spans(datetime.now(UTC) - timedelta(hours=1))
+    scan = next(s for s in spans if s.name == "index demo-arsregnskap-2000")
+    assert (scan.get("vardex.pages"), scan.get("vardex.scanned")) == (1, 1)

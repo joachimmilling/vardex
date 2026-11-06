@@ -23,6 +23,7 @@ from vardex.embeddings import Embedder
 from vardex.llm import Answer, ModelClient
 from vardex.packs import load_pack
 from vardex.retrieval import Index, in_context
+from vardex.tracing import span
 
 Say = Callable[[str], None]  # prints one line of progress
 
@@ -60,43 +61,52 @@ def index_pack(
     before = index.documents()
     done = Indexed()
     for document in spec.documents:
-        path = document_path(data_dir, name, document)
-        if fetch(http, document, path):
-            say(f"{document.id}: fetched {path.stat().st_size / 1e6:,.1f} MB")
-        # A changed passage size changes every passage, so it counts as a changed file
-        print_ = f"{fingerprint(path)}-{spec.passage_words}"
-        if not rebuild and before.get(document.id) == print_:
-            done.unchanged += 1
-            continue
-        reading = read_document(path, client, ocr)
-        done.answers += reading.answers
-        pieces = [
-            (page.number, text)
-            for page in reading.pages
-            for text in passages(page, spec.passage_words)
-        ]
-        vectors = embedder.embed_documents(
-            [in_context(document.title, page, text) for page, text in pieces]
-        )
-        index.put(document, print_, pieces, vectors)
-        scanned = [page for page in reading.pages if page.read_by == "model"]
-        unread = [page.number for page in reading.pages if page.read_by == "unread"]
-        for page in scanned:
-            if page.unconfirmed:
-                done.warnings.append(
-                    f"{document.id}, page {page.number}: the OCR program did not find "
-                    f"{', '.join(page.unconfirmed)}"
-                )
-        if unread:
-            done.warnings.append(
-                f"{document.id}: {len(unread)} scanned pages were not read: that needs a model"
+        with span(f"index {document.id}", {"vardex.document": document.id}) as traced:
+            path = document_path(data_dir, name, document)
+            if fetch(http, document, path):
+                say(f"{document.id}: fetched {path.stat().st_size / 1e6:,.1f} MB")
+            # A changed passage size changes every passage, so it counts as a changed file
+            print_ = f"{fingerprint(path)}-{spec.passage_words}"
+            if not rebuild and before.get(document.id) == print_:
+                done.unchanged += 1
+                traced.set("vardex.unchanged", True)
+                continue
+            reading = read_document(path, client, ocr)
+            done.answers += reading.answers
+            pieces = [
+                (page.number, text)
+                for page in reading.pages
+                for text in passages(page, spec.passage_words)
+            ]
+            vectors = embedder.embed_documents(
+                [in_context(document.title, page, text) for page, text in pieces]
             )
-        done.documents += 1
-        done.pages += len(reading.pages)
-        done.passages += len(pieces)
-        done.scanned += len(scanned)
-        read = f", {len(scanned)} read from a picture" if scanned else ""
-        say(f"{document.id}: {len(reading.pages)} pages{read}, {len(pieces)} passages")
+            index.put(document, print_, pieces, vectors)
+            scanned = [page for page in reading.pages if page.read_by == "model"]
+            unread = [page.number for page in reading.pages if page.read_by == "unread"]
+            for page in scanned:
+                if page.unconfirmed:
+                    done.warnings.append(
+                        f"{document.id}, page {page.number}: the OCR program did not find "
+                        f"{', '.join(page.unconfirmed)}"
+                    )
+            if unread:
+                done.warnings.append(
+                    f"{document.id}: {len(unread)} scanned pages were not read: that needs a model"
+                )
+            done.documents += 1
+            done.pages += len(reading.pages)
+            done.passages += len(pieces)
+            done.scanned += len(scanned)
+            read = f", {len(scanned)} read from a picture" if scanned else ""
+            say(f"{document.id}: {len(reading.pages)} pages{read}, {len(pieces)} passages")
+            traced.update(
+                {
+                    "vardex.pages": len(reading.pages),
+                    "vardex.passages": len(pieces),
+                    "vardex.scanned": len(scanned),
+                }
+            )
     for gone in sorted(set(before) - {document.id for document in spec.documents}):
         index.remove(gone)
         done.removed += 1

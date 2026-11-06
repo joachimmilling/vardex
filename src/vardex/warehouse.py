@@ -33,6 +33,7 @@ from vardex.ingest import (
 )
 from vardex.packs import load_pack
 from vardex.semantic import check, load_knowledge
+from vardex.tracing import DB_ROWS, span
 
 Say = Callable[[str], None]  # prints one line of progress
 # When a row's file was fetched, from its name: 2026-10-05T061502Z.csv.gz
@@ -149,27 +150,37 @@ def fetch_and_load(
     say: Say,
 ) -> str | None:
     """Fetch one source if it is due, then load its landed files. A failed fetch falls back
-    on the newest earlier file; the reason is returned as a warning."""
-    warning = None
-    if refresh or is_due(source, folder, now):
-        try:
-            if source.keys:
-                keys = [str(row[0]) for row in con.execute(source.keys).fetchall()]
-                statuses = fetch_keys(client, source, keys, folder, now)
-                say(f"{source.name}: fetched {len(keys):,} keys: {describe_statuses(statuses)}")
-            else:
-                path, changed = fetch_file(client, source, folder, now)
-                done = "fetched" if changed else "not modified, kept"
-                say(f"{source.name}: {done} {size(path.stat().st_size)}")
-            prune(source, folder)
-        except (IngestError, duckdb.Error) as err:
-            if not landed(folder):
-                raise WarehouseError(str(err)) from err
-            warning = f"{err}; using the copy from {fetched_at(landed(folder)[-1]):%Y-%m-%d}"
-    files = landed(folder) if source.history else landed(folder)[-1:]
-    rows = load_raw(con, source, files)
-    say(f"{source.name}: {count(rows, 'row')} in raw.{source.name}")
-    return warning
+    on the newest earlier file; the reason is returned as a warning.
+
+    One span per source, never one per key: a source fetched once per company would make a
+    trace of a million spans that no viewer can open. The span counts the answers instead."""
+    with span(f"ingest {source.name}", {"vardex.source": source.name}) as traced:
+        warning = None
+        if refresh or is_due(source, folder, now):
+            try:
+                if source.keys:
+                    keys = [str(row[0]) for row in con.execute(source.keys).fetchall()]
+                    statuses = fetch_keys(client, source, keys, folder, now)
+                    say(f"{source.name}: fetched {len(keys):,} keys: {describe_statuses(statuses)}")
+                    traced.update(
+                        {"vardex.keys": len(keys), "vardex.statuses": describe_statuses(statuses)}
+                    )
+                else:
+                    path, changed = fetch_file(client, source, folder, now)
+                    done = "fetched" if changed else "not modified, kept"
+                    say(f"{source.name}: {done} {size(path.stat().st_size)}")
+                    traced.update({"vardex.changed": changed, "vardex.bytes": path.stat().st_size})
+                prune(source, folder)
+            except (IngestError, duckdb.Error) as err:
+                if not landed(folder):
+                    raise WarehouseError(str(err)) from err
+                warning = f"{err}; using the copy from {fetched_at(landed(folder)[-1]):%Y-%m-%d}"
+                traced.fail(warning, "fell_back")
+        files = landed(folder) if source.history else landed(folder)[-1:]
+        rows = load_raw(con, source, files)
+        traced.set(DB_ROWS, rows)
+        say(f"{source.name}: {count(rows, 'row')} in raw.{source.name}")
+        return warning
 
 
 def build(
@@ -202,7 +213,9 @@ def build(
             if warning:
                 result.warnings.append(warning)
     failures = []
-    nodes = run_dbt(["build"], pack / "warehouse", new, work)
+    with span("dbt build") as traced:
+        nodes = run_dbt(["build"], pack / "warehouse", new, work)
+        traced.set("vardex.nodes", len(nodes))
     for node in nodes:
         detail = count(node.failures, "failing row") if node.failures else node.message
         if node.status in ("error", "fail", "runtime error"):
@@ -215,14 +228,18 @@ def build(
     passed = sum(node.status == "pass" for node in nodes)
     say(f"dbt build: {count(built, 'model')} built, {count(passed, 'test')} passed")
 
-    for node in run_dbt(["source", "freshness"], pack / "warehouse", new, work):
+    with span("dbt source freshness"):
+        fresh = run_dbt(["source", "freshness"], pack / "warehouse", new, work)
+    for node in fresh:
         if node.status != "pass":
             when = f"{node.max_loaded_at:%Y-%m-%d %H:%M}" if node.max_loaded_at else "never"
             result.stale.append(f"{node.name} ({node.status}): last fetched {when}")
 
     warehouse = DuckDBWarehouse(new)
     try:
-        problems = check(warehouse, knowledge)
+        with span("check semantic layer") as traced:
+            problems = check(warehouse, knowledge)
+            traced.set("vardex.problems", len(problems))
     finally:
         warehouse.close()
     if problems:

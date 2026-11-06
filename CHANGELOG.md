@@ -17,6 +17,9 @@ All notable changes to Vardex are recorded here. The format follows
   `p95_seconds`, `cost_per_request`, `bad_feedback`) over a window of days, and
   `vardex dashboard --check` exits 1 when one is passed, so a scheduler can run it. `vardex check`
   reads the file too.
+- `vardex ingest` and `vardex index` are traced: a span per source, never one per key, with
+  the rows loaded; spans for `dbt build`, `dbt source freshness` and the check of the semantic
+  layer; and a span per document with its pages, passages and scanned pages.
 
 ### Fixed
 
