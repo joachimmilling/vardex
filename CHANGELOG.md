@@ -13,6 +13,10 @@ All notable changes to Vardex are recorded here. The format follows
   `LANGFUSE_SECRET_KEY`), so `traces`, `trace`, `dashboard`, `feedback` and `sample` work where a
   company keeps its traces. It reads the attributes whether Langfuse kept them nested or
   flattened into the metadata, and finds a trace by the first characters of its id.
+- A pack's `monitoring.yaml` sets limits per command (`error_rate`, `repair_rate`,
+  `p95_seconds`, `cost_per_request`, `bad_feedback`) over a window of days, and
+  `vardex dashboard --check` exits 1 when one is passed, so a scheduler can run it. `vardex check`
+  reads the file too.
 
 ### Fixed
 

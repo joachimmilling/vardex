@@ -262,3 +262,14 @@ def test_a_sample_and_a_dismissal(pack, tmp_path, monkeypatch):
     assert dismissed.exit_code == 0, dismissed.output
     listed = runner.invoke(cli.app, ["candidates", str(pack), "--all"])
     assert "[dismissed]" in listed.stdout
+
+
+def test_the_dashboard_checks_the_packs_limits(pack, tmp_path, monkeypatch):
+    (pack / "monitoring.yaml").write_text(
+        "min_requests: 1\ncommands:\n  answer:\n    error_rate: 0.0\n"
+    )
+    use(monkeypatch, FakeModel("not json", "still not json"))
+    runner.invoke(cli.app, ["answer", str(pack), "Revenue?"])
+    result = runner.invoke(cli.app, ["dashboard", str(pack), "--check"])
+    assert result.exit_code == 1
+    assert "answer: failed 100% over 1 requests (limit 0%)" in result.stderr
