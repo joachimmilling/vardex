@@ -294,13 +294,48 @@ def test_langfuse_observations_come_back_as_the_spans_that_were_sent():
     assert trace.cost_usd == Decimal("0.004")
 
 
+def test_langfuse_attributes_flattened_into_the_metadata_are_read_too():
+    # The shape Langfuse's cloud answers with: every attribute a key of the metadata itself
+    root = observation(
+        "r",
+        metadata={
+            "attributes.vardex.command": "answer",
+            "attributes.vardex.outcome": "answer",
+            "resourceAttributes.vardex.pack": "norwegian-companies",
+            "resourceAttributes.vardex.pack.version": "b37856758845",
+        },
+    )
+    call = observation(
+        "c",
+        parent="r",
+        model="claude-sonnet-5-5",
+        usageDetails={"input": 911, "output": 340},
+        metadata={
+            "attributes.vardex.cost_usd": 0.005222,
+            "attributes.gen_ai.usage.input_tokens": 911,
+            "resourceAttributes.vardex.pack": "norwegian-companies",
+        },
+    )
+    (trace,) = traces(langfuse([{"data": [root, call]}], []), NOW - timedelta(hours=1))
+    assert trace.command == "answer" and trace.outcome == "answer"
+    assert trace.pack == "norwegian-companies" and trace.pack_version == "b37856758845"
+    assert trace.cost_usd == Decimal("0.005222")
+
+
+def test_langfuse_finds_a_trace_by_the_first_characters_of_its_id():
+    seen = []
+    store = langfuse([{"data": [observation("r")]}], seen)
+    assert store.trace("ffff").trace_id == "f" * 32
+    assert "traceId" not in seen[0] and "fromStartTime" in seen[0]
+
+
 def test_langfuse_finds_a_trace_by_its_whole_id_and_says_so_when_it_cannot():
     seen = []
     store = langfuse([{"data": [observation("r")]}, {"data": []}], seen)
     assert store.trace("f" * 32).trace_id == "f" * 32
     assert seen[0]["traceId"] == "f" * 32
     with pytest.raises(TraceError, match="no trace"):
-        store.trace("ffff")
+        store.trace("e" * 32)
 
 
 def test_langfuse_that_is_down_is_a_trace_error():

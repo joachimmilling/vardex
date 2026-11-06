@@ -9,6 +9,7 @@ import pytest
 from fakes import FakeModel
 
 from vardex import tracing
+from vardex.config import load_settings
 from vardex.llm import Answer, Hooked, Message, ModelError, Request
 from vardex.pricing import Usage
 from vardex.traces import FileTraces
@@ -216,3 +217,9 @@ def test_a_backend_that_is_down_is_counted_and_never_breaks_the_request():
     before = tracing.Delivery.undelivered
     assert tracing.Delivery(Down()).export([]) == SpanExportResult.FAILURE
     assert tracing.Delivery.undelivered == before + 1
+
+
+def test_no_test_sends_its_traces_to_a_backend_or_reads_from_one():
+    settings = load_settings()  # loads the developer's .env, which may name a real backend
+    assert not settings.export_traces
+    assert settings.trace_store == "files"

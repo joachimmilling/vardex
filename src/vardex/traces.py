@@ -298,6 +298,8 @@ def one_trace(spans: list[SpanRecord], trace_id: str) -> Trace:
 
 
 PAGE = 1000  # the most observations Langfuse gives back in one page
+TRACE_ID_LENGTH = 32  # hex digits in a whole OpenTelemetry trace id
+SEARCH_DAYS = 30  # how far back a trace named by part of its id is looked for
 # Where Langfuse moved an attribute it understood, out of the attributes and into a field of
 # its own: the field, its key, and the name the attribute was sent under
 MOVED = (
@@ -370,9 +372,14 @@ class LangfuseTraces:
         return [span for o in self.observations(params) if (span := from_observation(o))]
 
     def trace(self, trace_id: str) -> Trace:
-        """One trace, by its whole id: Langfuse finds a trace by its id and not by a part."""
-        found = self.observations({"traceId": trace_id})
-        return one_trace([s for o in found if (s := from_observation(o))], trace_id)
+        """One trace, by its id or the first characters of it. Langfuse finds a trace only by
+        its whole id, so a part is looked for among the traces of the last SEARCH_DAYS days."""
+        if len(trace_id) < TRACE_ID_LENGTH:
+            since = datetime.now(UTC) - timedelta(days=SEARCH_DAYS)
+            found = [s for s in self.spans(since) if s.trace_id.startswith(trace_id)]
+            return one_trace(found, trace_id)
+        observations = self.observations({"traceId": trace_id})
+        return one_trace([s for o in observations if (s := from_observation(o))], trace_id)
 
 
 def iso(when: datetime) -> str:
@@ -384,10 +391,8 @@ def from_observation(observation: dict[str, Any]) -> SpanRecord | None:
     if not observation.get("endTime"):
         return None
     metadata = observation.get("metadata") or {}
-    attributes = metadata.get("attributes") or {}
-    if isinstance(attributes, str):
-        attributes = json.loads(attributes)
-    attributes = {name: as_sent(value) for name, value in attributes.items()}
+    attributes = kept(metadata, "attributes")
+    resource = kept(metadata, "resourceAttributes")
     for field_name, key, name in MOVED:
         value = (observation.get(field_name) or {}).get(key)
         if value is not None and name not in attributes:
@@ -406,8 +411,23 @@ def from_observation(observation: dict[str, Any]) -> SpanRecord | None:
         status="error" if observation.get("level") == "ERROR" else "unset",
         error=observation.get("statusMessage"),
         attributes=attributes,
+        resource=resource,
         events=[],  # verdicts on a span are in Langfuse's scores, which this does not read
     )
+
+
+def kept(metadata: dict[str, Any], part: str) -> dict[str, Any]:
+    """The attributes Langfuse kept in an observation's metadata under `part`, as sent.
+
+    Langfuse may keep them nested, as `{"attributes": {"vardex.pack": …}}`, or flattened into
+    the metadata, as `{"attributes.vardex.pack": …}`; its cloud flattens them. Both are read.
+    """
+    nested = metadata.get(part) or {}
+    if isinstance(nested, str):
+        nested = json.loads(nested)
+    prefix = f"{part}."
+    flat = {k.removeprefix(prefix): v for k, v in metadata.items() if k.startswith(prefix)}
+    return {name: as_sent(value) for name, value in {**nested, **flat}.items()}
 
 
 def as_sent(value: Any) -> Any:
