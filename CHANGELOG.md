@@ -8,9 +8,22 @@ All notable changes to Vardex are recorded here. The format follows
 
 ### Added
 
+- `VARDEX_TRACE_STORE=langfuse` reads traces back from Langfuse's public API
+  (`/api/public/v2/observations`, with `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY` and
+  `LANGFUSE_SECRET_KEY`), so `traces`, `trace`, `dashboard`, `feedback` and `sample` work where a
+  company keeps its traces. It reads the attributes whether Langfuse kept them nested or
+  flattened into the metadata, and finds a trace by the first characters of its id.
+- A pack's `monitoring.yaml` sets limits per command (`error_rate`, `repair_rate`,
+  `p95_seconds`, `cost_per_request`, `bad_feedback`) over a window of days, and
+  `vardex dashboard --check` exits 1 when one is passed, so a scheduler can run it. `vardex check`
+  reads the file too.
 - `vardex ingest` and `vardex index` are traced: a span per source, never one per key, with
   the rows loaded; spans for `dbt build`, `dbt source freshness` and the check of the semantic
   layer; and a span per document with its pages, passages and scanned pages.
+
+### Fixed
+
+- The tests no longer send their traces to the OTLP backend named in a developer's `.env`.
 
 ## [0.10.0] - 2026-11-06
 

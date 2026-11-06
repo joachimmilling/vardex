@@ -29,6 +29,11 @@ class Settings:
     # only, into every backend too, or nowhere
     trace_content: Literal["local", "all", "none"] = "local"
     export_traces: bool = False  # True when an OTLP endpoint is set, in OpenTelemetry's words
+    # Where traces are read back from: the local files, or Langfuse with the keys below
+    trace_store: Literal["files", "langfuse"] = "files"
+    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
 
 
 def load_settings() -> Settings:
@@ -44,6 +49,10 @@ def load_settings() -> Settings:
         rerank_model=rerank_model(os.getenv("VARDEX_RERANK_MODEL")),
         trace_dir=Path(os.environ["VARDEX_TRACE_DIR"]) if os.getenv("VARDEX_TRACE_DIR") else None,
         trace_content=trace_content(os.getenv("VARDEX_TRACE_CONTENT")),
+        trace_store="langfuse" if os.getenv("VARDEX_TRACE_STORE") == "langfuse" else "files",
+        langfuse_host=os.getenv("LANGFUSE_HOST") or "https://cloud.langfuse.com",
+        langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY") or None,
+        langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY") or None,
         # OpenTelemetry's own variables, which the exporter reads for the address and headers
         export_traces=bool(
             os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
