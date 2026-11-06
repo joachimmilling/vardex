@@ -6,6 +6,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-06
+
 ### Added
 
 - `VARDEX_TRACE_STORE=langfuse` reads traces back from Langfuse's public API
