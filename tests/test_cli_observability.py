@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import duckdb
 import pytest
@@ -288,3 +289,12 @@ def test_the_dashboard_compares_two_versions_of_the_pack(pack, tmp_path, monkeyp
     assert "not enough requests to tell" in result.stdout
     unknown = runner.invoke(cli.app, ["dashboard", str(pack), "--compare", "zzz", new])
     assert unknown.exit_code == 1 and "names 0 versions" in unknown.output
+
+
+def test_a_test_never_writes_to_the_projects_own_call_log(monkeypatch, tmp_path):
+    real = Path("logs/calls.jsonl").resolve()
+    before = real.read_bytes() if real.is_file() else None
+    monkeypatch.setattr(cli, "connect", lambda settings: FakeModel("One."))
+    runner.invoke(cli.app, ["ask", "One?"])  # run from the project, without changing folder
+    assert (tmp_path / "logs" / "calls.jsonl").is_file()
+    assert (real.read_bytes() if real.is_file() else None) == before

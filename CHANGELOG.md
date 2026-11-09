@@ -6,6 +6,10 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The tests no longer add their fake model calls to the project's own `logs/calls.jsonl`.
+
 ## [0.10.1] - 2026-11-06
 
 ### Added

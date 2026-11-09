@@ -49,6 +49,9 @@ def traces_in_tmp(tmp_path, monkeypatch):
     loaded, and the tests' traces would go to their real Langfuse."""
     monkeypatch.setenv("VARDEX_TRACE_DIR", str(tmp_path / "traces"))
     monkeypatch.setattr(cli, "traces_path", lambda data_dir, pack: tmp_path / "traces")
+    # The call log too: it is a relative path, so a test run from the project would add its fake
+    # calls to the developer's real log
+    monkeypatch.setattr(cli, "CALL_LOG", tmp_path / "logs" / "calls.jsonl")
     for name in (
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
