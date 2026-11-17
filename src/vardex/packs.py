@@ -98,8 +98,10 @@ class PackError(Exception):
     """Raised when a pack is missing or invalid."""
 
 
-def describe_problem(error: Any) -> str:
-    """Turn one Pydantic error into a line such as `languages → item 2: must be ...`."""
+def describe_problem(error: Any, whole: str = "the reply") -> str:
+    """Turn one Pydantic error into a line such as `languages → item 2: must be ...`. An
+    error about the whole of what was read, not one field of it, names it as `whole`: a
+    model's reply, or the file."""
     where = " → ".join(
         f"item {part + 1}" if isinstance(part, int) else str(part) for part in error["loc"]
     )
@@ -121,7 +123,7 @@ def describe_problem(error: Any) -> str:
             problem = "must be a mapping of field: value"
         case _:
             problem = error["msg"][0].lower() + error["msg"][1:] + got
-    return f"{where or 'pack.yaml'}: {problem}"
+    return f"{where or whole}: {problem}"
 
 
 def read_yaml[T: BaseModel](path: Path, model: type[T], kind: str) -> T:
@@ -133,7 +135,7 @@ def read_yaml[T: BaseModel](path: Path, model: type[T], kind: str) -> T:
     except yaml.YAMLError as err:
         raise PackError(f"{path} is not valid YAML:\n{err}") from err
     except ValidationError as err:
-        problems = "\n".join(f"  {describe_problem(e)}" for e in err.errors())
+        problems = "\n".join(f"  {describe_problem(e, path.name)}" for e in err.errors())
         raise PackError(f"{path} is not a valid {kind}:\n{problems}") from err
 
 

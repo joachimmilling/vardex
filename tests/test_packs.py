@@ -1,8 +1,9 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from vardex.packs import PackError, load_pack
+from vardex.packs import PackError, PackManifest, describe_problem, load_pack
 
 PACKS = Path(__file__).parent.parent / "packs"
 
@@ -81,3 +82,12 @@ def test_a_list_instead_of_a_mapping(tmp_path):
     with pytest.raises(PackError) as caught:
         load_pack(write_pack(tmp_path, "- analyst\n"))
     assert "pack.yaml: must be a mapping of field: value" in str(caught.value)
+
+
+def test_a_problem_with_the_whole_reply_names_the_reply_not_a_file():
+    try:
+        PackManifest.model_validate_json("```sql\nselect 1\n```")
+    except ValidationError as err:
+        assert describe_problem(err.errors()[0]).startswith("the reply: invalid JSON")
+    else:
+        raise AssertionError("a reply that is not JSON parsed")
