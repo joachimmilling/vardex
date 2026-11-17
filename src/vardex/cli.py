@@ -3581,5 +3581,7 @@ def train_command(
         "compare, case by case:\n"
         f"  mlx_lm.server --model {base} --adapter-path {trained.adapter}\n"
         f"  OPENAI_BASE_URL=http://localhost:8080/v1 OPENAI_API_KEY=local vardex eval {pack} "
-        f"--model openai/{base} --baseline <the prompted model's recording>"
+        "--model openai/default_model --baseline <the prompted model's recording>\n"
+        "Ask for default_model: mlx-lm's server loads a model asked for by name afresh, "
+        "without the adapter."
     )
