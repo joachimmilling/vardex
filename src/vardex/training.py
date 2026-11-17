@@ -121,11 +121,24 @@ def build_dataset(
 def write_dataset(
     dataset: Dataset, lesson: Lesson, folder: Path, *, seed: int = 0
 ) -> tuple[int, int]:
-    """Write train.jsonl and valid.jsonl, chat lines, and pairs.jsonl to read them by. The
-    pairs are shuffled by the seed; a tenth go to valid.jsonl. Returns how many in each."""
-    lines = [json.dumps(lesson.chat(pair), ensure_ascii=False) for pair in dataset.pairs]
-    random.Random(seed).shuffle(lines)
-    cut = max(1, round(len(lines) * VALID_SHARE)) if len(lines) > 1 else 0
+    """Write train.jsonl and valid.jsonl, chat lines, and pairs.jsonl to read them by. About a
+    tenth go to valid.jsonl, chosen by the seed. Pairs generated from one example, and the
+    example itself, stay on one side: a variant of a question trained on is not a question the
+    model has not seen, and a validation loss over such variants only measures recall.
+    Returns how many in each."""
+    groups: dict[str, list[Pair]] = {}
+    for pair in dataset.pairs:
+        groups.setdefault(" ".join((pair.origin or pair.input).split()), []).append(pair)
+    order = list(groups.values())
+    random.Random(seed).shuffle(order)
+    want = max(1, round(len(dataset.pairs) * VALID_SHARE)) if len(order) > 1 else 0
+    valid: list[Pair] = []
+    train: list[Pair] = []
+    for group in order:
+        (valid if len(valid) < want else train).extend(group)
+    random.Random(seed).shuffle(train)
+    lines = [json.dumps(lesson.chat(pair), ensure_ascii=False) for pair in valid + train]
+    cut = len(valid)
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "valid.jsonl").write_text("".join(f"{x}\n" for x in lines[:cut]), encoding="utf-8")
     (folder / "train.jsonl").write_text("".join(f"{x}\n" for x in lines[cut:]), encoding="utf-8")

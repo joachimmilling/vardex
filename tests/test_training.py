@@ -127,6 +127,27 @@ def test_the_dataset_is_written_as_the_chats_vardex_sends(warehouse, tmp_path):
     assert len((tmp_path / "pairs.jsonl").read_text().splitlines()) == train + valid
 
 
+def test_variants_of_one_example_stay_on_one_side_of_the_split(warehouse, tmp_path):
+    lesson = SqlLesson(KNOWN, warehouse, [], TODAY)
+    asked = [f"Question {n}" for n in range(10)]
+    dataset = build_dataset(lesson)
+    dataset.pairs = [
+        Pair(f"{question} {variant}", "select 1", "generated", question)
+        for question in asked
+        for variant in "abc"
+    ] + [Pair(question, "select 1", "example") for question in asked]
+    train, valid = write_dataset(dataset, lesson, tmp_path, seed=3)
+    assert valid == 4  # one example and its three variants: a tenth of 40
+    asked_in = {
+        side: {
+            json.loads(line)["messages"][1]["content"].split()[1]
+            for line in (tmp_path / f"{side}.jsonl").read_text().splitlines()
+        }
+        for side in ("train", "valid")
+    }
+    assert not asked_in["train"] & asked_in["valid"]
+
+
 def extract_trace(document: str, answer: str, passed: bool) -> Trace:
     """A trace of vardex extract as the file exporter writes it: the root, one extract
     attempt with its check, and the model call under it, content kept."""
