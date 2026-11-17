@@ -58,6 +58,9 @@ def request_key(model: str, request: Request) -> str:
             "cache": [request.cache_system, request.cache_conversation],
             # A request without a tail keeps the key it had before tails existed
             **({"system_tail": request.system_tail} if request.system_tail else {}),
+            # Options for one provider change what it does. A request without any keeps its
+            # old key.
+            **({"extra": request.extra} if request.extra else {}),
             # The tools are part of what the model is told: a changed description changes the
             # answer, so it changes the key. A request without tools keeps its old key.
             **(
@@ -249,8 +252,8 @@ class RecordingClient:
 class ReplayClient:
     """A ModelClient that answers from a recording, in the order the answers were recorded."""
 
-    def __init__(self, recording: Recording) -> None:
-        self.model = recording.model
+    def __init__(self, recording: Recording, model: str | None = None) -> None:
+        self.model = model or recording.model  # another model's answers, such as a judge's
         self.waiting = {key: list(answers) for key, answers in recording.answers.items()}
 
     def send(self, request: Request, on_text: Callable[[str], None] | None = None) -> Answer:
@@ -264,6 +267,35 @@ class ReplayClient:
 
     def count_tokens(self, text: str) -> int:
         raise NotRecorded("token counts are not recorded")
+
+
+class ReusingClient:
+    """A ModelClient that answers from earlier recordings where they hold the exact request,
+    and calls the live client only for the rest.
+
+    A request that matches a recorded one byte for byte would get an answer of the same kind,
+    so paying for it again buys nothing but another sample. Reusing what is recorded makes a
+    run that changes one thing, such as routing between two models already measured, cost
+    only the calls that thing changes."""
+
+    def __init__(self, live: ModelClient, recordings: list[Recording]) -> None:
+        self.live = live
+        self.model = live.model
+        self.replays = [ReplayClient(recording, live.model) for recording in recordings]
+        self.reused = 0
+
+    def send(self, request: Request, on_text: Callable[[str], None] | None = None) -> Answer:
+        for replay in self.replays:
+            try:
+                answer = replay.send(request, on_text)
+            except NotRecorded:
+                continue
+            self.reused += 1
+            return answer
+        return self.live.send(request, on_text)
+
+    def count_tokens(self, text: str) -> int:
+        return self.live.count_tokens(text)
 
 
 class RecordingWarehouse:

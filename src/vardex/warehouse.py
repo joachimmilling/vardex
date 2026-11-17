@@ -13,12 +13,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import duckdb
 import httpx2
 from pydantic import BaseModel
 
-from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.ingest import (
     IngestError,
     Source,
@@ -35,7 +34,11 @@ from vardex.packs import load_pack
 from vardex.semantic import check, load_knowledge
 from vardex.tracing import DB_ROWS, span
 
+if TYPE_CHECKING:
+    import duckdb
+
 Say = Callable[[str], None]  # prints one line of progress
+
 # When a row's file was fetched, from its name: 2026-10-05T061502Z.csv.gz
 FETCHED_AT = "strptime(split_part(parse_filename(filename), '.', 1), '%Y-%m-%dT%H%M%SZ')"
 DBT = [sys.executable, "-c", "import sys; from dbt.cli.main import cli; sys.exit(cli())"]
@@ -90,7 +93,7 @@ def warehouse_path(data_dir: Path, pack_name: str) -> Path:
     return data_dir / pack_name / "warehouse.duckdb"
 
 
-def load_raw(con: duckdb.DuckDBPyConnection, source: Source, files: list[Path]) -> int:
+def load_raw(con: "duckdb.DuckDBPyConnection", source: Source, files: list[Path]) -> int:
     """Load landed files into the table raw.<source>, as they are, and count its rows.
 
     Text stays text: a code such as 0301 must not become the number 301. Typing the columns
@@ -141,7 +144,7 @@ def run_dbt(command: list[str], project: Path, warehouse: Path, work: Path) -> l
 
 
 def fetch_and_load(
-    con: duckdb.DuckDBPyConnection,
+    con: "duckdb.DuckDBPyConnection",
     client: httpx2.Client,
     source: Source,
     folder: Path,
@@ -154,6 +157,8 @@ def fetch_and_load(
 
     One span per source, never one per key: a source fetched once per company would make a
     trace of a million spans that no viewer can open. The span counts the answers instead."""
+    import duckdb
+
     with span(f"ingest {source.name}", {"vardex.source": source.name}) as traced:
         warning = None
         if refresh or is_due(source, folder, now):
@@ -193,7 +198,14 @@ def build(
     say: Say = lambda line: None,
 ) -> Build:
     """Fetch what is due, rebuild the pack's warehouse from scratch, test it, and put it in
-    place. Raises WarehouseError, leaving the old warehouse untouched, if anything fails."""
+    place. Raises WarehouseError, leaving the old warehouse untouched, if anything fails.
+
+    DuckDB is imported here, not at the top, so that Vardex installed without the duckdb
+    extra still starts: only a build needs it."""
+    import duckdb
+
+    from vardex.duckdb_warehouse import DuckDBWarehouse
+
     manifest = load_pack(pack)
     spec = load_ingest(pack)
     knowledge = load_knowledge(pack)  # read every pack file first: a typo fails before a fetch

@@ -3,8 +3,17 @@ from decimal import Decimal
 
 import pytest
 
-from vardex.provenance import misspelt, readings, trace
+from vardex.provenance import Scales, misspelt, readings, trace
 from vardex.sql import Result
+
+# A pack's scale words, as a pack.yaml with English and Norwegian Bokmål would name them
+SCALES = Scales(
+    {
+        "percent": None, "prosent": None, "thousand": 3, "tusen": 3,
+        "million": 6, "millioner": 6, "mill.": 6, "mill": 6,
+        "billion": 9, "milliarder": 9, "mrd": 9, "trillion": 12, "billioner": 12,
+    }
+)  # fmt: skip
 
 RESULT = Result(
     sql="select name, orgnr, revenue, margin, founded from c where fiscal_year = 2025 limit 10",
@@ -22,7 +31,7 @@ RESULT = Result(
 def where(text: str, question: str = "Which companies?") -> list[tuple]:
     """Each number in the text, and the first cell it traces to, or where else it was found."""
     found = []
-    for figure in trace(text, [RESULT], question):
+    for figure in trace(text, [RESULT], question, scales=SCALES):
         if figure.cells:
             found.append((figure.text, figure.cells[0].row, figure.cells[0].column))
         else:
@@ -59,16 +68,18 @@ def test_a_number_traces_to_its_cell_exactly_or_rounded(text, row, column):
 @pytest.mark.parametrize("written", ["NOK 1,1 billioner", "NOK 1,106 billioner", "1.1 trillion"])
 def test_a_norwegian_billion_is_a_million_million(written):
     equinor = Result("select …", ["revenue_nok"], [(Decimal("1106267934400"),)], False, "", 0.0)
-    [figure] = trace(f"Equinor ligger øverst med {written}.", [equinor], "Hvem er størst?")
+    [figure] = trace(
+        f"Equinor ligger øverst med {written}.", [equinor], "Hvem er størst?", scales=SCALES
+    )
     assert figure.cells and figure.text == written.removeprefix("NOK ")
 
 
 def test_a_number_from_the_assumptions_is_traced_to_them():
     assumptions = ["The accounts cover companies with at least 50 employees."]
     text = "Demo Laks AS, among companies with at least 50 employees."
-    [figure] = trace(text, [RESULT], "Which company?", assumptions)
+    [figure] = trace(text, [RESULT], "Which company?", assumptions, SCALES)
     assert (figure.text, figure.cells, figure.in_assumptions) == ("50", [], True)
-    assert not trace(text, [RESULT], "Which company?")[0].traced
+    assert not trace(text, [RESULT], "Which company?", scales=SCALES)[0].traced
 
 
 def test_a_scaled_number_in_the_question_is_traced_to_it():
@@ -85,14 +96,14 @@ def test_numbers_in_the_query_and_the_question_are_traced_too():
 
 
 def test_a_number_from_nowhere_is_not_traced():
-    [figure] = trace("The average was 7.3%.", [RESULT], "What was the average?")
+    [figure] = trace("The average was 7.3%.", [RESULT], "What was the average?", scales=SCALES)
     assert not figure.traced
 
 
 def test_rounding_is_allowed_only_to_the_digits_shown():
-    [figure] = trace("NOK 2.13 billion", [RESULT], "")
+    [figure] = trace("NOK 2.13 billion", [RESULT], "", scales=SCALES)
     assert figure.traced
-    [figure] = trace("NOK 2.14 billion", [RESULT], "")
+    [figure] = trace("NOK 2.14 billion", [RESULT], "", scales=SCALES)
     assert not figure.traced
 
 
@@ -114,3 +125,11 @@ def test_a_name_spelt_unlike_the_rows_is_found():
 def test_capitals_short_names_and_other_words_are_fine():
     text = "Mowi led. Lerøy Seafood Group was last. In Vestland, in NOK, LERØY SEAFOOD GROUP ASA."
     assert misspelt(text, NAMES) == []
+
+
+def test_the_engine_reads_no_scale_word_the_pack_does_not_name():
+    # Without the pack's words, "billion" is just a word after 2.1, and 2.1 is in no cell
+    [figure] = trace("NOK 2.1 billion", [RESULT], "")
+    assert not figure.traced
+    [figure] = trace("NOK 2.1 billion", [RESULT], "", scales=SCALES)
+    assert figure.cells[0].column == "revenue"

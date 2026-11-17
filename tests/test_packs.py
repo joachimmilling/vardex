@@ -38,10 +38,31 @@ def test_misspelt_field_is_rejected(tmp_path):
 
 def test_the_norway_problem(tmp_path):
     # In YAML 1.1, an unquoted `no` means False. The schema must catch it.
-    text = "name: demo\ndescription: x\nlanguages: [en, no]\nrecipes: [analyst]\n"
+    text = "name: demo\ndescription: x\nlanguages:\n  en: {}\n  no: {}\nrecipes: [analyst]\n"
     with pytest.raises(PackError) as caught:
         load_pack(write_pack(tmp_path, text))
-    assert "languages → item 2: must be one of en, nb, nn (got False)" in str(caught.value)
+    assert "a language code read as false" in str(caught.value)
+    assert "'no':" in str(caught.value)
+
+
+def test_a_scale_word_means_one_thing_in_every_language(tmp_path):
+    text = (
+        "name: demo\ndescription: x\nrecipes: [analyst]\nlanguages:\n"
+        "  en: {scale_words: {billion: 9}}\n  nb: {scale_words: {billion: 12}}\n"
+    )
+    with pytest.raises(PackError) as caught:
+        load_pack(write_pack(tmp_path, text))
+    assert "'billion' is 9 in en and 12 in nb" in str(caught.value)
+
+
+def test_the_pack_names_its_stemmers_and_scale_words(tmp_path):
+    text = (
+        "name: demo\ndescription: x\nrecipes: [analyst]\nlanguages:\n"
+        "  sv: {stemmer: swedish, scale_words: {miljoner: 6, Procent: null}}\n"
+    )
+    manifest = load_pack(write_pack(tmp_path, text))
+    assert manifest.stemmers == {"sv": "swedish"}
+    assert manifest.scale_words == {"miljoner": 6, "procent": None}
 
 
 def test_every_problem_gets_one_line(tmp_path):

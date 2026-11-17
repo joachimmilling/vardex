@@ -10,6 +10,7 @@ from pathlib import Path
 
 import duckdb
 
+from vardex.config import Settings
 from vardex.sql import Column, QueryError, Result, Table, one_at_a_time, traced_query
 
 # Read-only, and nothing outside the file: no reading or writing other files, no URLs, no
@@ -20,6 +21,13 @@ SETTINGS = {
     "autoload_known_extensions": False,
     "lock_configuration": True,
 }
+
+
+def connect(url: str, settings: Settings) -> "DuckDBWarehouse":
+    """The `duckdb` warehouse, as Vardex's entry points name it: a file, given as its path
+    (ending in .duckdb) or as duckdb:///path/to/file.duckdb."""
+    path = url.split("://", 1)[1] if "://" in url else url
+    return DuckDBWarehouse(Path(path), timeout_seconds=settings.query_timeout_seconds)
 
 
 class DuckDBWarehouse:

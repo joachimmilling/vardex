@@ -150,3 +150,29 @@ def test_the_figures_come_out_the_same_on_a_replay():
     assert replayed.outcome.values == recorded.outcome.values
     assert replayed.outcome.values is not None
     assert replayed.outcome.values["cost_usd"] is not None
+
+
+def test_the_report_says_how_long_the_prompt_grew():
+    long = Outcome(
+        "answer", "x", None, [],
+        {"steps": 3, "tool_calls": 2, "cost_usd": "0.03", "tools": [], "stop": "answered",
+         "prompt_tokens": [2000, 3500, 5000]},
+    )  # fmt: skip
+    short = Outcome(
+        "answer", "x", None, [],
+        {"steps": 1, "tool_calls": 0, "cost_usd": "0.01", "tools": [], "stop": "answered",
+         "prompt_tokens": [2200]},
+    )  # fmt: skip
+    results = [
+        CaseResult(case("long"), long, [Grade("agent", True)]),
+        CaseResult(case("short"), short, [Grade("agent", True)]),
+    ]
+    lines = agent_figures(Report(suite="agent", model="fake", results=results))
+    growth = "Prompt: first step median 2,100 tokens, largest 5,000 tokens, growing 1,500 a step"
+    assert f"{growth} (median)" in lines
+
+
+def test_a_step_counts_every_token_it_sent_cached_or_not():
+    model = FakeModel(Turn("Looking.", [("look_up", {"what": "revenue"})]), "It was 1.")
+    result = agent_case(model, toolbox, case(), [grade_agent])
+    assert result.outcome.values["prompt_tokens"] == [1000, 1000]

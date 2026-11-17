@@ -3,5 +3,48 @@ version: 0.1.0
 description: >
   Norwegian companies from the Brønnøysund registers, Statistics Norway
   and annual reports from listed companies.
-languages: [en, nb]
 recipes: [analyst, monitor, back-office-agent]
+
+# The languages this pack's questions, answers and documents are written in. Each names the
+# stemmer its words are searched with, and the words after a number that scale it, so an
+# answer that says "2.1 milliarder" traces to 2,100,000,000 in the rows.
+languages:
+  en:
+    stemmer: english
+    scale_words:
+      "%": null
+      percent: null
+      per cent: null
+      thousand: 3
+      k: 3
+      million: 6
+      millions: 6
+      m: 6
+      mn: 6
+      billion: 9
+      billions: 9
+      bn: 9
+      trillion: 12
+  nb:
+    stemmer: norwegian
+    scale_words:
+      prosent: null
+      tusen: 3
+      millioner: 6
+      mill: 6
+      mill.: 6
+      milliard: 9
+      milliarder: 9
+      mrd: 9
+      mrd.: 9
+      # A Norwegian billion is a million million. Its singular, billion, is left out: it
+      # is spelt as the English word, which means a thousand times less.
+      billioner: 12
+  nn:
+    stemmer: norwegian
+    scale_words:
+      prosent: null
+      tusen: 3
+      millionar: 6
+      milliardar: 9
+      billionar: 12

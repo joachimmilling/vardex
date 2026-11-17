@@ -12,7 +12,13 @@ from typing import Any
 
 import psycopg
 
+from vardex.config import Settings
 from vardex.sql import Column, QueryError, Result, Table, one_at_a_time, traced_query
+
+
+def connect(url: str, settings: Settings) -> "PostgresWarehouse":
+    """The `postgresql` and `postgres` warehouses: a PostgreSQL URL, as libpq writes it."""
+    return PostgresWarehouse(url, timeout_seconds=settings.query_timeout_seconds)
 
 
 class PostgresWarehouse:

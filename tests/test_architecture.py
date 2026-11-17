@@ -2,6 +2,8 @@
 that reads documents or runs embedding models."""
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -37,13 +39,46 @@ def test_engine_imports_no_pack():
             assert module.split(".")[0] != "packs", f"{file.name} imports {module!r}"
 
 
-def test_only_the_anthropic_client_imports_anthropic():
+# Each provider's SDK, and the one module that may import it
+SDKS = {
+    "anthropic": "anthropic_client.py",
+    "openai": "openai_client.py",
+    "mlx_lm": "mlx_trainer.py",
+}
+
+
+def test_only_a_providers_own_client_imports_its_sdk():
     for file in ENGINE.rglob("*.py"):
-        if file.name == "anthropic_client.py":
-            continue
         tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
         for module in imported_modules(tree):
-            assert module.split(".")[0] != "anthropic", f"{file.name} imports {module!r}"
+            owner = SDKS.get(module.split(".")[0])
+            assert owner is None or file.name == owner, f"{file.name} imports {module!r}"
+
+
+def test_starting_vardex_imports_no_sdk_and_no_database_driver():
+    """Every connector is an extra, found by its entry point when a setting asks for it. So
+    the command-line tool must start without importing any of them: Vardex installed with no
+    extras at all still starts, and says which extra a setting needs."""
+    connectors = ["anthropic", "openai", "duckdb", "psycopg", "fastembed", "mlx_lm"]
+    script = (
+        f"import sys, vardex.cli; print(','.join(m for m in {connectors!r} if m in sys.modules))"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert loaded == "", f"starting vardex imported {loaded}"
+
+
+def test_the_engine_names_no_connector_where_it_chooses_one():
+    """connect and connect_warehouse look connectors up by name; neither names one in its
+    code. Their docstrings may give examples."""
+    tree = ast.parse((ENGINE / "cli.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in ("connect", "connect_warehouse"):
+            code = node.body[1:] if ast.get_docstring(node) else node.body
+            text = "\n".join(ast.unparse(statement) for statement in code).lower()
+            for name in ("anthropic", "openai", "ollama", "duckdb", "postgres"):
+                assert name not in text, f"{node.name} names {name}"
 
 
 # Each database driver or library, and the only engine modules that may import it.

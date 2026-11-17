@@ -5,6 +5,8 @@ implement one for a database import that database's driver.
 """
 
 import functools
+import itertools
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -115,6 +117,8 @@ def check_sql(sql: str, dialect: str, tables: set[str]) -> list[str]:
     except sqlglot.errors.ParseError as err:
         reason = err.errors[0]["description"] if err.errors else str(err)
         return [f"the SQL does not parse: {reason}"]
+    except sqlglot.errors.TokenError as err:  # a quote that never closes, before any parsing
+        return [f"the SQL does not parse: {err}"]
     if len(statements) != 1:
         return [f"write exactly one statement, not {len(statements)}"]
     query = statements[0]
@@ -146,6 +150,60 @@ def transpile(sql: str, read: str, write: str) -> str:
 def is_number(value: Any) -> bool:
     """True for an int, a float or a Decimal; False for a bool, which Python counts as an int."""
     return isinstance(value, int | float | Decimal) and not isinstance(value, bool)
+
+
+def same(got: Any, want: Any) -> bool:
+    """An extracted value against the expected one: numbers as exact decimals, so 842.6 from
+    YAML equals Decimal("842.6"); anything else as it is."""
+    if is_number(got) and is_number(want):
+        return Decimal(str(got)) == Decimal(str(want))
+    return got == want
+
+
+def normalise(value: Any) -> Any:
+    """A value as it is compared: a whole number exactly, any other number to six significant
+    digits, so 0.156199 from one query equals 0.15619915 from another; text without spaces at
+    either end."""
+    if is_number(value):
+        number = Decimal(str(value)) if isinstance(value, float) else Decimal(value)
+        if number.is_finite() and number == number.to_integral_value():
+            return str(int(number))
+        return f"{number:.6g}"
+    return value.strip() if isinstance(value, str) else value
+
+
+def compare(reference: Result, result: Result, ordered: bool) -> str | None:
+    """Why a result does not hold the reference's rows, or None when it does. The result may
+    have more columns than the reference, in any order and under any names, and more rows: a
+    query may return context, such as the next nine groups after the one asked for. Every
+    reference row must be in it, and with ordered, as its first rows, in the same order."""
+    if len(result.rows) < len(reference.rows):
+        return f"{len(result.rows)} rows, expected at least {len(reference.rows)}"
+    want = [tuple(normalise(v) for v in row) for row in reference.rows]
+    got = [tuple(normalise(v) for v in row) for row in result.rows]
+
+    def holds(j: int, i: int) -> bool:
+        """True when result column j holds every value of reference column i."""
+        return not Counter(row[i] for row in want) - Counter(row[j] for row in got)
+
+    # For each reference column, the result columns that hold all its values
+    columns = range(len(result.columns))
+    candidates = [[j for j in columns if holds(j, i)] for i in range(len(reference.columns))]
+    missing = [reference.columns[i] for i, found in enumerate(candidates) if not found]
+    if missing:
+        return f"no column holds the values of {', '.join(missing)}"
+    in_rows = False
+    for choice in itertools.product(*candidates):
+        rows = [tuple(row[j] for j in choice) for row in got]
+        if ordered and rows[: len(want)] == want:
+            return None
+        if not Counter(want) - Counter(rows):
+            if not ordered:
+                return None
+            in_rows = True
+    if in_rows:
+        return "the right rows, in the wrong order"
+    return "the right values, but not in the same rows"
 
 
 def format_value(value: Any) -> str:

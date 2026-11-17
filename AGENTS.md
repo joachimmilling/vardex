@@ -5,7 +5,8 @@ recipes, and domain packs (packs/). Each release is described in CHANGELOG.md, a
 main design choice in docs/decisions/.
 
 ## Commands
-- Install: `uv sync && uv run pre-commit install`
+- Install: `uv sync && uv run pre-commit install` (the dev group brings every connector's
+  extra; on a Mac with Apple silicon, add `--extra mlx` to fine-tune)
 - Test: `uv run pytest`
 - Lint and format: `uv run ruff check --fix && uv run ruff format`
 - Run the CLI: `uv run vardex --help`
@@ -20,14 +21,23 @@ main design choice in docs/decisions/.
 - Run the evals offline, as CI does: `uv run vardex eval packs/norwegian-companies --replay`
 - Run and record them live (needs a key and the warehouse; costs about a dollar):
   `uv run vardex eval packs/norwegian-companies --record`
+- Run on an open-weight model on this machine (needs Ollama, started with
+  `OLLAMA_CONTEXT_LENGTH=32768`): `VARDEX_MODEL=ollama/gemma4:12b-it-q4_K_M uv run vardex …`
+- Measure something new without paying again for what is recorded:
+  `uv run vardex eval … --reuse packs/norwegian-companies/evals/recordings/answer.jsonl`
 - Tests against PostgreSQL run when `VARDEX_TEST_POSTGRES_URL` is set, as in CI; the
   database needs the pgvector extension
 
 ## Rules
 - The engine in src/vardex never imports a pack or mentions one by name.
   tests/test_architecture.py enforces this. Never weaken or skip that test.
-- Only src/vardex/anthropic_client.py imports anthropic. Everything else talks to models
-  through ModelClient in vardex.llm. tests/test_architecture.py enforces this too.
+- Only src/vardex/anthropic_client.py imports anthropic, and only openai_client.py imports
+  openai. Everything else talks to models through ModelClient in vardex.llm.
+  tests/test_architecture.py enforces this too.
+- Connectors (model providers, warehouses, judges, trainers) are found by name through entry
+  points, in vardex.plugins; their SDKs and drivers are extras. Never import one at the top of
+  cli.py or name one in connect or connect_warehouse: starting vardex must import none of
+  them, and tests/test_architecture.py checks that it does not.
 - Only src/vardex/duckdb_warehouse.py and postgres_warehouse.py query a database; everything
   else goes through Warehouse in vardex.sql. warehouse.py imports duckdb only to build a pack's
   file. tests/test_architecture.py enforces this.
@@ -45,6 +55,9 @@ main design choice in docs/decisions/.
   builds a request), or to how documents are read, cut or searched, makes the eval
   recordings stale, and CI fails. Record again with
   `--record` and commit the new recordings with the change; never edit a recording by hand.
+- No golden question or reference query is ever trained on: vardex.training leaves them out,
+  and tests/test_training.py proves it. A fine-tuned model replaces a prompted one only when
+  it passes more of the golden set, case by case.
 - Golden sets live in a pack's evals/ folder. Never change a case to make it pass. Change a
   case only when the case itself is wrong, and say why in the pull request. A case's question
   is never also an example in questions.yaml.
@@ -60,7 +73,8 @@ main design choice in docs/decisions/.
   FakeEmbedder, FakeReranker and MemoryIndex from tests/fakes.py, PDFs made by tests/pdfs.py,
   and HTTP clients built on httpx2.MockTransport.
 - Never read, print or commit .env or anything in data/.
-- Add dependencies with `uv add`, never by editing pyproject.toml by hand or with pip.
+- Add dependencies with `uv add`, or `uv add --optional EXTRA` for a connector's, never with
+  pip. The entry points are the one part of pyproject.toml written by hand; run `uv lock` after.
 - Every change comes with tests. Run the full test suite and ruff before finishing.
 - Describe every change a user would notice under "Unreleased" in CHANGELOG.md.
 - A change to a decision in docs/decisions/ gets a new record that supersedes the old one.

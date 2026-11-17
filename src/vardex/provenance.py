@@ -21,23 +21,32 @@ from vardex.sql import Result, is_number
 NUMBER = re.compile(
     r"(?<![\w.,])(?:\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)*)(?![\w])"
 )
-# What may follow a number and change what it means: a percent sign, or a scale word.
-SCALES = {
-    "%": None, "percent": None, "per cent": None, "prosent": None,
-    "thousand": 3, "tusen": 3, "k": 3,
-    "million": 6, "millions": 6, "millioner": 6, "mill.": 6, "mill": 6, "mn": 6, "m": 6,
-    "billion": 9, "billions": 9, "milliard": 9, "milliarder": 9, "mrd.": 9, "mrd": 9, "bn": 9,
-    "trillion": 12, "billioner": 12,  # a Norwegian billion is a million million
-}  # fmt: skip
-SUFFIX = re.compile(
-    r"\s?(" + "|".join(re.escape(s) for s in sorted(SCALES, key=len, reverse=True)) + r")(?!\w)",
-    re.IGNORECASE,
-)
 LIST_MARKER = re.compile(r"^\s*\d+[.)]\s", re.MULTILINE)  # "1. " in a numbered list
 SPACES = re.compile(r"[ \u00a0\u202f]")
 # A run of capitalised words, such as Lerøy Seafood Group ASA: what a name looks like in text
 NAME = re.compile(r"[^\W\d_a-zà-ÿ][\w'&-]*(?:[ \u00a0][^\W\d_a-zà-ÿ][\w'&-]*)*")
 SIMILAR = 0.85  # how alike a written name and a name in the rows must be to count as a slip
+
+
+@dataclass(frozen=True)
+class Scales:
+    """What may follow a number and change what it means: a percent, or a scale word such as
+    million. The words are a language's, so the pack names them in pack.yaml; the engine
+    knows only the percent sign."""
+
+    words: dict[str, int | None]  # each word, lower case, with its power of ten or None
+    suffix: re.Pattern[str] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        words = sorted({"%": None, **self.words}, key=len, reverse=True)  # longest first
+        pattern = r"\s?(" + "|".join(re.escape(w) for w in words) + r")(?!\w)"
+        object.__setattr__(self, "suffix", re.compile(pattern, re.IGNORECASE))  # frozen
+
+    def power(self, word: str | None) -> int | None:
+        return self.words.get(word) if word else None
+
+
+PERCENT = Scales({})  # the percent sign alone: for a pack that names no scale words
 
 
 @dataclass(frozen=True)
@@ -105,12 +114,14 @@ def readings(token: str) -> set[tuple[Decimal, int]]:
     return found
 
 
-def numbers_in(text: str) -> list[tuple[str, set[tuple[Decimal, int]], str | None]]:
+def numbers_in(
+    text: str, scales: Scales = PERCENT
+) -> list[tuple[str, set[tuple[Decimal, int]], str | None]]:
     """Each number in a text: as written with what follows it, its readings, and its suffix."""
     text = LIST_MARKER.sub("", text)
     found = []
     for match in NUMBER.finditer(text):
-        suffix = SUFFIX.match(text, match.end())
+        suffix = scales.suffix.match(text, match.end())
         word = suffix.group(1).lower() if suffix else None
         written = match.group() + (suffix.group() if suffix else "")
         found.append((written, readings(match.group()), word))
@@ -138,13 +149,13 @@ def atoms(value: Any) -> list[tuple[Decimal, bool]]:
 
 
 def targets(
-    values: set[tuple[Decimal, int]], word: str | None
+    values: set[tuple[Decimal, int]], word: str | None, scales: Scales = PERCENT
 ) -> list[tuple[Decimal, Decimal, int]]:
     """What a written number may stand for, each with how far a value rounded to it can be:
     2.1 billion is 2,100,000,000 give or take 50,000,000; 5.2% is 0.052 give or take 0.0005,
     or 5.2 give or take 0.05 when the query already gave a percentage. The last value of each
     says how good a reading it is: 0 for the plain one, 1 for the second guess."""
-    power = SCALES.get(word) if word else None
+    power = scales.power(word)
     percent = word is not None and power is None
     found = []
     for value, decimals in values:
@@ -156,12 +167,12 @@ def targets(
     return found
 
 
-def amounts(text: str) -> set[Decimal]:
+def amounts(text: str, scales: Scales = PERCENT) -> set[Decimal]:
     """Every value the numbers in a text can stand for: as written, and scaled by the word
     after them, so "NOK 50 billion" in a question holds both 50 and 50,000,000,000."""
     found = set()
-    for _, values, word in numbers_in(text):
-        power = SCALES.get(word) if word else None
+    for _, values, word in numbers_in(text, scales):
+        power = scales.power(word)
         for value, _ in values:
             found.add(value)
             if power:
@@ -178,14 +189,18 @@ def mentions(
 
 
 def trace(
-    text: str, results: list[Result], question: str, assumptions: list[str] | None = None
+    text: str,
+    results: list[Result],
+    question: str,
+    assumptions: list[str] | None = None,
+    scales: Scales = PERCENT,
 ) -> list[Figure]:
     """Every number in an answer, with the cells, query, question and assumptions it can be
     traced to. The assumptions are shown to the person beside the answer, so a number taken
     from one, such as a coverage limit from the pack's notes, has a visible source."""
-    in_question = amounts(question)
-    in_assumptions = amounts("\n".join(assumptions or []))
-    in_sql = {v for result in results for v in amounts(result.sql)}
+    in_question = amounts(question, scales)
+    in_assumptions = amounts("\n".join(assumptions or []), scales)
+    in_sql = {v for result in results for v in amounts(result.sql, scales)}
     cells = [
         (Cell(result, row, column), atom, rounded)
         for result in results
@@ -194,9 +209,9 @@ def trace(
         for atom, rounded in atoms(value)
     ]
     figures = []
-    for written, values, word in numbers_in(text):
+    for written, values, word in numbers_in(text, scales):
         exact = {value for value, _ in values} if word is None else set()
-        near = targets(values, word)
+        near = targets(values, word, scales)
         scaled = near if word else []  # 50 billion or 5%: compare with what it rounds from
         found: dict[tuple[int, int, str], tuple[tuple[int, Decimal], Cell]] = {}
         for cell, atom, rounded in cells:
@@ -224,20 +239,22 @@ def trace(
     return figures
 
 
-def trace_quotes(text: str, quotes: list[Quote], question: str) -> list[Figure]:
+def trace_quotes(
+    text: str, quotes: list[Quote], question: str, scales: Scales = PERCENT
+) -> list[Figure]:
     """Every number in an answer from documents, with the quotes and question it can be traced
     to. A number in an answer must be in the words it cites, as written or rounded, or in the
     question: 197.3 million may be written 197 million, but never worked out from two others.
     Something that reads as no number at all, such as the date 18.04.18, must be copied as
     written."""
-    in_question = amounts(question)
-    in_quotes = [(quote, amounts(quote.text)) for quote in quotes]
+    in_question = amounts(question, scales)
+    in_quotes = [(quote, amounts(quote.text, scales)) for quote in quotes]
     figures = []
-    for written, values, word in numbers_in(text):
+    for written, values, word in numbers_in(text, scales):
         token = written.strip()
         if values:
             exact = {value for value, _ in values} if word is None else set()
-            scaled = targets(values, word) if word else []
+            scaled = targets(values, word, scales) if word else []
             asked = mentions(in_question, exact, scaled)
             cited = [quote for quote, found in in_quotes if mentions(found, exact, scaled)]
         else:  # it reads as no number, such as a date: it must be copied as written

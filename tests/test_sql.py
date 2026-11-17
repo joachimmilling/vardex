@@ -52,6 +52,13 @@ def test_sql_that_does_not_parse():
     assert problems("select (1 from dim_companies")[0].startswith("the SQL does not parse")
 
 
+def test_a_quote_that_never_closes_is_a_problem_not_a_crash():
+    # As an open-weight model wrote it: the closing quote of the JSON string inside the SQL
+    sql = "select name from companies WHERE legal_form = 'ASA' AND county = 'Rogaland'\"'"
+    [problem] = check_sql(sql, "duckdb", {"companies"})
+    assert problem.startswith("the SQL does not parse")
+
+
 def test_the_dialect_decides_what_parses():
     top = "select top 5 name from dim_companies"  # SQL Server's way to limit rows
     assert problems(top, "tsql") == []

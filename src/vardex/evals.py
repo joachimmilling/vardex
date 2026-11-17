@@ -9,12 +9,11 @@ A grader is any function that takes a case, what the capability did, and the ref
 returns a Grade, or None when it does not apply. Most are code; the judge is a model.
 """
 
-import itertools
 import json
 import math
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -24,18 +23,20 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from vardex import rag, text_to_sql
+from vardex import rag, routing, text_to_sql
 from vardex.agent import run_agent
+from vardex.capabilities import FAILED, UNREACHABLE, Answering, Capability, Extracting
 from vardex.documents import DocumentList
 from vardex.embeddings import Embedder, Reranker
-from vardex.extraction import ExtractionError, ExtractionSpec, extract
+from vardex.extraction import ExtractionSpec
 from vardex.llm import Answer, Effort, Ledger, Message, ModelClient, ModelError, Request
 from vardex.packs import Language, PackError, read_yaml
 from vardex.permissions import Permissions
 from vardex.prompts import FAITHFUL, JUDGE
+from vardex.provenance import PERCENT, Scales
 from vardex.retrieval import Filters, Index, Passage, search
 from vardex.semantic import Knowledge
-from vardex.sql import QueryError, Result, Warehouse, check_sql, is_number, transpile
+from vardex.sql import QueryError, Result, Warehouse, check_sql, compare, same, transpile
 from vardex.tools import Toolbox
 from vardex.tracing import CASE, OUTCOME, QUESTION, SUITE, evaluation, span
 
@@ -75,6 +76,9 @@ class Suite(BaseModel):
     capability: Literal["answer"]
     today: date  # the date every run pretends it is, so "last year" never moves
     threshold: float = Field(ge=0, le=1)  # the share of cases that must pass
+    # The model that judges the answers, as provider/model. Not the model under test: a model
+    # grading its own answers favours them. None judges with the model under test, and says so.
+    judge: str | None = None
     cases: list[Case] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -207,6 +211,9 @@ class CiteSuite(BaseModel):
     description: str
     capability: Literal["cite"]
     threshold: float = Field(ge=0, le=1)
+    # The model that judges the answers, as provider/model. Not the model under test: a model
+    # grading its own answers favours them. None judges with the model under test, and says so.
+    judge: str | None = None
     cases: list[CiteCase] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -430,50 +437,15 @@ def check_suite(suite: Suite, knowledge: Knowledge) -> list[str]:
     return problems
 
 
-def normalise(value: Any) -> Any:
-    """A value as it is compared: a whole number exactly, any other number to six significant
-    digits, so 0.156199 from one query equals 0.15619915 from another; text without spaces at
-    either end."""
-    if is_number(value):
-        number = Decimal(str(value)) if isinstance(value, float) else Decimal(value)
-        if number.is_finite() and number == number.to_integral_value():
-            return str(int(number))
-        return f"{number:.6g}"
-    return value.strip() if isinstance(value, str) else value
-
-
-def compare(reference: Result, result: Result, ordered: bool) -> str | None:
-    """Why a result does not hold the reference's rows, or None when it does. The result may
-    have more columns than the reference, in any order and under any names, and more rows: a
-    query may return context, such as the next nine groups after the one asked for. Every
-    reference row must be in it, and with ordered, as its first rows, in the same order."""
-    if len(result.rows) < len(reference.rows):
-        return f"{len(result.rows)} rows, expected at least {len(reference.rows)}"
-    want = [tuple(normalise(v) for v in row) for row in reference.rows]
-    got = [tuple(normalise(v) for v in row) for row in result.rows]
-
-    def holds(j: int, i: int) -> bool:
-        """True when result column j holds every value of reference column i."""
-        return not Counter(row[i] for row in want) - Counter(row[j] for row in got)
-
-    # For each reference column, the result columns that hold all its values
-    columns = range(len(result.columns))
-    candidates = [[j for j in columns if holds(j, i)] for i in range(len(reference.columns))]
-    missing = [reference.columns[i] for i, found in enumerate(candidates) if not found]
-    if missing:
-        return f"no column holds the values of {', '.join(missing)}"
-    in_rows = False
-    for choice in itertools.product(*candidates):
-        rows = [tuple(row[j] for j in choice) for row in got]
-        if ordered and rows[: len(want)] == want:
-            return None
-        if not Counter(want) - Counter(rows):
-            if not ordered:
-                return None
-            in_rows = True
-    if in_rows:
-        return "the right rows, in the wrong order"
-    return "the right values, but not in the same rows"
+def check_languages(suite: AnySuite, languages: Iterable[str]) -> list[str]:
+    """A case in a language the pack does not read: its scale words and stemmer are unknown,
+    so its numbers would not trace and its words would not be found."""
+    known = set(languages)
+    return [
+        f"case {case.id}: the pack reads no language {case.language!r}; add it to pack.yaml"
+        for case in suite.cases
+        if case.language not in known
+    ]
 
 
 def grade_behaviour(case: AnyCase, outcome: Outcome, reference: Result | None) -> Grade:
@@ -533,6 +505,121 @@ class Judge:
         )
 
 
+class Label(BaseModel):
+    """A person's verdict on one answer to one case: what the judge is checked against."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case: str
+    answer: str  # the words the person read, exactly
+    passed: bool
+    by: str
+    note: str = ""
+
+
+def labels_path(pack: Path, suite: str) -> Path:
+    return pack / "evals" / "labels" / f"{suite}.yaml"
+
+
+def load_labels(pack: Path, suite: str) -> list[Label]:
+    path = labels_path(pack, suite)
+    if not path.is_file():
+        return []
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+    try:
+        return [Label.model_validate(item) for item in data]
+    except ValidationError as err:
+        raise PackError(f"{path} is not a list of labels: {err}") from err
+
+
+def add_label(pack: Path, suite: str, label: Label) -> None:
+    """Add a label to the end of the suite's file, as text, so its comments stay."""
+    path = labels_path(pack, suite)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = yaml.safe_dump([label.model_dump(exclude_defaults=True)], allow_unicode=True)
+    with path.open("a", encoding="utf-8") as file:
+        file.write(entry)
+
+
+@dataclass(frozen=True)
+class JudgeCheck:
+    """How often a judge agrees with the verdicts a person made, and how it disagrees."""
+
+    both_pass: int
+    both_fail: int
+    false_pass: int  # the judge passed what the person failed: the dangerous kind
+    false_fail: int  # the judge failed what the person passed
+    disagreements: list[tuple[str, bool, str]]  # case, the person's verdict, the judge's reason
+    answers: list[Answer] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return self.both_pass + self.both_fail + self.false_pass + self.false_fail
+
+    @property
+    def agreement(self) -> float:
+        return (self.both_pass + self.both_fail) / self.total if self.total else 0.0
+
+    @property
+    def kappa(self) -> float:
+        """Cohen's kappa: agreement beyond what two raters would reach by chance, given how
+        often each says pass. 1 is perfect, 0 is chance. A judge that passes everything agrees
+        90% with a person who passes 90%, and its kappa is 0."""
+        n = self.total
+        if n == 0:
+            return 0.0
+        judge_pass = (self.both_pass + self.false_pass) / n
+        person_pass = (self.both_pass + self.false_fail) / n
+        chance = judge_pass * person_pass + (1 - judge_pass) * (1 - person_pass)
+        return 1.0 if chance == 1 else (self.agreement - chance) / (1 - chance)
+
+
+def check_judge(
+    judge: Grader, suite: Suite, labels: list[Label], warehouse: Warehouse, dialect: str
+) -> JudgeCheck:
+    """Run the judge on every answer a person labelled, and count where the two agree. The
+    judge sees exactly what it sees in a run: the question, the reference rows, the answer."""
+    cases = {case.id: case for case in suite.cases}
+    counts = Counter()
+    disagreements, spent = [], []
+    for label in labels:
+        case = cases.get(label.case)
+        if case is None or case.sql is None:
+            raise PackError(f"label for {label.case}: no case with reference SQL by that id")
+        reference = warehouse.run(transpile(case.sql, dialect, warehouse.dialect), max_rows=100)
+        grade = judge(case, Outcome("answer", label.answer, None, []), reference)
+        if grade is None:
+            continue
+        spent += grade.answers
+        kind = (
+            ("both_pass" if label.passed else "false_pass")
+            if grade.passed
+            else ("false_fail" if label.passed else "both_fail")
+        )
+        counts[kind] += 1
+        if grade.passed != label.passed:
+            disagreements.append((label.case, label.passed, grade.reason))
+    return JudgeCheck(
+        counts["both_pass"], counts["both_fail"], counts["false_pass"], counts["false_fail"],
+        disagreements, spent,
+    )  # fmt: skip
+
+
+def format_judge_check(check: JudgeCheck) -> str:
+    low, high = wilson(check.both_pass + check.both_fail, check.total)
+    lines = [
+        f"{check.total} labelled answers: the judge agreed on {check.agreement:.0%} "
+        f"(95% interval {low:.0%} to {high:.0%}), Cohen's kappa {check.kappa:.2f}",
+        f"  passed by both {check.both_pass}, failed by both {check.both_fail}",
+        f"  passed by the judge only {check.false_pass}, failed by the judge only "
+        f"{check.false_fail}",
+    ]
+    for case, person, reason in check.disagreements:
+        said = "passed" if person else "failed"
+        lines.append(f"  {case}: the person {said} it; the judge: {' '.join(reason.split())}")
+    return "\n".join(lines)
+
+
 def answer_case(
     client: ModelClient,
     warehouse: Warehouse,
@@ -543,8 +630,10 @@ def answer_case(
     *,
     effort: Effort | None = "medium",
     embedder: Embedder | None = None,
+    small: ModelClient | None = None,
 ) -> CaseResult:
-    """Run one case through text-to-SQL, exactly as vardex answer would, and grade it."""
+    """Run one case through text-to-SQL, exactly as vardex answer would, and grade it. With
+    a small model, the case is routed as vardex answer routes it: the small model first."""
     reference = None
     if case.sql:
         sql = transpile(case.sql, knowledge.questions.dialect, warehouse.dialect)
@@ -554,34 +643,29 @@ def answer_case(
             raise PackError(f"case {case.id}: the reference SQL fails: {err}") from err
         if reference.truncated:
             raise PackError(f"case {case.id}: the reference SQL returns more than 100 rows")
-    ledger = Ledger(client)
-    try:
-        reply = text_to_sql.answer(
-            ledger,
-            warehouse,
-            knowledge,
-            case.question,
-            effort=effort,
-            today=suite.today,
-            embedder=embedder,
-        )
-        outcome = Outcome(reply.kind, reply.text, reply.result, reply.answers)
-    except text_to_sql.AnswerError as err:
-        outcome = Outcome("error", str(err), err.result, err.answers)
-    except ModelError as err:
-        if not err.retryable:
-            raise  # every case would fail the same way, so stop the run
-        outcome = Outcome("error", str(err), None, ledger.answers)
+    work = Answering(
+        warehouse, knowledge, case.question, effort=effort, today=suite.today, embedder=embedder
+    )
+    outcome = attempted(work, client, small)
     grades = [grade for grader in graders if (grade := grader(case, outcome, reference))]
     return CaseResult(case, outcome, grades)
 
 
-def same(got: Any, want: Any) -> bool:
-    """An extracted value against the expected one: numbers as exact decimals, so 842.6 from
-    YAML equals Decimal("842.6"); anything else as it is."""
-    if is_number(got) and is_number(want):
-        return Decimal(str(got)) == Decimal(str(want))
-    return got == want
+def attempted(work: Capability, client: ModelClient, small: ModelClient | None) -> Outcome:
+    """Do a case's work as the command would, routed when there is a small model, as the
+    outcome the graders read. Whether the large model was asked is kept in the outcome's
+    values, where a recording keeps it."""
+    routed = routing.attempt(work, client, small)
+    attempt = routed.attempt
+    escalated = {"escalated": routed.escalated} if small is not None else None
+    kind = "error" if attempt.kind in (FAILED, UNREACHABLE) else attempt.kind
+    if isinstance(work, Extracting):
+        values = attempt.reply.values if attempt.reply else None
+        text = json.dumps(values, default=str, ensure_ascii=False) if values else attempt.text
+        if values is not None or escalated:
+            values = {**(values or {}), **(escalated or {})}
+        return Outcome(kind, text, None, routed.answers, values)
+    return Outcome(kind, attempt.text, attempt.output, routed.answers, escalated)
 
 
 def grade_fields(case: AnyCase, outcome: Outcome, reference: Result | None) -> Grade | None:
@@ -618,20 +702,13 @@ def extract_case(
     spec: ExtractionSpec,
     case: ExtractionCase,
     graders: list[Grader],
+    *,
+    small: ModelClient | None = None,
 ) -> CaseResult:
-    """Run one document through the extraction, exactly as vardex extract would, and grade it."""
+    """Run one document through the extraction, exactly as vardex extract would, and grade it.
+    With a small model, it is routed as vardex extract routes it."""
     document = (pack / "evals" / "documents" / case.document).read_text(encoding="utf-8")
-    ledger = Ledger(client)
-    try:
-        extraction = extract(ledger, spec, document)
-        text = json.dumps(extraction.values, default=str, ensure_ascii=False)
-        outcome = Outcome("values", text, None, extraction.answers, extraction.values)
-    except ExtractionError as err:
-        outcome = Outcome("problem" if err.reported else "error", str(err), None, err.answers)
-    except ModelError as err:
-        if not err.retryable:
-            raise  # every case would fail the same way, so stop the run
-        outcome = Outcome("error", str(err), None, ledger.answers)
+    outcome = attempted(Extracting(spec, document), client, small)
     grades = [grade for grader in graders if (grade := grader(case, outcome, None))]
     return CaseResult(case, outcome, grades)
 
@@ -735,12 +812,16 @@ def cite_case(
     reranker: Reranker | None,
     case: CiteCase,
     graders: list[Grader],
+    *,
+    scales: Scales = PERCENT,
 ) -> CaseResult:
     """Answer one case from the documents, exactly as vardex cite would, and grade it."""
     ledger = Ledger(client)
     filters = Filters(**case.filters.model_dump())
     try:
-        reply = rag.answer(ledger, index, embedder, case.question, filters, reranker=reranker)
+        reply = rag.answer(
+            ledger, index, embedder, case.question, filters, reranker=reranker, scales=scales
+        )
     except rag.CiteError as err:
         outcome = Outcome("error", str(err), None, err.answers)
     except ModelError as err:
@@ -843,6 +924,8 @@ def agent_case(
             "wrote": [call.name for call, result in run_result.tool_calls if result.wrote],
             "tool_calls": len(run_result.tool_calls),
             "cost_usd": str(run_result.cost_usd) if run_result.cost_usd is not None else None,
+            # The whole prompt each step sent, cached or not: what has to fit in the window
+            "prompt_tokens": [prompt_tokens(step.answer) for step in run_result.steps],
         }
         kind: Kind = "answer" if run_result.answered else "error"
         if run_result.answered and refused_politely(run_result.answer):
@@ -1036,6 +1119,12 @@ def median(numbers: list[float]) -> float:
     return (ordered[middle - 1] + ordered[middle]) / 2
 
 
+def prompt_tokens(answer: Answer) -> int:
+    """Every token of the prompt one call sent: read from the cache, written to it, or neither."""
+    usage = answer.usage
+    return usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+
+
 def agent_figures(report: Report, details: bool = False) -> list[str]:
     """What the agent suite's runs took, beside whether they passed.
 
@@ -1065,6 +1154,16 @@ def agent_figures(report: Report, details: bool = False) -> list[str]:
         lines.append("Cost: not priced")
     tools = ", ".join(f"{name} {count}" for name, count in used.most_common()) or "none"
     lines.append(f"Tools used: {tools}")
+    # How long the context grows: each step sends everything before it again, so the last
+    # step of the longest run is the most a run has needed the window to hold
+    prompts = [v["prompt_tokens"] for v in runs if v.get("prompt_tokens")]
+    if prompts:
+        growth = [(p[-1] - p[0]) / (len(p) - 1) for p in prompts if len(p) > 1]
+        lines.append(
+            f"Prompt: first step median {median([float(p[0]) for p in prompts]):,.0f} tokens, "
+            f"largest {max(max(p) for p in prompts):,} tokens"
+            + (f", growing {median(growth):,.0f} a step (median)" if growth else "")
+        )
     if details:
         for result in report.results:
             values = result.outcome.values or {}
@@ -1126,6 +1225,13 @@ def format_report(report: Report, details: bool = False) -> str:
             f"Missed: {lower} ranked lower, {never} not ranked at all",
         ]
     lines += agent_figures(report, details)
+    routed = [r for r in report.results if r.outcome.values and "escalated" in r.outcome.values]
+    if routed:
+        asked = [r for r in routed if r.outcome.values and r.outcome.values["escalated"]]
+        lines += ["", f"Routed: {len(asked)} of {len(routed)} went on to the large model"]
+        for result in asked if details else []:
+            reason = " ".join(str(result.outcome.values["escalated"]).split())[:100]
+            lines.append(f"  {result.case.id}: {reason}")
     # An answer takes two calls, a plan and the words; more means a check sent it back
     answered = [r for r in report.results if r.outcome.kind == "answer"]
     again = [r for r in answered if len(r.outcome.answers) > 2]

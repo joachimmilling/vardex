@@ -39,7 +39,13 @@ def index(postgres_url):
     with psycopg.connect(postgres_url, autocommit=True) as con:
         con.execute("drop schema if exists pack_demo_pack cascade")
     embedder = FakeEmbedder()
-    index = PostgresIndex(postgres_url, PACK, embedder.model, embedder.dimensions)
+    index = PostgresIndex(
+        postgres_url,
+        PACK,
+        embedder.model,
+        embedder.dimensions,
+        stemmers={"en": "english", "nb": "norwegian"},
+    )
     english = [(3, "Salmon harvest rose to a record"), (9, "The board proposes a dividend")]
     norwegian = [(5, "Bankens utbytte og laks"), (6, "Rapporterte resultater for banken")]
     for document, texts in [(report("en-2025"), english), (report("nb-2025", "nb"), norwegian)]:

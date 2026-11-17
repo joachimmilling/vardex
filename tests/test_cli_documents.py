@@ -110,7 +110,7 @@ def test_cite_that_fails_its_checks_is_red(index, monkeypatch):
 
 def test_no_index_url_is_a_clear_error(monkeypatch):
     monkeypatch.delenv("VARDEX_INDEX_URL", raising=False)
-    monkeypatch.setattr(cli, "load_settings", lambda: cli.Settings(None, "m", index_url=None))
+    monkeypatch.setattr(cli, "load_settings", lambda: cli.Settings("m", index_url=None))
     result = runner.invoke(app, ["search", PACK, "x"])
     assert result.exit_code == 1
     assert "VARDEX_INDEX_URL is not set" in result.output

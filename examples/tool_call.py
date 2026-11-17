@@ -6,6 +6,7 @@ model stops asking for tools is what an agent does; this script stops after one 
 """
 
 import json
+import os
 
 import anthropic
 
@@ -55,9 +56,9 @@ def show(title: str, content: object) -> None:
 
 def main() -> None:
     settings = load_settings()
-    if not settings.anthropic_api_key:
+    if not os.getenv("ANTHROPIC_API_KEY"):
         raise SystemExit("ANTHROPIC_API_KEY is not set.")
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY itself
     messages = [{"role": "user", "content": QUESTION}]
     show("1. You ask", QUESTION)
 
