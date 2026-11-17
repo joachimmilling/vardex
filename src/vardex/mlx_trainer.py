@@ -20,8 +20,9 @@ from pathlib import Path
 from vardex.config import Settings
 from vardex.training import Trained, TrainError
 
-# Small batches and few layers: a 16 GB Mac holds a 4-bit model of a few billion parameters,
-# its activations for one long prompt, and LoRA's weights, and not much more
+# Small batches and few layers: a 4-bit model of a few billion parameters, its activations for
+# one long prompt and LoRA's weights. On a 16 GB Mac that fits only once the GPU may use more
+# than its default share of memory, about two thirds
 DEFAULTS = {
     "--batch-size": "1",
     "--num-layers": "8",
@@ -30,7 +31,21 @@ DEFAULTS = {
     "--steps-per-report": "10",
     "--steps-per-eval": "50",
 }
+# mlx-lm reports a loss as "Iter 10: Train loss 0.647" up to 0.31, and from 0.32 as a table
+# row, "    10    0.647" for training and "    50    val 0.023" for validation
 LOSS = re.compile(r"Iter (\d+): (Train|Val) loss ([\d.]+)")
+ROW = re.compile(r"^\s*(\d+)\s+(val\s+)?(\d+\.\d+)\b")
+COLOUR = re.compile(r"\x1b\[[0-9;]*m")
+OUT_OF_MEMORY = "Insufficient Memory"
+
+
+def losses_in(line: str) -> list[tuple[str, float]]:
+    """The losses one line of mlx-lm's output reports, as ("Train" or "Val", loss)."""
+    line = COLOUR.sub("", line)
+    found = [(kind, float(loss)) for _, kind, loss in LOSS.findall(line)]
+    if not found and (row := ROW.match(line)):
+        found = [("Val" if row[2] else "Train", float(row[3]))]
+    return found
 
 
 class MlxTrainer:
@@ -83,8 +98,14 @@ class MlxTrainer:
         for line in process.stdout:
             output.append(line)
             say(line.rstrip())
-            for _, kind, loss in LOSS.findall(line):
-                losses[kind] = float(loss)
+            for kind, loss in losses_in(line):
+                losses[kind] = loss
         if process.wait() != 0:
+            if any(OUT_OF_MEMORY in line for line in output):
+                raise TrainError(
+                    "The GPU ran out of memory. Close other programs, train fewer layers, or "
+                    "on a Mac let the GPU use more memory: sudo sysctl iogpu.wired_limit_mb=N, "
+                    "with N about 85% of the memory in MB, until the next restart."
+                )
             raise TrainError("mlx-lm stopped:\n" + "".join(output[-20:]))
         return Trained(adapter, base, iterations, losses.get("Train"), losses.get("Val"))

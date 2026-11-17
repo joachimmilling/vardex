@@ -14,7 +14,7 @@ from vardex.config import Settings
 from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.evals import AgentCase, Case
 from vardex.lessons import ExtractionLesson, SqlLesson, in_question, variants, written
-from vardex.mlx_trainer import MlxTrainer
+from vardex.mlx_trainer import MlxTrainer, losses_in
 from vardex.semantic import Example, Questions
 from vardex.traces import SpanRecord, Trace
 from vardex.tracing import EVALUATION, EVALUATION_LABEL, EVALUATION_NAME
@@ -193,3 +193,28 @@ def test_the_mlx_trainer_says_how_to_install_it(monkeypatch):
     with pytest.raises(TrainError) as caught:
         MlxTrainer(Settings(model="m"))
     assert "vardex[mlx]" in str(caught.value)
+
+
+def test_the_mlx_trainer_reads_the_loss_in_either_format():
+    assert losses_in("Iter 10: Train loss 0.647, Learning Rate 1.000e-04") == [("Train", 0.647)]
+    assert losses_in("Iter 50: Val loss 0.023, Val took 230.4s") == [("Val", 0.023)]
+    assert losses_in("    10    0.647 ▼        2      0.6k") == [("Train", 0.647)]
+    assert losses_in("\x1b[38;5;244m    50\x1b[0m    \x1b[1;35mval\x1b[0m \x1b[1m0.023\x1b[0m") == [
+        ("Val", 0.023)
+    ]
+    assert losses_in("Trainable parameters: 0.047% (3.473M/7463.013M)") == []
+    assert losses_in("  save  0000100_adapters.safetensors") == []
+
+
+def test_the_mlx_trainer_says_what_to_do_when_the_gpu_runs_out_of_memory(monkeypatch, tmp_path):
+    class Process:
+        stdout = iter(["     1    val 1.687    214.76s\n", "RuntimeError: Insufficient Memory\n"])
+
+        def wait(self):
+            return 1
+
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: Process())
+    with pytest.raises(TrainError) as caught:
+        MlxTrainer(Settings(model="m")).train("base", tmp_path, tmp_path / "a", iterations=1)
+    assert "iogpu.wired_limit_mb" in str(caught.value)
