@@ -18,7 +18,13 @@ from vardex.llm import (
     ToolReply,
     ToolSpec,
 )
-from vardex.openai_client import OpenAIClient, connect, connect_ollama, strict_schema
+from vardex.openai_client import (
+    LOCAL_TIMEOUT_SECONDS,
+    OpenAIClient,
+    connect,
+    connect_ollama,
+    strict_schema,
+)
 
 SETTINGS = Settings(model="ollama/gemma4:12b")
 REQUEST = Request(system="Be brief.", messages=[Message("user", "What is an organisation number?")])
@@ -224,6 +230,24 @@ def test_ollama_needs_no_key_and_is_found_at_its_host(monkeypatch):
     assert client.where == "http://0.0.0.0:11500/v1"
     assert client.provider == "ollama"
     assert client.free
+
+
+@pytest.mark.parametrize(
+    ("url", "timeout"),
+    [
+        ("http://127.0.0.1:8080/v1", LOCAL_TIMEOUT_SECONDS),
+        ("http://localhost:1234/v1", LOCAL_TIMEOUT_SECONDS),
+        ("https://api.together.xyz/v1", SETTINGS.timeout_seconds),
+        (None, SETTINGS.timeout_seconds),
+    ],
+)
+def test_a_server_on_this_machine_is_given_a_laptops_time(monkeypatch, url, timeout):
+    monkeypatch.setenv("OPENAI_API_KEY", "local")
+    if url:
+        monkeypatch.setenv("OPENAI_BASE_URL", url)
+    else:
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    assert connect(SETTINGS, "default_model").sdk.timeout == timeout
 
 
 def test_openai_without_a_key_is_a_clear_error(monkeypatch):

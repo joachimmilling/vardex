@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlparse
 
 import openai
 from pydantic import BaseModel
@@ -47,9 +48,11 @@ EFFORTS = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "m
 RETRYABLE_STATUSES = (408, 409, 429)  # and every 5xx, as for any provider
 OLLAMA = "http://localhost:11434"
 # A model on a laptop writes 15 to 30 tokens a second, so a long answer with its thinking
-# takes minutes. At the usual two minutes, the client gives up on an answer still coming,
-# the server stops writing it, and the retry starts again from nothing.
+# takes minutes. At the usual two minutes, the client gives up on an answer still coming and
+# the retry starts again from nothing; a server that goes on writing the abandoned answer, as
+# mlx-lm's does, makes every request after it wait as well.
 LOCAL_TIMEOUT_SECONDS = 600.0
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
 def connect(settings: Settings, model: str) -> "OpenAIClient":
@@ -61,7 +64,19 @@ def connect(settings: Settings, model: str) -> "OpenAIClient":
             "OPENAI_API_KEY is not set. Set it, and OPENAI_BASE_URL for a server other than "
             "OpenAI's own; a local server that checks no key takes any value."
         )
-    return OpenAIClient(settings, model, base_url=os.getenv("OPENAI_BASE_URL"), api_key=key)
+    base_url = os.getenv("OPENAI_BASE_URL")
+    if is_local(base_url):  # mlx-lm, LM Studio or llama.cpp on this machine, or tunnelled to it
+        settings = at_local_pace(settings)
+    return OpenAIClient(settings, model, base_url=base_url, api_key=key)
+
+
+def at_local_pace(settings: Settings) -> Settings:
+    return replace(settings, timeout_seconds=max(settings.timeout_seconds, LOCAL_TIMEOUT_SECONDS))
+
+
+def is_local(url: str | None) -> bool:
+    """Whether a server's address is this machine, where answers come at a laptop's pace."""
+    return bool(url) and (urlparse(url).hostname or "") in LOCAL_HOSTS
 
 
 def connect_ollama(settings: Settings, model: str) -> "OpenAIClient":
@@ -71,9 +86,13 @@ def connect_ollama(settings: Settings, model: str) -> "OpenAIClient":
     if "://" not in host:
         host = f"http://{host}"  # Ollama's own variable may be written as host:port alone
     return OpenAIClient(
-        replace(settings, timeout_seconds=max(settings.timeout_seconds, LOCAL_TIMEOUT_SECONDS)),
-        model, base_url=f"{host.rstrip('/')}/v1", api_key="ollama", provider="ollama", free=True,
-    )  # fmt: skip
+        at_local_pace(settings),
+        model,
+        base_url=f"{host.rstrip('/')}/v1",
+        api_key="ollama",
+        provider="ollama",
+        free=True,
+    )
 
 
 class OpenAIClient:
