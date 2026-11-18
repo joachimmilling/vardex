@@ -2146,10 +2146,13 @@ def agent_command(
     show_steps: Annotated[
         bool, typer.Option("--steps-shown", help="Print each step as it runs.")
     ] = False,
+    shadow_model: ShadowModelOption = None,
     stats: StatsOption = False,
 ) -> None:
-    """Answer a question by letting the model use the pack's tools."""
+    """Answer a question by letting the model use the pack's tools. A shadow model runs the
+    same question on a dry run, after the answer, and is shown to nobody."""
     settings = settings_for(model)
+    settings = replace(settings, shadow_model=shadow_model or settings.shadow_model)
     current().set(QUESTION, question)
     if not as_json:
         warn_if_prices_are_stale()
@@ -2192,6 +2195,7 @@ def agent_command(
                 system=AGENT,
                 max_steps=steps,
                 on_call=show_call if show_steps and not as_json else None,
+                window=settings.context_tokens,
             )
     except (PackError, ModelError, SearchError, WarehouseError, QueryError) as err:
         raise (fail_json(err) if as_json else fail(str(err))) from err

@@ -903,12 +903,13 @@ def agent_case(
     graders: list[Grader],
     *,
     max_steps: int = 12,
+    window: int | None = None,
 ) -> CaseResult:
     """Run one question through the agent, exactly as `vardex agent` would, and grade it."""
     ledger = Ledger(client)
     toolbox = build_toolbox()
     try:
-        run_result = run_agent(ledger, toolbox, case.question, max_steps=max_steps)
+        run_result = run_agent(ledger, toolbox, case.question, max_steps=max_steps, window=window)
     except ModelError as err:
         if not err.retryable:
             raise  # every case would fail the same way, so stop the run
