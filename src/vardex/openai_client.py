@@ -16,7 +16,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlparse
 
@@ -34,7 +34,7 @@ from vardex.llm import (
     StopReason,
     ToolCall,
 )
-from vardex.pricing import UnknownModelError, Usage, cost_usd
+from vardex.pricing import UnknownModelError, Usage, cost_usd, machine_cost_usd
 
 STOP_REASONS: dict[str, StopReason] = {  # Chat Completions' finish_reason → Vardex's StopReason
     "stop": "end",
@@ -118,6 +118,7 @@ class OpenAIClient:
         self.model = model
         self.provider = provider  # as OpenTelemetry names it in gen_ai.provider.name
         self.free = free  # a model on your own machine: no price per token
+        self.per_hour = machine_price() if free else None  # but perhaps one for the machine
         self.where = base_url or "OpenAI"
 
     def send(self, request: Request, on_text: Callable[[str], None] | None = None) -> Answer:
@@ -274,20 +275,39 @@ class OpenAIClient:
             thinking_tokens=getattr(details, "reasoning_tokens", None),
             stop_reason="tool_use" if calls else STOP_REASONS.get(finish or "", "other"),
             seconds=seconds,
-            cost_usd=self.cost(counted),
+            cost_usd=self.cost(counted, seconds),
             first_text_seconds=first_text_seconds,
             tool_calls=calls,
             # Read for the record only: Chat Completions takes no reasoning back
             reasoning=(Reasoning(message["reasoning"]),) if message["reasoning"] else (),
         )
 
-    def cost(self, usage: Usage) -> Decimal | None:
+    def cost(self, usage: Usage, seconds: float) -> Decimal | None:
+        """A hosted model's price per token, or a local model's share of its machine's hour,
+        or nothing when the machine has no price."""
         if self.free:
-            return Decimal(0)
+            return machine_cost_usd(seconds, self.per_hour) if self.per_hour else Decimal(0)
         try:
             return cost_usd(self.model, usage)
         except UnknownModelError:
             return None
+
+
+def machine_price() -> Decimal | None:
+    """What an hour of the machine running a local model costs, from VARDEX_PRICE_PER_HOUR:
+    its rent, or its price spread over its life, and its power. None when unset. A value that
+    is not a number is refused, not read as nothing: a cost of zero meant to be 0.59 would
+    hide every cost after it."""
+    value = (os.getenv("VARDEX_PRICE_PER_HOUR") or "").strip()
+    if not value:
+        return None
+    try:
+        price = Decimal(value)
+    except InvalidOperation as err:
+        raise ModelError(f"VARDEX_PRICE_PER_HOUR must be dollars an hour, not {value!r}") from err
+    if not price.is_finite() or price < 0:
+        raise ModelError(f"VARDEX_PRICE_PER_HOUR must be dollars an hour, not {value!r}")
+    return price
 
 
 def reasoning_of(message: Any) -> str:

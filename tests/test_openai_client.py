@@ -254,3 +254,19 @@ def test_openai_without_a_key_is_a_clear_error(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(MissingAPIKeyError):
         connect(SETTINGS, "gpt-oss-120b")
+
+
+def test_a_local_model_costs_its_share_of_the_machines_hour(monkeypatch):
+    monkeypatch.setenv("VARDEX_PRICE_PER_HOUR", "0.36")
+    client = connect_ollama(SETTINGS, "gemma4:12b")
+    client.sdk = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    answer = client.send(REQUEST)
+    # 0.36 dollars an hour is 0.0001 a second
+    assert answer.cost_usd == Decimal(str(answer.seconds)) * Decimal("0.36") / 3600
+
+
+@pytest.mark.parametrize("value", ["0,59", "free", "-1"])
+def test_a_price_per_hour_that_is_not_one_is_refused(monkeypatch, value):
+    monkeypatch.setenv("VARDEX_PRICE_PER_HOUR", value)
+    with pytest.raises(ModelError):
+        connect_ollama(SETTINGS, "gemma4:12b")
