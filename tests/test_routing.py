@@ -11,9 +11,10 @@ from test_text_to_sql import KNOWLEDGE, QUESTION, SQL, TABLES, TODAY, plan
 from vardex import routing
 from vardex.capabilities import FAILED, UNREACHABLE, Answering, Extracting
 from vardex.duckdb_warehouse import DuckDBWarehouse
-from vardex.llm import ModelError
+from vardex.llm import Message, ModelError, Request
 from vardex.shadow import ShadowLog, run_shadow, summary
 
+REQUEST = Request(system="Be brief.", messages=[Message("user", "Hei")])
 ANSWERED = "DEMO LAKS AS had the highest operating margin in 2025: 23.6%."
 BROKEN = plan(sql="select nonsense from nowhere")
 
@@ -168,3 +169,43 @@ def test_extractions_agree_on_values_not_on_quotes():
     assert work.differ(live, alike) == ""
     group = work.attempt(FakeModel(json.dumps(GOOD | {"accounts": "group"})))
     assert work.differ(live, group) == "accounts: 'company' against 'group'"
+
+
+class Down(FakeModel):
+    """A model whose provider is down, or refuses, as the error says."""
+
+    def __init__(self, retryable=True):
+        super().__init__()
+        self.retryable = retryable
+
+    def send(self, request, on_text=None):
+        self.requests.append(request)
+        raise ModelError("the provider is overloaded (529)", retryable=self.retryable)
+
+
+def test_a_call_falls_back_when_the_first_model_cannot_answer_now():
+    first, second = Down(), FakeModel("From the second model.")
+    second.model = "gemma4:12b"
+    answer = routing.Fallback(first, second).send(REQUEST)
+    assert answer.text == "From the second model."
+    assert answer.model == "gemma4:12b"
+
+
+def test_a_refused_call_does_not_fall_back():
+    first, second = Down(retryable=False), FakeModel("unused")
+    with pytest.raises(ModelError):
+        routing.Fallback(first, second).send(REQUEST)
+    assert not second.requests
+
+
+def test_connect_puts_the_fallback_behind_the_model(monkeypatch):
+    from vardex import cli, plugins
+    from vardex.config import Settings
+
+    made = {}
+    monkeypatch.setattr(
+        plugins, "load", lambda kind, name: lambda settings, model: made.setdefault(model, model)
+    )
+    client = cli.connect(Settings(model="claude-sonnet-5-5", fallback_model="ollama/gemma4:12b"))
+    assert isinstance(client, routing.Fallback)
+    assert (client.primary, client.fallback) == ("claude-sonnet-5-5", "gemma4:12b")

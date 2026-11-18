@@ -210,7 +210,11 @@ def connect(settings: Settings) -> ModelClient:
     names none: a provider is added by installing a package, never by changing this."""
     try:
         provider, model = plugins.split_model(settings.model)
-        return plugins.load("providers", provider)(settings, model)
+        client = plugins.load("providers", provider)(settings, model)
+        if settings.fallback_model and settings.fallback_model != settings.model:
+            second = replace(settings, model=settings.fallback_model, fallback_model=None)
+            return routing.Fallback(client, connect(second))
+        return client
     except plugins.PluginError as err:
         raise ModelError(str(err)) from err
 

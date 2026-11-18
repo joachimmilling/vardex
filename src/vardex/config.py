@@ -44,6 +44,8 @@ class Settings:
     # A candidate that answers the same questions beside the model above, for comparison.
     # Its answers are kept, never shown and never acted on.
     shadow_model: str | None = None
+    # A model to send a call to when the first cannot be reached, as provider/model
+    fallback_model: str | None = None
 
 
 def load_settings() -> Settings:
@@ -64,6 +66,7 @@ def load_settings() -> Settings:
         langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY") or None,
         small_model=os.getenv("VARDEX_SMALL_MODEL") or None,
         shadow_model=os.getenv("VARDEX_SHADOW_MODEL") or None,
+        fallback_model=os.getenv("VARDEX_FALLBACK_MODEL") or None,
         # OpenTelemetry's own variables, which the exporter reads for the address and headers
         export_traces=bool(
             os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")

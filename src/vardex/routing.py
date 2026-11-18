@@ -14,11 +14,50 @@ query on the wrong rows, a figure quoted from the wrong column. That share is wh
 measure, on the small model alone, before routing is turned on.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from vardex.capabilities import FAILED, UNREACHABLE, Attempt, Capability
-from vardex.llm import Answer, ModelClient
-from vardex.tracing import span
+from vardex.llm import Answer, ModelClient, ModelError, Request
+from vardex.tracing import current, span
+
+
+@dataclass
+class Fallback:
+    """A ModelClient that sends a call to a second model when the first cannot be reached.
+
+    Only a failure that says "not now" moves a call: a rate limit, an overload, a server that
+    is down, after the provider's own retries. A refused request would be refused by the other
+    model too, and a missing key is a setting to fix, so those are raised. Every call that
+    fell back is an event on its span, so a dashboard can count them.
+    """
+
+    primary: ModelClient
+    fallback: ModelClient
+
+    @property
+    def model(self) -> str:
+        return self.primary.model
+
+    @property
+    def provider(self) -> str:
+        return getattr(self.primary, "provider", "vardex")
+
+    def send(self, request: Request, on_text: Callable[[str], None] | None = None) -> Answer:
+        try:
+            return self.primary.send(request, on_text)
+        except ModelError as err:
+            if not err.retryable:
+                raise
+            current().event(
+                "vardex.fallback", {"vardex.fallback.model": self.fallback.model, "error": str(err)}
+            )
+        # Text streamed before the first model failed has been passed on already; the
+        # fallback's answer starts again from nothing
+        return self.fallback.send(request, on_text)
+
+    def count_tokens(self, text: str) -> int:
+        return self.primary.count_tokens(text)
 
 
 @dataclass(frozen=True)
