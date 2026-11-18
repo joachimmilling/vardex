@@ -23,7 +23,7 @@ from vardex.agent import MAX_STEPS, Run, run_agent
 from vardex.approvals import ApprovalError, Inbox, Item, inbox_path
 from vardex.budgets import Budget, BudgetError, Spend, spend_path
 from vardex.calllog import log_calls
-from vardex.capabilities import Answering, Attempt, Capability, Extracting
+from vardex.capabilities import Acting, Answering, Attempt, Capability, Extracting, ran
 from vardex.charts import charts_path
 from vardex.config import Settings, load_settings
 from vardex.dashboard import GROUPINGS, compare, figures, format_figures, write_dashboard
@@ -1563,7 +1563,13 @@ def eval_suite(
                 scales=scales,
             )
         if isinstance(case, evals.AgentCase):
-            return evals.agent_case(c.client, agent_toolbox, case, graders)  # type: ignore[arg-type]
+            return evals.agent_case(
+                c.client,  # type: ignore[arg-type]
+                agent_toolbox,
+                case,
+                graders,
+                window=settings.context_tokens,
+            )
         return evals.answer_case(
             c.client,
             c.warehouse,
@@ -2200,6 +2206,44 @@ def agent_command(
     except (PackError, ModelError, SearchError, WarehouseError, QueryError) as err:
         raise (fail_json(err) if as_json else fail(str(err))) from err
     current().update({OUTCOME: run.stop, ANSWER: run.answer})
+    try:
+        show_run_of_agent(pack, run, toolbox, as_json, stats)
+    finally:
+        # After the answer has been given: the person waits for nothing
+        shadow_agent(pack, settings, run, question, warehouse, documents, rerank, steps)
+
+
+def shadow_agent(
+    pack: Path,
+    settings: Settings,
+    live: Run,
+    question: str,
+    url: str | None,
+    documents: bool,
+    rerank: bool,
+    steps: int,
+) -> None:
+    """Run the question again on the shadow model, when there is one: on a dry run, with no
+    outside servers and nobody to approve, so it drafts nothing and changes nothing."""
+    if not settings.shadow_model:
+        return
+    try:
+        built = build_agent(
+            pack, settings, warehouse_url=url, documents=documents, rerank=rerank, dry_run=True
+        )
+    except (PackError, SearchError, QueryError) as err:
+        typer.secho(f"(no shadow: {err})", fg="bright_black", err=True)
+        return
+    try:
+        work = Acting(built.toolbox, question, max_steps=steps, window=settings.context_tokens)
+        shadow(settings, pack, work, ran(settings.model, live))
+    finally:
+        for closing in built.open_now:
+            closing.close()
+
+
+def show_run_of_agent(pack: Path, run: Run, toolbox: Toolbox, as_json: bool, stats: bool) -> None:
+    """The run's answer, or why it stopped; as JSON for another program."""
     if as_json:
         body = run_as_json(run, toolbox)
         if not run.answered:

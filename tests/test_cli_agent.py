@@ -206,3 +206,24 @@ def test_check_passes_a_pack_whose_permissions_match_its_tools(pack):
     result = runner.invoke(cli.app, ["check", str(pack)])
     assert result.exit_code == 0, result.output
     assert "1 actions" in result.stdout
+
+
+def test_an_agent_in_shadow_runs_on_a_dry_run_and_is_shown_to_nobody(pack, monkeypatch):
+    from vardex.shadow import ShadowLog, shadow_path
+
+    live = model(Turn("", [("run_sql", {"sql": "select name from companies"})]), "DEMO LAKS AS.")
+    propose = {"orgnr": "100000008", "amount": 5000000, "reason": "growth"}
+    shadow = model(Turn("", [("adjust_credit_limit", propose)]), "I would raise the limit.")
+    monkeypatch.setattr(
+        cli, "connect", lambda settings: shadow if settings.model == "ollama/gemma4" else live
+    )
+    result = runner.invoke(cli.app, ["agent", str(pack), "Who?", "--shadow-model", "ollama/gemma4"])
+    assert result.exit_code == 0, result.output
+    assert "I would raise the limit" not in result.output
+    data = pack.parent / "data"
+    [entry] = ShadowLog(shadow_path(data, "demo")).read(capability="agent")
+    assert entry.shadow.detail == "1 tool calls"
+    assert entry.why == "run_sql against adjust_credit_limit"
+    # On a dry run, nothing was proposed: no file, no draft
+    assert not list((data / "demo").rglob("proposals*"))
+    assert not (data / "demo" / "inbox.jsonl").exists()

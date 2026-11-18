@@ -209,3 +209,12 @@ def test_connect_puts_the_fallback_behind_the_model(monkeypatch):
     client = cli.connect(Settings(model="claude-sonnet-5-5", fallback_model="ollama/gemma4:12b"))
     assert isinstance(client, routing.Fallback)
     assert (client.primary, client.fallback) == ("claude-sonnet-5-5", "gemma4:12b")
+
+
+def test_an_agent_is_only_tried_on_a_dry_run():
+    from vardex.capabilities import Acting
+    from vardex.permissions import Permissions
+    from vardex.tools import Toolbox
+
+    with pytest.raises(ValueError):
+        Acting(Toolbox({}, Permissions()), "Who?")

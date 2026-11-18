@@ -15,12 +15,14 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from vardex import text_to_sql
+from vardex.agent import MAX_STEPS, Run, run_agent
 from vardex.embeddings import Embedder
 from vardex.extraction import ExtractionError, ExtractionSpec, extract
 from vardex.llm import Answer, Effort, Ledger, Message, ModelClient, ModelError
 from vardex.semantic import Knowledge
 from vardex.sql import Result, Warehouse, compare, same
 from vardex.text_to_sql import AnswerError
+from vardex.tools import Toolbox
 
 # Two kinds every capability shares: its output failed its checks, after any repairs; or the
 # model could not be reached at all. The others are the capability's own: answer, clarify and
@@ -195,3 +197,59 @@ class Extracting:
             for name in self.spec.fields
             if not same(first.output.get(name), second.output.get(name))
         )
+
+
+@dataclass
+class Acting:
+    """A question worked through by the agent with the pack's tools, on a dry run.
+
+    Only on a dry run: this is how a candidate model is tried on an agent's work, and a
+    candidate that wrote to a CRM or drafted into the approval inbox would be acting, which is
+    the one thing a candidate may not do. Two runs are compared on how they stopped and which
+    tools they reached for, not on their wording."""
+
+    toolbox: Toolbox
+    question: str
+    max_steps: int = MAX_STEPS
+    window: int | None = None
+
+    name = "agent"
+    gives_up = ("steps", "truncated", "context")  # it ran out of room, not of answers
+
+    def __post_init__(self) -> None:
+        if not self.toolbox.dry_run:
+            raise ValueError("an agent is only tried on a dry run")
+
+    def attempt(self, client: ModelClient) -> Attempt:
+        ledger = Ledger(client)
+        try:
+            run = run_agent(
+                ledger, self.toolbox, self.question, max_steps=self.max_steps, window=self.window
+            )
+        except ModelError as err:
+            return unreachable(client, err, ledger.answers)
+        return ran(client.model, run)
+
+    def differ(self, first: Attempt, second: Attempt) -> str:
+        """The same stop, and the same tools, in whatever order and however often."""
+        if first.kind != second.kind:
+            return f"{first.kind} against {second.kind}"
+        used, tried = set(first.output or []), set(second.output or [])
+        if used != tried:
+            names = [", ".join(sorted(tools)) or "no tools" for tools in (used, tried)]
+            return f"{names[0]} against {names[1]}"
+        return ""
+
+
+def ran(model: str, run: Run) -> Attempt:
+    """A run of the agent, made already, as an attempt: the live one, in shadow mode."""
+    tools = [call.name for call, _ in run.tool_calls]
+    return Attempt(
+        model,
+        run.stop,
+        run.answer if run.answered else run.note,
+        tools,
+        f"{len(tools)} tool calls",
+        [step.answer for step in run.steps],
+        reply=run,
+    )
