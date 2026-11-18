@@ -15,6 +15,9 @@ All notable changes to Vardex are recorded here. The format follows
   refused connection, an overload, a server error), and only then.
 - `VARDEX_CONTEXT_TOKENS`: the agent stops with `context` before a step that would not fit the
   server's window, instead of sending it to a server that drops the start of the conversation.
+- `vardex agent --shadow-model` (or `VARDEX_SHADOW_MODEL`) runs the agent again on a candidate,
+  on a dry run after the answer is given, and compares how the two runs stopped and which tools
+  they used.
 
 ## [0.11.0] - 2026-11-18
 
