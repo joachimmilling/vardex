@@ -72,3 +72,9 @@ def test_prices_are_stale_after_ninety_days():
     warning = stale_prices_warning(checked + timedelta(days=STALE_AFTER_DAYS + 1))
     assert warning is not None
     assert "91 days ago" in warning
+
+
+def test_a_machine_by_the_hour_costs_its_share_of_the_hour():
+    from vardex.pricing import machine_cost_usd
+
+    assert machine_cost_usd(90, Decimal("0.40")) == Decimal("0.01")

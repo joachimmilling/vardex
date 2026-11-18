@@ -61,6 +61,13 @@ def cost_usd(model: str, usage: Usage, *, batch: bool = False) -> Decimal:
     return total * BATCH_DISCOUNT if batch else total
 
 
+def machine_cost_usd(seconds: float, per_hour: Decimal) -> Decimal:
+    """What a call cost on a machine priced by the hour: its share of that hour. It assumes
+    the machine did nothing else meanwhile, which on one person's laptop is true and on a busy
+    server overstates it: a server answering four at once spends each second on four calls."""
+    return Decimal(str(seconds)) * per_hour / 3600
+
+
 def monthly_cost_usd(
     model: str, usage: Usage, requests_per_day: int, days: int = 30, *, batch: bool = False
 ) -> Decimal:

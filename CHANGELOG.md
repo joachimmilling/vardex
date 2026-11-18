@@ -6,6 +6,12 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `VARDEX_PRICE_PER_HOUR` prices a local model's answers at their share of the machine's hour
+  (its rent, or its price over its life, and its power), so a report compares a local model's
+  cost with a hosted one's instead of showing $0.
+
 ## [0.11.0] - 2026-11-18
 
 ### Added
