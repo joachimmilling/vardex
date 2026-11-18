@@ -13,6 +13,8 @@ All notable changes to Vardex are recorded here. The format follows
   cost with a hosted one's instead of showing $0.
 - `VARDEX_FALLBACK_MODEL` sends a call to a second model when the first cannot be reached (a
   refused connection, an overload, a server error), and only then.
+- `VARDEX_CONTEXT_TOKENS`: the agent stops with `context` before a step that would not fit the
+  server's window, instead of sending it to a server that drops the start of the conversation.
 
 ## [0.11.0] - 2026-11-18
 

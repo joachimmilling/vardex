@@ -46,6 +46,9 @@ class Settings:
     shadow_model: str | None = None
     # A model to send a call to when the first cannot be reached, as provider/model
     fallback_model: str | None = None
+    # The most tokens the server holds for one conversation, when it is a server you run:
+    # OLLAMA_CONTEXT_LENGTH, or vLLM's --max-model-len. An agent stops before it outgrows it.
+    context_tokens: int | None = None
 
 
 def load_settings() -> Settings:
@@ -67,6 +70,9 @@ def load_settings() -> Settings:
         small_model=os.getenv("VARDEX_SMALL_MODEL") or None,
         shadow_model=os.getenv("VARDEX_SHADOW_MODEL") or None,
         fallback_model=os.getenv("VARDEX_FALLBACK_MODEL") or None,
+        context_tokens=int(os.environ["VARDEX_CONTEXT_TOKENS"])
+        if (os.getenv("VARDEX_CONTEXT_TOKENS") or "").isdigit()
+        else None,
         # OpenTelemetry's own variables, which the exporter reads for the address and headers
         export_traces=bool(
             os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")

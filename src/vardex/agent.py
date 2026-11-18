@@ -42,7 +42,8 @@ AGENT_WORKERS = 4  # tool calls from one turn run at once; a turn rarely asks fo
 MAX_TOKENS = 4096
 
 # Why a run ended. Only `answered` means the question was answered.
-Stop = Literal["answered", "steps", "budget", "refused", "failed", "truncated"]
+Stop = Literal["answered", "steps", "budget", "refused", "failed", "truncated", "context"]
+CHARS_PER_TOKEN = 2  # too few, on purpose: a guess at what a reply adds must not fall short
 
 
 @dataclass(frozen=True)
@@ -109,8 +110,13 @@ def run_agent(
     workers: int = AGENT_WORKERS,
     on_text: Callable[[str], None] | None = None,
     on_call: Callable[[ToolCall, ToolResult], None] | None = None,
+    window: int | None = None,
 ) -> Run:
     """Answer one question by letting the model call the toolbox's tools.
+
+    With a window, the most tokens the server holds for one conversation, the run stops
+    before a step that would not fit, rather than send it to a server that may drop the start
+    of the conversation and answer without it.
 
     Returns a Run whatever happens: answered, out of steps, out of budget, or stopped by the
     model itself. A caller gets the steps either way, because a run that failed half way is
@@ -119,7 +125,16 @@ def run_agent(
     attributes = {OPERATION: "invoke_agent", AGENT_NAME: "vardex", "vardex.max_steps": max_steps}
     with span("invoke_agent vardex", attributes) as agent:
         run = _loop(
-            client, toolbox, question, system, max_steps, max_tokens, workers, on_text, on_call
+            client,
+            toolbox,
+            question,
+            system,
+            max_steps,
+            max_tokens,
+            workers,
+            on_text,
+            on_call,
+            window,
         )
         agent.update(
             {
@@ -144,6 +159,7 @@ def _loop(
     workers: int,
     on_text: Callable[[str], None] | None,
     on_call: Callable[[ToolCall, ToolResult], None] | None,
+    window: int | None = None,
 ) -> Run:
     messages = [Message("user", question)]
     steps: list[Step] = []
@@ -187,6 +203,21 @@ def _loop(
                 on_call(call, result)
             replies.append(ToolReply(call.id, result.content, is_error=result.is_error))
         messages.append(Message("user", "", tool_replies=tuple(replies)))
+        if window is not None:
+            # The prompt just sent, as the server counted it, plus what this turn adds: the
+            # model's own turn and every reply, guessed high. The answer needs room too.
+            usage = answer.usage
+            sent = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+            added = len(answer.text) + sum(len(reply.content) for reply in replies)
+            needed = sent + usage.output_tokens + added // CHARS_PER_TOKEN + max_tokens
+            if needed > window:
+                return _stopped(
+                    question,
+                    steps,
+                    "context",
+                    f"The next step needs about {needed:,} tokens and the window holds {window:,}. "
+                    "Ask something narrower, or give the server a larger window.",
+                )
     return _stopped(
         question,
         steps,

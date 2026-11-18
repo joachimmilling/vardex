@@ -275,3 +275,21 @@ def test_every_call_records_how_long_it_took():
     call, result = run.steps[0].calls[0]
     assert result.seconds >= nap
     assert f"[{result.seconds:.1f} s]" in transcript(run)
+
+
+def test_a_run_stops_before_a_step_that_would_not_fit_the_window():
+    big = Tool(
+        name="look_up",
+        summary="Look everything up.",
+        description="Looks everything up.",
+        schema=arguments_schema({"what": {"type": "string"}}, ["what"]),
+        run=lambda invocation: ToolResult("x" * 40_000),  # some 20,000 tokens, guessed high
+    )
+    tools = build_toolbox(
+        Permissions(tools={"look_up": "read", "describe_tool": "read"}), extra=[big]
+    )
+    model = FakeModel(Turn("", [("look_up", {"what": "everything"})]), "unused")
+    run = run_agent(model, tools, "Fetch it all.", window=16_000)
+    assert run.stop == "context"
+    assert "window holds 16,000" in run.note
+    assert len(model.requests) == 1  # the step that would not fit was never sent
