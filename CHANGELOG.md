@@ -6,7 +6,7 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
-## [0.11.0] - DATE
+## [0.11.0] - 2026-11-18
 
 ### Added
 
