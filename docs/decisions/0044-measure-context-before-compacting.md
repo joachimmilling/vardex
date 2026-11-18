@@ -1,7 +1,7 @@
 # 0044 Measure an agent's context before compacting it
 
 Status: Accepted
-Date: 2026-11-09
+Date: 2026-11-18
 
 ## Context
 
@@ -24,7 +24,7 @@ can drop exactly the detail the next step needs.
 Measure first. The agent suite reports, for every run, the prompt each step sent (cached or
 not). On the suite as recorded with Claude Sonnet 5.5, the first step sends a median of 2,223
 tokens; a run grows by a median of 1,371 tokens a step; the largest prompt of any run is 20,192
-tokens, under seven steps. GEMMA_SENTENCE That is within the 32,768-token window we give a local
+tokens, under seven steps. We have not yet run the agent suite on a local model. That is within the 32,768-token window we give a local
 model, with room for the answer, and far within Claude's. No compaction is built.
 
 ## Consequences

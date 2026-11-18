@@ -13,7 +13,8 @@ All notable changes to Vardex are recorded here. The format follows
 - A second model client, `openai_client`, for every server that speaks OpenAI's Chat
   Completions API: Ollama, LM Studio, mlx-lm, vLLM and hosted providers of open-weight models.
   The `ollama` provider needs no key, prices nothing per token and waits ten minutes for an
-  answer; `openai` reads `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
+  answer; `openai` reads `OPENAI_BASE_URL` and `OPENAI_API_KEY`, and waits as long when that
+  address is this machine.
 - Connectors are plug-ins, found by entry point (`vardex.providers`, `vardex.warehouses`,
   `vardex.judges`, `vardex.trainers`), and each SDK or driver is an extra: `anthropic`,
   `openai`, `ollama`, `duckdb`, `postgresql`, `mlx`. A model is named `provider/model`; a name
@@ -42,7 +43,8 @@ All notable changes to Vardex are recorded here. The format follows
 - `vardex train`: a fine-tuning dataset per capability, from approved work and the pack's
   examples, with every golden case left out, and LoRA training with mlx-lm on Apple silicon.
   The SQL writer's pairs include pairs generated from the examples; `--extraction NAME` trains
-  an extraction.
+  an extraction. An example and its variants stay on one side of the training and validation
+  split. When the GPU runs out of memory, the trainer says how to give it more.
 - The agent suite reports each run's prompt size per step.
 
 ### Changed
@@ -60,6 +62,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 - `check_sql` reports a quote that never closes as SQL that does not parse, instead of
   raising.
+- A model reply that is not valid JSON is reported as a problem with the reply, not with
+  `pack.yaml`.
 
 ## [0.10.2] - 2026-11-09
 

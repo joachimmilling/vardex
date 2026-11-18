@@ -1,7 +1,7 @@
 # 0043 Fine-tune on checked pairs, never on the golden set
 
 Status: Accepted
-Date: 2026-11-09
+Date: 2026-11-18
 
 ## Context
 
@@ -42,6 +42,13 @@ replaces the prompted model only if it passes more of the golden set, case by ca
   dataset is personal data, kept in the pack's data folder and never committed.
 - Training prompts must match what is served, word for word: a change to the engine's prompt
   makes an adapter stale.
+- An adapter is served for every call a capability makes, not only the one it was trained on.
+  A LoRA adapter for Gemma 4 E4B, trained on 126 plan pairs, wrote plans where the second call
+  wanted a sentence, and never refused or asked back: 13 of 66 answer cases passed, against 47
+  for the same model prompted. Its validation loss was 0.003. The dataset has to cover every
+  call it will answer, refusals and questions back included, before an adapter is worth testing.
+- Variants of one example are split to the same side, so the validation loss is not measured on
+  near-copies of the training pairs.
 
 ## When to revisit
 
