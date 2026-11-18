@@ -1,24 +1,21 @@
 [project]
 name = "vardex"
-version = "0.10.2"
+version = "0.11.0"
 description = "Blocks, recipes and packs for enterprise AI apps"
 readme = "README.md"
 authors = [
     { name = "joachimmilling", email = "joachimmilling@gmail.com" }
 ]
 requires-python = ">=3.12"
+# What every installation needs. Each model provider and each database is an extra below:
+# pip install "vardex[anthropic,duckdb]" installs those two and nothing else.
 dependencies = [
-    "anthropic>=1.9.0",
-    "dbt-core>=1.12.5",
-    "dbt-duckdb>=1.11.0",
-    "duckdb>=1.5.6",
     "fastembed>=0.9.0",
     "httpx2>=2.13.1",
     "mcp>=2.3.0",
     "opentelemetry-exporter-otlp-proto-http>=1.45.2",
     "opentelemetry-sdk>=1.45.2",
     "pillow>=12.3.0",
-    "psycopg[binary]>=3.3.6",
     "pydantic>=2.13.5",
     "pypdfium2>=5.14.0",
     "python-dotenv>=1.2.3",
@@ -27,8 +24,32 @@ dependencies = [
     "typer>=0.27.2",
 ]
 
+[project.optional-dependencies]
+anthropic = ["anthropic>=1.9.0"]
+openai = ["openai>=3.46.0"]
+ollama = ["openai>=3.46.0"]
+duckdb = ["dbt-core>=1.12.5", "dbt-duckdb>=1.11.0", "duckdb>=1.5.6"]
+postgresql = ["psycopg[binary]>=3.3.6"]
+postgres = ["psycopg[binary]>=3.3.6"]
+mlx = ["mlx-lm>=0.32.2; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
 [project.scripts]
 vardex = "vardex.cli:app"
+
+# The connectors Vardex finds by name: a model's provider in VARDEX_MODEL, a warehouse's URL
+# scheme or file suffix, a suite's judge, a trainer. Another package adds its own the same way.
+[project.entry-points."vardex.providers"]
+anthropic = "vardex.anthropic_client:connect"
+openai = "vardex.openai_client:connect"
+ollama = "vardex.openai_client:connect_ollama"
+
+[project.entry-points."vardex.warehouses"]
+duckdb = "vardex.duckdb_warehouse:connect"
+postgresql = "vardex.postgres_warehouse:connect"
+postgres = "vardex.postgres_warehouse:connect"
+
+[project.entry-points."vardex.trainers"]
+mlx = "vardex.mlx_trainer:MlxTrainer"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]
@@ -39,6 +60,8 @@ dev = [
     "pre-commit>=4.6.2",
     "pytest>=9.1.1",
     "ruff>=0.16.9",
+    # Every connector, so the tests cover them all
+    "vardex[anthropic,openai,duckdb,postgresql]",
 ]
 
 [tool.ruff]

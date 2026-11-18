@@ -5,6 +5,7 @@ rest of Vardex should not have to know about Anthropic's API is handled here.
 """
 
 import base64
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -64,23 +65,31 @@ def trace_attempts(request: Any, call_next: Callable[[Any], Any]) -> Any:
         return response
 
 
+def connect(settings: Settings, model: str) -> "AnthropicClient":
+    """The `anthropic` provider, as Vardex's entry points name it: Claude, by its own name."""
+    return AnthropicClient(settings, model=model)
+
+
 class AnthropicClient:
     """Sends Vardex requests to Claude, with timeouts and retries set from Settings."""
 
-    def __init__(self, settings: Settings, sdk: Any = None) -> None:
+    provider = PROVIDER
+
+    def __init__(self, settings: Settings, sdk: Any = None, *, model: str | None = None) -> None:
         if sdk is None:
-            if not settings.anthropic_api_key:
+            key = os.getenv("ANTHROPIC_API_KEY")
+            if not key:
                 raise MissingAPIKeyError(
                     "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and add your key."
                 )
             sdk = anthropic.Anthropic(
-                api_key=settings.anthropic_api_key,
+                api_key=key,
                 timeout=settings.timeout_seconds,
                 max_retries=settings.max_retries,  # the SDK waits and retries 429, 5xx and drops
                 middleware=[trace_attempts],
             )
         self.sdk = sdk
-        self.model = settings.model
+        self.model = model or settings.model
 
     def send(self, request: Request, on_text: Callable[[str], None] | None = None) -> Answer:
         """Send one request and return the answer, its tokens, time and cost."""
@@ -159,6 +168,9 @@ class AnthropicClient:
             }
         if output_config:
             params["output_config"] = output_config
+        if request.extra:
+            # Sent as they are, in the body of the request, for options Vardex has no word for
+            params["extra_body"] = request.extra
         return params
 
     def to_answer(self, response: Any, seconds: float, first_text_seconds: float | None) -> Answer:

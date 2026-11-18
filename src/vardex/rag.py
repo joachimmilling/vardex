@@ -19,7 +19,7 @@ from vardex.extraction import squeeze
 from vardex.llm import Answer, Effort, Message, ModelClient, Request
 from vardex.packs import describe_problem
 from vardex.prompts import CITE, CITE_REPAIR
-from vardex.provenance import Figure, Quote, trace_quotes
+from vardex.provenance import PERCENT, Figure, Quote, Scales, trace_quotes
 from vardex.retrieval import Filters, Index, Passage, Search, search
 from vardex.tracing import ATTEMPT, failed, passed, span
 
@@ -96,7 +96,7 @@ def build_request(question: str, passages: list[Passage], effort: Effort | None)
 
 
 def check(
-    cited: CitedAnswer, passages: list[Passage], question: str
+    cited: CitedAnswer, passages: list[Passage], question: str, scales: Scales = PERCENT
 ) -> tuple[list[str], list[Citation], list[Figure]]:
     """Everything wrong with an answer, as readable sentences, with its quotes and figures.
     No problems means every claim is cited, every quote is in its passage, and every number is
@@ -131,7 +131,7 @@ def check(
     # The cited documents' titles count as part of the question: "2025" in the title of
     # the annual report for 2025 needs no quote.
     titles = " ".join(dict.fromkeys(q.title for q in quotes))
-    figures = trace_quotes(MARKER.sub("", cited.answer), quotes, f"{question}\n{titles}")
+    figures = trace_quotes(MARKER.sub("", cited.answer), quotes, f"{question}\n{titles}", scales)
     untraced = [f.text for f in figures if not f.traced]
     if untraced:
         problems.append(f"these numbers are in none of the words you copied: {', '.join(untraced)}")
@@ -149,6 +149,7 @@ def answer(
     passages: int = 8,
     effort: Effort | None = "low",
     repairs: int = 1,
+    scales: Scales = PERCENT,
 ) -> Reply:
     """Answer a question from the pack's documents: search, answer from the passages found,
     and check every citation and number."""
@@ -170,7 +171,7 @@ def answer(
             except ValidationError as err:
                 problems = [describe_problem(e) for e in err.errors()]
             else:
-                problems, citations, figures = check(cited, found.passages, question)
+                problems, citations, figures = check(cited, found.passages, question, scales)
                 if not problems:
                     passed(attempt, "citations")
                     kind: Kind = "answer" if cited.found else "not_found"

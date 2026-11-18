@@ -121,6 +121,11 @@ class Request:
     # The tools the model may call this turn. They are sent before the system prompt, so a
     # list that changes between calls costs the whole prompt cache: build it once per run.
     tools: tuple[ToolSpec, ...] = ()
+    # Options for one provider that Vardex has no word for, such as a server's own way to
+    # constrain decoding. Each client passes them to its provider exactly as they are, with
+    # nothing checked or translated: the escape hatch, so the neutral request never stands
+    # between a pack and a feature its provider has.
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -152,7 +157,7 @@ class Answer:
 class ModelClient(Protocol):
     """What Vardex needs from a model provider. Any class with these members will do."""
 
-    model: str
+    model: str  # the model's own name, without the provider: claude-sonnet-5-5, qwen3:8b
 
     def send(self, request: Request, on_text: Callable[[str], None] | None = None) -> Answer:
         """Send one request. With `on_text`, pass on each piece of text as it arrives."""

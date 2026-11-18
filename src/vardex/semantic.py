@@ -20,7 +20,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from vardex.documents import DocumentList
-from vardex.packs import PackError, read_yaml
+from vardex.packs import PackError, load_pack, read_yaml
+from vardex.provenance import PERCENT, Scales
 from vardex.sql import QueryError, Warehouse, check_sql, transpile
 
 NAME = r"^[a-z][a-z0-9_]*$"
@@ -220,6 +221,7 @@ class Knowledge:
     metrics: list[Metric]
     ontology: Ontology
     questions: Questions
+    scales: Scales = PERCENT  # the scale words of the languages the pack reads
 
 
 def load_metrics(pack: Path) -> Metrics:
@@ -253,6 +255,8 @@ def load_knowledge(pack: Path) -> Knowledge:
             if questions.is_file()
             else Questions()
         ),
+        # A semantic layer read on its own, outside a pack, reads the percent sign alone
+        scales=Scales(load_pack(pack).scale_words) if (pack / "pack.yaml").is_file() else PERCENT,
     )
     problems = disagreements(knowledge)
     if problems:

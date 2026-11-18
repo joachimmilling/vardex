@@ -8,13 +8,17 @@ from typing import Literal
 from dotenv import load_dotenv
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
+# The provider of a model named without one, so VARDEX_MODEL=claude-opus-5-5 means what it
+# always meant. Name any other as provider/model: ollama/qwen3:8b, openai/gpt-oss-120b.
+DEFAULT_PROVIDER = "anthropic"
 DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-large"
 DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 
 
 @dataclass(frozen=True)
 class Settings:
-    anthropic_api_key: str | None
+    # The model, as provider/model or a name alone for the default provider. Each provider's
+    # key and address are its own client's business, read from its own variables.
     model: str
     timeout_seconds: float = 120.0  # per attempt; the SDK's own default is ten minutes
     max_retries: int = 2  # extra attempts after a rate limit, an overload or a dropped connection
@@ -34,13 +38,18 @@ class Settings:
     langfuse_host: str = "https://cloud.langfuse.com"
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
+    # A smaller model to try first: a question goes to the model above only when the small
+    # model's answer fails Vardex's checks. None sends everything to the model above.
+    small_model: str | None = None
+    # A candidate that answers the same questions beside the model above, for comparison.
+    # Its answers are kept, never shown and never acted on.
+    shadow_model: str | None = None
 
 
 def load_settings() -> Settings:
     """Read settings from the environment, after loading .env if there is one."""
     load_dotenv()  # reads .env in the current folder; never overrides real environment variables
     return Settings(
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
         model=os.getenv("VARDEX_MODEL") or DEFAULT_MODEL,  # an empty value means "use the default"
         data_dir=Path(os.getenv("VARDEX_DATA_DIR") or "data"),
         warehouse_url=os.getenv("VARDEX_WAREHOUSE_URL") or None,
@@ -53,6 +62,8 @@ def load_settings() -> Settings:
         langfuse_host=os.getenv("LANGFUSE_HOST") or "https://cloud.langfuse.com",
         langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY") or None,
         langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY") or None,
+        small_model=os.getenv("VARDEX_SMALL_MODEL") or None,
+        shadow_model=os.getenv("VARDEX_SHADOW_MODEL") or None,
         # OpenTelemetry's own variables, which the exporter reads for the address and headers
         export_traces=bool(
             os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")

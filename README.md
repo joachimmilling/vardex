@@ -13,8 +13,13 @@
 
 <p align="center"><a href="#status">Status</a> · <a href="#data">Data</a> · <a href="#license">License</a></p>
 
-**An open-source framework for the AI apps companies ask for: analysts, knowledge assistants,
-support desks, document processors, back-office agents and monitors, built from the same blocks.**
+**An open-source framework for putting AI into a company's processes: reading invoices and
+contracts, sorting cases, answering questions from the company's data, and doing back-office
+work with a person approving, all built from the same blocks.**
+
+No process is the centre of it. Every capability checks its own output, and the parts that
+choose and improve models (routing, shadow mode, evals, prompt optimisation, fine-tuning) work
+for any capability through one interface, so a new one gets all of them.
 
 Vardex takes its name from the *varde*, the stone cairn that marks a trail across the Norwegian
 mountains. It marks a proven path for companies adopting AI, in three layers:

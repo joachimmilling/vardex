@@ -7,6 +7,9 @@ description: Questions about Norwegian companies, answered from the warehouse.
 capability: answer
 today: 2026-10-13  # so "last year" is 2025 in every run, whenever it runs
 threshold: 0.9  # the share of cases that must pass: 60 of 66
+# A judge from outside the model under test, and a stronger one: it decides whether an
+# answer's words agree with the reference rows, for Claude and for an open model alike.
+judge: anthropic/claude-opus-5-5
 
 cases:
   # Lookup: one fact about one named company.

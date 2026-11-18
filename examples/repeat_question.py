@@ -8,10 +8,11 @@ This script calls the API directly, because Vardex itself does not expose temper
 models released after Claude Opus 4.6 reject any value other than the default.
 """
 
-from collections import Counter
+from collections import os
 from typing import Annotated
 
 import anthropic
+import Counter
 import typer
 
 from vardex.config import load_settings
@@ -27,10 +28,10 @@ def main(
     """Ask one question several times and count how many different answers come back."""
     settings = load_settings()
     model = model or settings.model
-    if not settings.anthropic_api_key:
+    if not os.getenv("ANTHROPIC_API_KEY"):
         typer.secho("ANTHROPIC_API_KEY is not set.", fg="red", err=True)
         raise typer.Exit(1)
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY itself
 
     # The SDK no longer has a temperature argument, so it goes into the request body directly.
     extra_body = {"temperature": temperature} if temperature is not None else None

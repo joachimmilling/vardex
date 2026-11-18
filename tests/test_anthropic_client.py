@@ -13,7 +13,7 @@ from vardex.config import Settings
 from vardex.llm import Hooked, Image, Message, MissingAPIKeyError, ModelError, Request
 from vardex.traces import FileTraces, traces
 
-SETTINGS = Settings(anthropic_api_key="test", model="claude-sonnet-5-5")
+SETTINGS = Settings(model="claude-sonnet-5-5")
 REQUEST = Request(system="Be brief.", messages=[Message("user", "What is an organisation number?")])
 
 
@@ -153,7 +153,7 @@ def test_a_conversation_is_cached_up_to_the_last_message():
 
 
 def test_effort_is_left_out_for_a_model_that_rejects_it():
-    client, messages = client_with(Settings(anthropic_api_key="test", model="claude-haiku-4-5"))
+    client, messages = client_with(Settings(model="claude-haiku-4-5"))
     client.send(Request(system="s", messages=[Message("user", "q")], effort="low"))
     assert "output_config" not in messages.calls[0]
 
@@ -185,9 +185,10 @@ def test_count_tokens_uses_the_configured_model():
     assert messages.calls[0]["model"] == "claude-sonnet-5-5"
 
 
-def test_no_key_is_a_clear_error():
+def test_no_key_is_a_clear_error(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(MissingAPIKeyError):
-        AnthropicClient(Settings(anthropic_api_key=None, model="claude-sonnet-5-5"))
+        AnthropicClient(Settings(model="claude-sonnet-5-5"))
 
 
 def test_a_picture_is_sent_before_the_text_as_an_image_block():

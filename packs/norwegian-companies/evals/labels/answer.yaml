@@ -1,0 +1,546 @@
+- answer: Equinor ASA has 21,231 employees, according to the figure the company last
+    reported. This is the current value, not a historical one, and the data does not
+    show how it has changed over time.
+  by: joachim
+  case: equinor-employees
+  passed: true
+- answer: Posten Bring AS (organisasjonsnummer 984661185) har 10 033 ansatte. Tallet
+    er det siste rapporterte antallet i dataene, ikke en historisk utvikling.
+  by: joachim
+  case: posten-ansatte
+  passed: true
+- answer: Mowi ASA has its business address in Bergen (municipality code 4601), in
+    Vestland county. This comes from the business address in the company register
+    as of the last fetch, matching the registered name MOWI ASA (organisation number
+    964118191).
+  by: joachim
+  case: mowi-municipality
+  passed: true
+- answer: Norsk Hydro ASA's group revenue in 2024 was NOK 208.7 billion. The accounts
+    are filed in kroner, so the figure needs no conversion. This is the consolidated
+    group figure for the fiscal year ending in 2024.
+  by: joachim
+  case: hydro-group-revenue-2024
+  passed: true
+- answer: Kongsberg Gruppen ASA (organisasjonsnummer 943753709) ble stiftet 19. juni
+    1987, ifølge stiftelsesdatoen i registeret.
+  by: joachim
+  case: kongsberg-stiftet
+  passed: true
+- answer: Equinor ASA's operating profit in its own (company) accounts for fiscal
+    year 2025 was USD 5.56 billion, which is about NOK 57.8 billion in the NOK conversion
+    shown alongside it. The figure covers a full 12-month period. The company reports
+    in US dollars, so the dollar figure is the one from the filing, and the kroner
+    amount is a conversion of it.
+  by: joachim
+  case: equinor-own-operating-profit-2025
+  note: I can't see any conversion shown alongside it so I can't confirm if the conversion
+    to NOK is correct
+  passed: true
+- answer: Aker BP ASA is registered in Akershus county, in the municipality of Bærum.
+    This is based on the county of the company's business address, with the name matched
+    as "AKER BP ASA" in capitals.
+  by: joachim
+  case: aker-bp-county
+  passed: true
+- answer: The query returned no rows, so I can't give DNB Bank's revenue for 2025.
+    The data has no accounts for a company whose name starts with "DNB BANK" and a
+    fiscal year ending in 2025, either for the bank alone or for the group. The most
+    likely reason is that the 2025 accounts have not yet been filed or fetched. The
+    name match could also be missing the registered name if it is spelt differently.
+  by: joachim
+  case: dnb-bank-revenue-2025
+  passed: false
+- answer: The query returned no rows, so I can't give a figure for Equinor group's
+    2022 revenue. The data has no consolidated group accounts for fiscal year 2022
+    under a company name containing EQUINOR with legal form ASA or AS. The group accounts
+    may be missing from the data, filed under a different name or legal form, or recorded
+    under another fiscal year. This does not show that Equinor had no revenue in 2022.
+  by: joachim
+  case: equinor-revenue-2022
+  passed: false
+- answer: There are 49,104 limited companies (AS or ASA) in Vestland. This counts
+    every company registered with a business address in Vestland county, including
+    any that are bankrupt or being wound up, so the number of actively operating companies
+    is likely somewhat lower.
+  by: joachim
+  case: vestland-companies
+  passed: true
+- answer: 218 aksjeselskaper i Trøndelag er registrert som konkurs. Tallet gjelder
+    bare aksjeselskaper (AS og ASA), ikke andre typer enheter som enkeltpersonforetak
+    eller foreninger. Det bygger på dagens konkursstatus i registeret, så det sier
+    ikke noe om hvor mange som gikk konkurs i en bestemt periode.
+  by: joachim
+  case: trondelag-konkurs
+  passed: true
+- answer: There are 15,925 sole proprietorships (legal form ENK) in Nordland. The
+    count uses the county of the business address and reflects the register as of
+    the last fetch. It includes any that are bankrupt or being wound up, so the number
+    of active businesses may be lower.
+  by: joachim
+  case: nordland-sole-proprietorships
+  passed: true
+- answer: There are 23 public limited companies (ASA) registered in Rogaland. This
+    count covers every ASA with a business address in Rogaland in the register, including
+    any that are bankrupt or being wound up, so the number of actively operating ASAs
+    may be lower.
+  by: joachim
+  case: rogaland-asa
+  passed: true
+- answer: 'I 2025 ble det stiftet 32 180 aksjeselskaper (AS) og 4 allmennaksjeselskaper
+    (ASA), basert på at stiftelsesdatoen ligger i kalenderåret 2025.
+
+
+    Tallene gjelder registerets status i dag. Selskaper som senere er avviklet eller
+    slettet, kan derfor mangle i tallene, avhengig av hva registeret inneholder.'
+  by: joachim
+  case: stiftet-2025
+  passed: true
+- answer: 194 limited companies have at least 1,000 employees. This counts companies
+    with legal form AS or ASA, using the employee figures as last reported. Companies
+    with no reported employee count are excluded.
+  by: joachim
+  case: thousand-employees
+  passed: true
+- answer: In Oslo, 1,482 limited companies are being wound up. This counts companies
+    with legal form AS or ASA whose business address is in the county of Oslo. The
+    wind-up status comes from the is_being_wound_up flag as of the last register fetch,
+    so companies whose status has changed since then are not reflected.
+  by: joachim
+  case: oslo-wound-up
+  passed: true
+- answer: 48 groups reported an operating loss in 2025. This counts group accounts
+    only, one per parent company, where operating profit was below zero for fiscal
+    year 2025. Groups that had not yet filed their 2025 accounts are not included,
+    so the count could rise as more filings come in.
+  by: joachim
+  case: groups-operating-loss-2025
+  passed: true
+- answer: In Bergen, 1,489 limited companies (AS or ASA) have been founded in 2026,
+    counting from 1 January up to 13 October 2026. The count uses the municipality
+    of the business address, so it covers Bergen itself and not the surrounding area.
+    It also includes companies that are currently bankrupt or being wound up, since
+    the question did not exclude them.
+  by: joachim
+  case: bergen-founded-this-year
+  note: There is no reference to 1,489 coming from SQL output table. There is only
+    1545.
+  passed: false
+- answer: Sixteen groups filed their 2025 group accounts in a currency other than
+    NOK. The count is of distinct parent companies (by organisation number) with group
+    accounts for fiscal year 2025. Only filings already submitted are included, so
+    the number could rise as more groups file. The data does not show which currencies
+    these groups used.
+  by: joachim
+  case: foreign-currency-groups-2025
+  passed: true
+- answer: 204 companies had a fiscal year 2025 that ended on a date other than 31
+    December. Each company is counted once, even if it reports both company and group
+    accounts. Fiscal year 2025 here means the year the fiscal year ends in. The count
+    covers only the AS and ASA companies in the dataset with at least 50 employees,
+    so smaller companies are not included.
+  by: joachim
+  case: not-december-2025
+  passed: true
+- answer: 'The five limited companies (AS or ASA) with the most employees are Equinor
+    ASA with 21,231, Posten Bring AS with 10,033, Aker Solutions AS with 8,853, DNB
+    Bank ASA with 7,347 and ISS Facility Services AS with 7,243.
+
+
+    These are the latest employee figures in the register. Companies with no reported
+    employees were ranked last, so they do not affect the top five.'
+  by: joachim
+  case: most-employees
+  passed: true
+- answer: De tre konsernene med størst omsetning i 2025 var Equinor ASA med omtrent
+    NOK 1 106,3 milliarder, Norsk Hydro ASA med NOK 213,3 milliarder og Yara International
+    ASA med NOK 163,3 milliarder. Equinor og Yara rapporterer i USD, så beløpene er
+    omregnet til norske kroner. Tallene er driftsinntekter fra konsernregnskap for
+    regnskapsåret som slutter i 2025. Oversikten dekker bare AS og ASA med minst 50
+    ansatte.
+  by: joachim
+  case: storste-konsern-2025
+  note: I can't see any numbers from the SQL output. There are only 3 company names.
+    I also can not confirm the following conversion from USD to NOK because there
+    are no references to the forex value, USD revenues or output conversion in NOK.
+  passed: true
+- answer: The three counties with the fewest limited companies are Svalbard with 296,
+    Finnmark with 6,280 and Troms with 11,275. These counts cover companies with legal
+    form AS or ASA, including those in bankruptcy or being wound up. Companies with
+    no county are left out, and a tie for third place would have been broken alphabetically
+    by county name.
+  by: joachim
+  case: fewest-companies-counties
+  passed: true
+- answer: 'Mowi Markets Norway AS had the highest revenue among seafood companies
+    in fiscal year 2025, with EUR 2.26 billion in its own accounts, about NOK 26.4
+    billion when converted to kroner.
+
+
+    I read "last year" as fiscal year 2025 and ranked by the kroner-converted figure
+    so that companies reporting in different currencies are comparable. Seafood companies
+    are those in division 03, industry codes starting with 10.20, or 46.322, using
+    each company''s current main industry code. The accounts table only covers AS
+    and ASA companies with at least 50 employees, so smaller firms are not included.'
+  by: joachim
+  case: largest-seafood-company-2025
+  note: There are references to revenue values in EUR, conversion and NOK values that
+    I can not see in the SQL QL output and therefore can not confirm
+  passed: true
+- answer: 'Tide Buss AS har flest ansatte i Vestland, med 3 859 ansatte.
+
+
+    Oversikten omfatter bare aksjeselskap (AS) og allmennaksjeselskap (ASA) med oppgitt
+    antall ansatte, og tallet er det siste som er rapportert i registeret. Hvis flere
+    selskaper har like mange ansatte, vises bare ett av dem.'
+  by: joachim
+  case: vestland-flest-ansatte
+  note: Missing employee numbers in the SQL output
+  passed: true
+- answer: 'The five Agder companies with the highest 2025 revenue in their own accounts
+    are Å Energi Vannkraft AS (NOK 9.5 billion), Nye Veier AS (NOK 9.0 billion), Entelios
+    AS (NOK 8.9 billion), Asko Agder AS (NOK 6.9 billion) and National Oilwell Varco
+    Norway AS (about NOK 6.5 billion).
+
+
+    National Oilwell Varco Norway reports in US dollars (USD 627.9 million), so its
+    figure is converted to kroner to make the ranking comparable. The ranking covers
+    only limited companies (AS and ASA) with a business address in Agder. It uses
+    the fiscal year ending in 2025. The accounts data includes only companies with
+    at least 50 employees.'
+  by: joachim
+  case: agder-top-revenue-2025
+  note: No numbers in the SQL output for me to confirm
+  passed: true
+- answer: 'Eiendomsvirksomhet (real estate, section M) has the most limited companies,
+    with 96,802 AS and ASA companies. Next come Faglig, vitenskapelig og teknisk tjenesteyting
+    with 52,337 and Varehandel (trade) with 44,376.
+
+
+    The count covers companies with legal form AS or ASA and a stated industry code,
+    using their current main industry. Bankrupt or wound-up companies are included.'
+  by: joachim
+  case: section-most-companies
+  note: Nu numbers in the SQL output for me to confirm and also no verification of
+    what comes after the number one industry section
+  passed: false
+- answer: 'Oslo has the most limited companies (AS or ASA) with 84,071, followed by
+    Bergen with 23,355, Trondheim with 15,909, Bærum with 14,220 and Stavanger with
+    12,219.
+
+
+    Companies are counted by their current business address municipality, and the
+    count includes companies that are bankrupt or being wound up. The limit of five
+    would cut any tie at fifth place arbitrarily.'
+  by: joachim
+  case: municipalities-most-companies
+  passed: true
+- answer: 'Ellingsen Seafood AS had the highest operating margin at 24.4%, with revenue
+    of about NOK 1.01 billion. SalMar Settefisk AS was second at 19.4% on revenue
+    of NOK 1.52 billion, and Sinkaberg NT145 AS was third at 13.4% on revenue of NOK
+    1.26 billion.
+
+
+    These figures come from each company''s own accounts (not group accounts) for
+    the fiscal year ending in 2025. The margin is operating profit divided by revenue,
+    both converted to NOK. Only companies with at least NOK 1 billion in revenue are
+    included. Seafood companies are identified by their current main industry code
+    (division 03, 10.20x, or 46.322).'
+  by: joachim
+  case: seafood-best-margins-2025
+  note: The SQL output table only contains three names no way for me to confirm either
+    revenue or margin figures
+  passed: true
+- answer: Mowi's group operating margin in 2025 was about 15.6%. The group accounts
+    for MOWI ASA are filed in euros and show operating profit of EUR 960 million on
+    revenue of EUR 6.15 billion. The margin is calculated in euros, so it does not
+    depend on an exchange rate. It uses the fiscal year ending in 2025.
+  by: joachim
+  case: mowi-margin-2025
+  note: REferences to EUR revenue and conversion from fraction to percentage in the
+    margin that I can't see in SQL (not sure if that should be okay or not)
+  passed: true
+- answer: Egenkapitalandelen i Equinor-konsernet var 30,7 % ved utgangen av regnskapsåret
+    2025. Tallet er beregnet som egenkapital delt på totale eiendeler i konsernregnskapet
+    til EQUINOR ASA. Konsernet rapporterer i USD, men andelen påvirkes ikke av valutaen.
+  by: joachim
+  case: equinor-egenkapitalandel-2025
+  note: There is a conversion from fraction to percentage that I can't confirm
+  passed: true
+- answer: 'The combined operating margin of the seafood companies in 2024 was about
+    7.3%, based on their own company accounts. Together they had an operating profit
+    of roughly NOK 17.4 billion on revenue of about NOK 238.3 billion, across 150
+    companies.
+
+
+    The margin is calculated on the combined totals, not as an average of each company''s
+    margin. Seafood companies are those whose current industry code is in division
+    03, starts with 10.20, or is 46.322. Amounts are converted to NOK so that companies
+    reporting in other currencies can be added. The figures cover fiscal years ending
+    in 2024 for AS and ASA companies with at least 50 employees.'
+  by: joachim
+  case: seafood-margin-2024
+  note: I can not confirm the operating profits in the SQL output table
+  passed: true
+- answer: 'Aker BP ASA had the highest operating margin among groups with more than
+    NOK 50 billion in revenue in 2025, at 43.5%. Its revenue was about NOK 113.7 billion,
+    converted from USD, which is the reporting currency.
+
+
+    Equinor ASA came second at 23.8% on revenue of about NOK 1,106.3 billion, and
+    Telenor ASA third at 23.3% on NOK 77.3 billion. Mowi ASA (15.6%) and Statkraft
+    AS (14.3%) follow.
+
+
+    These figures use group accounts for the fiscal year ending in 2025. Revenue and
+    operating profit are converted to NOK, and operating margin is operating profit
+    divided by revenue. The list shows only the top 10 by margin, so it ends with
+    Reitan Retail AS at 3.5%.'
+  by: joachim
+  case: big-groups-best-margin-2025
+  note: The SQL output table only contains a name, and I can't confirm the following
+    on the list or any of the numers cited
+  passed: true
+- answer: 'Samlet omsetning for selskapene i Rogaland i 2024 var om lag NOK 1 423,7
+    milliarder (NOK 1,42 billioner), fordelt på 573 selskaper.
+
+
+    Tallet bygger på selskapenes egne regnskap for regnskapsåret 2024, ikke konsernregnskap,
+    slik at omsetning ikke telles to ganger. Selskapene er plassert i Rogaland etter
+    dagens forretningsadresse. Utenlandsk omsetning er omregnet til kroner med Norges
+    Banks gjennomsnittskurs for året. Tallet dekker bare aksjeselskaper (AS og ASA)
+    med minst 50 ansatte, så mindre selskaper og andre selskapsformer er ikke med.'
+  by: joachim
+  case: rogaland-omsetning-2024
+  note: There is no reference to the 573 companies though
+  passed: true
+- answer: 'Companies in Oslo with at least 50 employees had a total profit after tax
+    of about NOK 143.3 billion in fiscal year 2025, based on their own accounts. This
+    covers 1,435 companies.
+
+
+    The figure counts only limited companies (AS and ASA) with a business address
+    in Oslo county. It uses their own accounts rather than group accounts, so nothing
+    is double counted. The data holds only companies with at least 50 employees, so
+    smaller Oslo companies are not included. Any company without a 2025 NOK exchange
+    rate would also be left out of the sum.'
+  by: joachim
+  case: oslo-net-profit-2025
+  note: No reference to the number of companies
+  passed: true
+- answer: Operating profit was about 23.8% of the Equinor group's revenue in 2025.
+    The group accounts, filed by EQUINOR ASA in US dollars, show revenue of USD 106.5
+    billion and operating profit of USD 25.4 billion for the 12-month fiscal year
+    ending in 2025.
+  by: joachim
+  case: equinor-profit-share-2025
+  note: no reference to the conversion or USD revenue and profit
+  passed: true
+- answer: 'Rogaland, Akershus and Nordland had the highest combined operating margins
+    in 2025, using the companies'' own accounts.
+
+
+    Rogaland came first at 17.4%, with operating profit of about NOK 232.7 billion
+    on revenue of NOK 1,339.2 billion across 569 companies. Akershus was second at
+    9.5%, with operating profit of NOK 74.7 billion on revenue of NOK 786.6 billion
+    across 616 companies. Nordland was third at 8.8%, with NOK 8.9 billion in operating
+    profit on NOK 101.2 billion in revenue across 199 companies.
+
+
+    Each margin is the county''s total operating profit divided by its total revenue,
+    not an average of company margins. Amounts are converted to NOK, and fiscal year
+    2025 means the year ending in 2025. Only AS/ASA companies with at least 50 employees
+    are covered, and each is placed in the county of its current business address.'
+  by: joachim
+  case: county-margins-2025
+  note: there are no references to any numbers in the SQL output table
+  passed: true
+- answer: 'Innlandet har høyest andel aksjeselskaper i konkurs: 222 av 22 821 AS/ASA,
+    som er omtrent 1,0 %. Østfold følger med 182 av 20 069 (0,9 %), deretter Buskerud
+    med 171 av 20 669 (0,8 %) og Nordland med 136 av 16 611 (0,8 %).
+
+
+    Svalbard har lavest andel, med 1 konkurs blant 296 selskaper (0,3 %). Tallene
+    viser dagens status i registeret, og bare AS og ASA med oppgitt fylke på forretningsadressen
+    er med.'
+  by: joachim
+  case: konkursandel-fylke
+  note: I can not confirm the list other than number one and there are also no numbers
+    referenced in the SQL output table
+  passed: true
+- answer: 'Equinor group''s revenue in USD was about USD 712 million lower in 2025
+    than in 2023, a decline of roughly 0.7%.
+
+
+    This compares the group accounts filed by Equinor ASA, in US dollars as filed
+    with no conversion to kroner. Only twelve-month fiscal years are included. The
+    rows show the difference and the percentage change, but not the revenue for each
+    year.'
+  by: joachim
+  case: equinor-revenue-change
+  note: There is no reference to the revenues in either year of the comparison and
+    the percentage decline is unconfirmed in the SQL output table
+  passed: true
+- answer: 'Driftsresultatet til Mowi-konsernet (MOWI ASA, konsernregnskap) økte med
+    EUR 201 millioner, fra EUR 759 millioner i 2024 til EUR 960 millioner i 2025.
+
+
+    Omregnet til norske kroner gikk det fra NOK 8,8 milliarder til NOK 11,2 milliarder,
+    en økning på NOK 2,4 milliarder. Endringen i kroner er påvirket av at de to årene
+    er omregnet med ulike gjennomsnittskurser, så eurotallene gir det reneste bildet
+    av utviklingen. Bare regnskapsår på 12 måneder er med, og konsernet rapporterer
+    i euro begge år.'
+  by: joachim
+  case: mowi-driftsresultat-endring
+  note: The operating profit is not referenced in the SQL table
+  passed: true
+- answer: 'The warehouse holds company accounts for 5,474 companies in fiscal year
+    2023, 5,598 in 2024 and 5,584 in 2025.
+
+
+    These counts are distinct organisation numbers with their own (non-consolidated)
+    accounts. Only AS and ASA companies with at least 50 employees are covered, so
+    the figures do not represent all Norwegian companies. Period length and currency
+    were not used to filter anything.'
+  by: joachim
+  case: accounts-per-year
+  passed: true
+- answer: 'Among NOK-reporting groups, Inflowcontrol AS grew revenue the most from
+    2024 to 2025, at about 287.7%. Its revenue rose from NOK 129.3 million to NOK
+    501.1 million. Xplora Technologies AS is second at about 135.8%, going from NOK
+    813.3 million to NOK 1.92 billion. Maritime Robotics AS is third at about 70.4%,
+    going from NOK 152.1 million to NOK 259.2 million.
+
+
+    The comparison uses group accounts filed in NOK for both years, covers only twelve-month
+    fiscal years, and requires 2024 revenue above zero.'
+  by: joachim
+  case: fastest-growing-nok-groups
+  note: The SQL ouput table does not contain any of the revenue numbers or growth,
+    only names
+  passed: true
+- answer: '60 konsern som rapporterer i NOK hadde lavere omsetning (driftsinntekter)
+    i 2025 enn i 2024.
+
+
+    Tallet bygger på konsern med konsernregnskap for både 2024 og 2025, begge i NOK
+    og med 12 måneders regnskapsår. Det omfatter bare aksjeselskaper med minst 50
+    ansatte. Konsern som mangler regnskap for ett av årene, eller som har et annet
+    regnskapsår enn 12 måneder, er ikke med.'
+  by: joachim
+  case: konsern-lavere-omsetning
+  passed: true
+- answer: 'Own-account revenue for seafood companies was about NOK 229.5 billion in
+    2023, NOK 238.3 billion in 2024 and NOK 245.8 billion in 2025.
+
+
+    These totals cover 146 companies in 2023, 150 in 2024 and 151 in 2025. The count
+    changes from year to year, so part of the difference between years may come from
+    which companies are included, not only from changes in revenue. The figures also
+    leave out the percentage growth between years, which the data does not show directly.
+
+
+    Seafood companies are those with industry code in division 03, 10.20 or 46.322,
+    based on each company''s current code. Only their own accounts are included, not
+    group accounts, to avoid double counting. The data covers only AS and ASA companies
+    with at least 50 employees. Fiscal years are included whatever their length.'
+  by: joachim
+  case: seafood-revenue-by-year
+  note: Althoug the number of companies are not references in the SQL output table
+  passed: true
+- answer: 'There are 4,110 limited companies (legal form AS or ASA) in fishing and
+    aquaculture, defined here as industry division 03.
+
+
+    This count covers all registered companies in the register today, including those
+    that are bankrupt or being wound up. Fish processing and fish wholesale are not
+    included, and companies with no stated industry code are not counted.'
+  by: joachim
+  case: fishing-aquaculture-companies
+  passed: true
+- answer: 'Utleie av egen eller leid fast eiendom (industry code 68.200, renting of
+    own or leased real estate) has the most limited companies in Oslo, with 11,731.
+    That is more than twice the runner-up, Bedriftsrådgivning og annen administrativ
+    rådgivning (business and administrative consulting, 70.200), with 5,146.
+
+
+    Dataprogrammeringstjenester (computer programming, 62.100) follows with 3,247,
+    then Andre egeninvesteringsselskaper (other own-investment companies, 64.323)
+    with 3,213.
+
+
+    The count covers companies with legal form AS or ASA whose business address is
+    in the county of Oslo. Companies with no stated industry are left out.'
+  by: joachim
+  case: oslo-top-subclass
+  note: the SQL output table only contains one industry subclass and no numbers to
+    cite
+  passed: true
+- answer: Statistics Norway reports a turnover of NOK 108.6 billion for fish processing
+    in Norway in 2023. This is for SN2007 class 10.20, processing and preserving of
+    fish, crustaceans and molluscs, which I used to represent the fish processing
+    industry. The figure comes from the class level only, so no turnover is counted
+    twice. The industry had 421 enterprises and 12,035 employed people that year,
+    and I read 2023 as the calendar year.
+  by: joachim
+  case: fish-processing-turnover-2023
+  passed: true
+- answer: 'Statistics Norway''s figures show 267,499 people employed in construction
+    in Norway in 2024.
+
+
+    This is the number of persons employed (table 12910) for SN2007 section F, construction.
+    It covers all enterprises, not just limited companies, and is for calendar year
+    2024.'
+  by: joachim
+  case: construction-employed-2024
+  passed: true
+- answer: 'Det er 20 aksjeselskaper innen akvakultur som har mer enn 100 ansatte.
+
+
+    Tallet gjelder selskaper med juridisk form AS eller ASA og næringskode som starter
+    med 03.2 (akvakultur, ikke vanlig fiske). Det bygger på siste rapporterte antall
+    ansatte. Selskaper som ikke har rapportert ansatte, er ikke med.'
+  by: joachim
+  case: havbruk-over-100
+  passed: true
+- answer: 'In Vestland, retail trade (Detaljhandel, division 47) employs the most
+    people among limited companies, with 18,845 employees. Specialised construction
+    (Spesialisert bygge- og anleggsvirksomhet, division 43) is second with 15,376,
+    followed by staffing services (Arbeidskrafttjenester, division 78) with 12,270
+    and food and beverage service (Serveringsvirksomhet, division 56) with 11,962.
+
+
+    The figures count companies with legal form AS or ASA, placed in Vestland by business
+    address county. They use the latest reported employee numbers, and companies without
+    a stated industry or employee count are left out. Only the top 10 divisions are
+    shown.'
+  by: joachim
+  case: vestland-division-employees
+  note: the table does not contain the number of employees or any other industry division
+    other then Detaljhandel
+  passed: true
+- answer: There are 1,719 limited companies (AS or ASA) in Vestland that are in manufacturing.
+    This counts companies whose business address is in Vestland county and whose industry
+    falls under SN2025 section C (Industri), using today's register values.
+  by: joachim
+  case: vestland-manufacturing
+  passed: true
+- answer: 'Oslo has the most ASA companies, with 105. Akershus is next with 25, followed
+    by Rogaland with 23 and Vestland with 16.
+
+
+    The count covers all registered ASA companies by the county of their business
+    address, including bankrupt ones or those being wound up. Companies with no county
+    are left out.'
+  by: joachim
+  case: which-county-has-the-most-asa
+  note: Missing the rest on the list other than Oslo and 105. Can't confirm the ASA
+    numbers from the other counties
+  passed: true
+- answer: Mowi ASA har 2 913 tilsette, ifølgje det siste talet som er registrert for
+    selskapet. Svaret føreset at selskapet står oppført som «MOWI ASA» i registeret,
+    og talet er ikkje eit historisk tal.
+  by: joachim
+  case: kor-mange-tilsette-har-mowi-asa
+  passed: true

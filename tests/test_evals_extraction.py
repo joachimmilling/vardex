@@ -110,3 +110,14 @@ def test_vardex_eval_runs_an_extraction_suite_without_a_warehouse(tmp_path, monk
     result = CliRunner().invoke(app, ["eval", str(PACK), "key-figures", "--case", "laks-thousands"])
     assert result.exit_code == 0, result.output
     assert "key-figures: 1 cases on claude-sonnet-5-5" in result.output
+
+
+def test_a_routed_extraction_records_whether_the_large_model_was_asked():
+    made_up = json.dumps(GOOD | {"revenue_quote": "1 480 999"})  # not on the page
+    small = FakeModel(made_up, made_up)
+    result = extract_case(
+        FakeModel(json.dumps(GOOD)), PACK, SPEC, case("laks-thousands"), GRADERS, small=small
+    )
+    assert result.passed
+    assert result.outcome.values["escalated"].startswith("it failed the checks")
+    assert len(result.outcome.answers) == 3  # the small model's two calls are paid for too

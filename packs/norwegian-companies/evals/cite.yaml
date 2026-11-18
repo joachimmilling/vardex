@@ -5,6 +5,7 @@
 description: Questions answered from Norwegian companies' reports, with citations.
 capability: cite
 threshold: 0.8
+judge: anthropic/claude-opus-5-5  # not the model under test, which favours its own answers
 
 cases:
   - id: europris-dividend-paid-q2

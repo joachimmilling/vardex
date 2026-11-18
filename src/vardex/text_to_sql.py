@@ -15,7 +15,7 @@ from vardex.embeddings import Embedder, nearest
 from vardex.llm import Answer, Effort, Message, ModelClient, Request
 from vardex.packs import describe_problem
 from vardex.prompts import ANSWER, ANSWER_REPAIR, NO_ROWS, SQL_REPAIR, WRITE_SQL
-from vardex.provenance import Figure, misspelt, trace
+from vardex.provenance import PERCENT, Figure, Scales, misspelt, trace
 from vardex.semantic import Example, Knowledge, Questions
 from vardex.sql import QueryError, Result, Table, Warehouse, check_sql, format_value, transpile
 from vardex.tracing import ATTEMPT, failed, passed, span
@@ -314,6 +314,7 @@ def answer_from_rows(
     *,
     repairs: int,
     style: list[str] | None = None,
+    scales: Scales = PERCENT,
 ) -> tuple[str, list[Figure], list[Answer]]:
     """Ask the model to answer from the rows, and trace every number in what it writes."""
     assumptions = "\n".join(f"- {a}" for a in plan.assumptions) or "- none"
@@ -333,7 +334,7 @@ def answer_from_rows(
         with span("answer_from_rows", {ATTEMPT: number}) as attempt:
             answer = client.send(request)
             answers.append(answer)
-            figures = trace(answer.text, [result], question, plan.assumptions)
+            figures = trace(answer.text, [result], question, plan.assumptions, scales)
             untraced = [f.text for f in figures if not f.traced]
             if not untraced:
                 passed(attempt, "numbers_traced")
@@ -389,7 +390,13 @@ def answer(
         return Reply(kind, plan.message or "", plan.assumptions, None, [], answers)
     try:
         text, figures, more = answer_from_rows(
-            client, question, plan, result, repairs=repairs, style=knowledge.questions.style
+            client,
+            question,
+            plan,
+            result,
+            repairs=repairs,
+            style=knowledge.questions.style,
+            scales=knowledge.scales,
         )
     except AnswerError as err:
         raise AnswerError(str(err), answers + err.answers, result) from err

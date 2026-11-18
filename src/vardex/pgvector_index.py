@@ -17,8 +17,6 @@ from vardex.embeddings import Vector
 from vardex.retrieval import Filters, Passage, SearchError
 from vardex.sql import one_at_a_time
 
-# Each language's stemmer: "rapporterte" and "rapporten" share the stem "rapport" in Norwegian.
-STEMMERS = {"en": "english", "nb": "norwegian", "nn": "norwegian"}
 # How many neighbours the vector index looks at per search. It must be at least the number of
 # passages asked for, or the index returns fewer: pgvector's default is 40.
 EF_SEARCH = 200
@@ -35,8 +33,12 @@ class PostgresIndex:
         model: str,
         dimensions: int,
         *,
+        stemmers: dict[str, str] | None = None,
         connect: Callable[..., Any] = psycopg.connect,
     ) -> None:
+        # Each language's stemmer, from the pack: "rapporterte" and "rapporten" share the stem
+        # "rapport" in Norwegian. A language the pack names no stemmer for is stemmed by none.
+        self.stemmers = stemmers or {}
         self.gate = threading.RLock()  # one statement at a time: see one_at_a_time
         self.schema = sql.Identifier("pack_" + pack.replace("-", "_"))
         try:
@@ -111,7 +113,7 @@ class PostgresIndex:
         """Replace a document's passages in one transaction: a search sees the old ones or the
         new ones, never half of each."""
         s = self.schema
-        stemmer = STEMMERS[document.language]
+        stemmer = self.stemmers.get(document.language, "simple")
         with self.con.transaction():
             self.con.execute(
                 sql.SQL("delete from {}.documents where id = %s").format(s), (document.id,)
@@ -176,15 +178,21 @@ class PostgresIndex:
                 sql.SQL("replace(plainto_tsquery({}, %s)::text, ' & ', ' | ')::tsquery").format(
                     sql.Literal(stemmer)
                 )
-                for stemmer in sorted(set(STEMMERS.values()))
+                for stemmer in self.searched
             ),
             columns=sql.SQL(COLUMNS),
             s=self.schema,
             where=where,
         )
-        stemmers = len(set(STEMMERS.values()))
-        rows = self.con.execute(sql_query, [*[query] * stemmers, *params, limit]).fetchall()
+        rows = self.con.execute(
+            sql_query, [*[query] * len(self.searched), *params, limit]
+        ).fetchall()
         return [passage(row) for row in rows]
+
+    @property
+    def searched(self) -> list[str]:
+        """Every stemmer a query is stemmed with: the pack's, or none at all."""
+        return sorted(set(self.stemmers.values())) or ["simple"]
 
     def close(self) -> None:
         self.con.close()

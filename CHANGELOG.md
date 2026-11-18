@@ -6,6 +6,65 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-18
+
+### Added
+
+- A second model client, `openai_client`, for every server that speaks OpenAI's Chat
+  Completions API: Ollama, LM Studio, mlx-lm, vLLM and hosted providers of open-weight models.
+  The `ollama` provider needs no key, prices nothing per token and waits ten minutes for an
+  answer; `openai` reads `OPENAI_BASE_URL` and `OPENAI_API_KEY`, and waits as long when that
+  address is this machine.
+- Connectors are plug-ins, found by entry point (`vardex.providers`, `vardex.warehouses`,
+  `vardex.judges`, `vardex.trainers`), and each SDK or driver is an extra: `anthropic`,
+  `openai`, `ollama`, `duckdb`, `postgresql`, `mlx`. A model is named `provider/model`; a name
+  alone is Anthropic's.
+- `Request.extra`: options a provider has and Vardex has no word for, passed through untouched.
+- `capabilities.py`: one shape for the work a model does (an attempt with a given model, and how
+  two attempts differ), with adapters for answering from the warehouse and for extraction.
+  Routing, shadow mode, the optimiser and training are written against it and name no
+  capability.
+- Routing: `VARDEX_SMALL_MODEL` or `--small-model` on `answer`, `extract` and `eval` tries a
+  smaller model first, and asks `VARDEX_MODEL` only when the work fails its capability's checks
+  or the small model gives up.
+- Shadow mode: `VARDEX_SHADOW_MODEL` or `--shadow-model` on `answer` and `extract` gives a
+  candidate the same work after the live result is given, and keeps both in
+  `data/<pack>/shadow.jsonl`; `vardex shadow` reports how often they agree and where they
+  differ.
+- A judge per suite (`judge:` in the answer and cite suites, `--judge` on `eval`), a warning
+  when a suite is judged by the model under test, and judge plug-ins with the grader signature.
+- `vardex label` to grade a recording's answers by hand, and `vardex eval --check-judge` to
+  report the judge's agreement with those labels, with Cohen's kappa.
+- `vardex eval --reuse RECORDING` answers from earlier recordings where they hold the exact
+  request, and `--recording` records or replays another file than the suite's own.
+- `vardex optimise`: a stronger model rewrites the pack file that instructs a capability for a
+  smaller one (`questions.yaml` for an answer suite, the extraction's own file for an extraction
+  suite), tuned on half the suite and written only if it does better on the other half.
+- `vardex train`: a fine-tuning dataset per capability, from approved work and the pack's
+  examples, with every golden case left out, and LoRA training with mlx-lm on Apple silicon.
+  The SQL writer's pairs include pairs generated from the examples; `--extraction NAME` trains
+  an extraction. An example and its variants stay on one side of the training and validation
+  split. When the GPU runs out of memory, the trainer says how to give it more.
+- The agent suite reports each run's prompt size per step.
+
+### Changed
+
+- A pack declares its languages in `pack.yaml`, each with its stemmer and the words that scale
+  a number; the engine knows none by name. A word with two meanings across a pack's languages,
+  or a language code YAML read as true or false, is an error.
+- The answer and cite suites are judged by Claude Opus 5.5, and their recordings were made
+  again.
+- Starting the command-line tool imports no model SDK and no database driver.
+- `compare`, `normalise` and `same` moved from `evals` to `sql`.
+- `ANTHROPIC_API_KEY` is read by the Anthropic client, not by `Settings`.
+
+### Fixed
+
+- `check_sql` reports a quote that never closes as SQL that does not parse, instead of
+  raising.
+- A model reply that is not valid JSON is reported as a problem with the reply, not with
+  `pack.yaml`.
+
 ## [0.10.2] - 2026-11-09
 
 ### Fixed

@@ -15,14 +15,15 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import typer
+from pydantic import ValidationError
 
-from vardex import __version__, evals, rag, text_to_sql, tracing
+from vardex import __version__, evals, plugins, rag, routing, text_to_sql, tracing
 from vardex.actions import Connector, FileConnector, action_tools, connector_path
 from vardex.agent import MAX_STEPS, Run, run_agent
-from vardex.anthropic_client import PROVIDER, AnthropicClient
 from vardex.approvals import ApprovalError, Inbox, Item, inbox_path
 from vardex.budgets import Budget, BudgetError, Spend, spend_path
 from vardex.calllog import log_calls
+from vardex.capabilities import Answering, Attempt, Capability, Extracting
 from vardex.charts import charts_path
 from vardex.config import Settings, load_settings
 from vardex.dashboard import GROUPINGS, compare, figures, format_figures, write_dashboard
@@ -35,17 +36,14 @@ from vardex.documents import (
     read_document,
     tesseract,
 )
-from vardex.duckdb_warehouse import DuckDBWarehouse
 from vardex.embeddings import Embedder, Reranker
 from vardex.events import Batch, FeedSpec
 from vardex.extraction import (
     ExtractionError,
     ExtractionSpec,
     build_request,
-    extract,
     load_extraction,
 )
-from vardex.fastembed_models import FastEmbedder, FastReranker
 from vardex.feedback import (
     Candidates,
     Feedback,
@@ -58,6 +56,7 @@ from vardex.feedback import (
 )
 from vardex.indexing import index_pack
 from vardex.ingest import http_client
+from vardex.lessons import ExtractionLesson, SqlLesson, golden_documents
 from vardex.llm import (
     Answer,
     Conversation,
@@ -74,10 +73,17 @@ from vardex.llm import ask as ask_model
 from vardex.mcp_client import McpSession, load_mcp_servers, outside_tools
 from vardex.mcp_server import build_server, serve_stdio
 from vardex.monitoring import breaches, load_monitoring
+from vardex.optimise import (
+    BATCH,
+    ROUNDS,
+    ExtractionFile,
+    Instructions,
+    QuestionsFile,
+    halves,
+    optimise,
+)
 from vardex.packs import Language, PackError, fingerprint, load_pack
 from vardex.permissions import Permissions, load_permissions, unlisted
-from vardex.pgvector_index import PostgresIndex
-from vardex.postgres_warehouse import PostgresWarehouse
 from vardex.pricing import (
     PRICES,
     UnknownModelError,
@@ -89,7 +95,7 @@ from vardex.pricing import (
     stale_prices_warning,
 )
 from vardex.prompts import AGENT
-from vardex.provenance import Figure, Quote
+from vardex.provenance import Figure, Quote, Scales
 from vardex.replay import (
     NotRecorded,
     Recording,
@@ -105,12 +111,15 @@ from vardex.replay import (
     ReplayIndex,
     ReplayReranker,
     ReplayWarehouse,
+    ReusingClient,
 )
 from vardex.retrieval import Filters, Index, Search, SearchError, search
 from vardex.runs import Lock, RunError, RunStore, runs_path
 from vardex.runs import Run as WorkflowRun
 from vardex.semantic import Knowledge, check, check_documents, find_key, load_knowledge
-from vardex.sql import QueryError, Result, Warehouse, format_table, format_value
+from vardex.shadow import ShadowLog, run_shadow, shadow_path
+from vardex.shadow import summary as shadow_summary
+from vardex.sql import QueryError, Result, Warehouse, format_table, format_value, transpile
 from vardex.text_to_sql import AnswerError
 from vardex.tools import Approver, Tool, Toolbox, ToolResult, build_toolbox
 from vardex.traces import FileTraces, LangfuseTraces, Trace, TraceError, TraceStore, traces
@@ -126,6 +135,14 @@ from vardex.tracing import (
     current,
     trace_calls,
     traces_path,
+)
+from vardex.training import (
+    Lesson,
+    TrainError,
+    approved,
+    build_dataset,
+    training_path,
+    write_dataset,
 )
 from vardex.warehouse import WarehouseError, build, warehouse_path
 from vardex.workflows import (
@@ -163,6 +180,14 @@ WarehouseOption = Annotated[
         "pack's own warehouse.",
     ),
 ]
+SmallModelOption = Annotated[
+    str | None,
+    typer.Option(help="Try this model first; ask the other only when its work fails a check."),
+]
+ShadowModelOption = Annotated[
+    str | None,
+    typer.Option(help="Also give the work to this model, keep its result and show it to nobody."),
+]
 CALL_LOG = Path("logs/calls.jsonl")
 MAX_ASKED_BACK = 2  # questions the model may ask back before it must answer or give up
 
@@ -180,14 +205,21 @@ def settings_for(model: str | None) -> Settings:
 
 
 def connect(settings: Settings) -> ModelClient:
-    """The model client. This is the one place that chooses a provider."""
-    return AnthropicClient(settings)
+    """The model client for the model the settings name, such as claude-sonnet-5-5 or
+    ollama/gemma4:12b. Its provider is found by name among the installed plug-ins, so this
+    names none: a provider is added by installing a package, never by changing this."""
+    try:
+        provider, model = plugins.split_model(settings.model)
+        return plugins.load("providers", provider)(settings, model)
+    except plugins.PluginError as err:
+        raise ModelError(str(err)) from err
 
 
 def watched(client: ModelClient, *, log: bool = True) -> ModelClient:
     """The client with Vardex's hooks around every call: a span in the trace, and a line in
     the call log. A replay is traced and not logged: it called nobody and cost nothing."""
-    hooks = (trace_calls(PROVIDER), log_calls(CALL_LOG)) if log else (trace_calls(PROVIDER),)
+    provider = getattr(client, "provider", "vardex")  # a replay or a test's stand-in has none
+    hooks = (trace_calls(provider), log_calls(CALL_LOG)) if log else (trace_calls(provider),)
     return Hooked(client, hooks)
 
 
@@ -259,17 +291,24 @@ def show_trace_id(pack: Path) -> None:
 
 
 def connect_warehouse(url: str | None, pack: Path, settings: Settings) -> Warehouse:
-    """The warehouse. This is the one place that chooses a database."""
+    """The warehouse: the one given, else VARDEX_WAREHOUSE_URL, else the pack's own file.
+    Which plug-in opens it follows from the URL's scheme (postgresql://…) or the file's
+    suffix (….duckdb), so this names no database either."""
     url = url or settings.warehouse_url
-    timeout = settings.query_timeout_seconds
-    if url and url.startswith(("postgresql://", "postgres://")):
-        return PostgresWarehouse(url, timeout_seconds=timeout)
-    path = Path(url) if url else warehouse_path(settings.data_dir, load_pack(pack).name)
-    return DuckDBWarehouse(path, timeout_seconds=timeout)
+    if not url:
+        url = str(warehouse_path(settings.data_dir, load_pack(pack).name))
+    kind = url.split("://", 1)[0] if "://" in url else Path(url).suffix.lstrip(".")
+    try:
+        return plugins.load("warehouses", kind)(url, settings)
+    except plugins.PluginError as err:
+        raise QueryError(str(err)) from err
 
 
 def connect_embedder(settings: Settings) -> Embedder:
-    """The embedding model. This is the one place that chooses one."""
+    """The embedding model. This is the one place that chooses one, and it imports its
+    library only when it is asked for one."""
+    from vardex.fastembed_models import FastEmbedder
+
     return FastEmbedder(settings.embedding_model, settings.data_dir / "models")
 
 
@@ -277,6 +316,8 @@ def connect_reranker(settings: Settings, rerank: bool = True) -> Reranker | None
     """The reranker, or None when it is turned off. The one place that chooses one."""
     if not rerank or settings.rerank_model is None:
         return None
+    from vardex.fastembed_models import FastReranker
+
     return FastReranker(settings.rerank_model, settings.data_dir / "models")
 
 
@@ -286,8 +327,16 @@ def connect_index(settings: Settings, pack: Path, embedder: Embedder) -> Index:
         raise SearchError(
             "VARDEX_INDEX_URL is not set: it must name a PostgreSQL database with pgvector"
         )
-    name = load_pack(pack).name
-    return PostgresIndex(settings.index_url, name, embedder.model, embedder.dimensions)
+    from vardex.pgvector_index import PostgresIndex
+
+    manifest = load_pack(pack)
+    return PostgresIndex(
+        settings.index_url,
+        manifest.name,
+        embedder.model,
+        embedder.dimensions,
+        stemmers=manifest.stemmers,
+    )
 
 
 def interactive() -> bool:
@@ -457,6 +506,8 @@ def extract_command(
         bool,
         typer.Option("--show-prompt", help="Print the request for the first file; call nothing."),
     ] = False,
+    small_model: SmallModelOption = None,
+    shadow_model: ShadowModelOption = None,
     stats: StatsOption = False,
 ) -> None:
     """Extract values from documents. Prints one JSON line per document that passes the checks.
@@ -481,8 +532,17 @@ def extract_command(
             typer.echo(f"=== {message.role} ===\n{message.text}\n")
         typer.echo(f"=== output schema ===\n{json.dumps(schema, indent=2, ensure_ascii=False)}")
         return
+    settings = settings_for(model)
+    settings = replace(
+        settings,
+        small_model=small_model or settings.small_model,
+        shadow_model=shadow_model or settings.shadow_model,
+    )
     try:
-        client = watched(connect(settings_for(model)))
+        client = watched(connect(settings))
+        small = None  # the small model first, this one when its values fail the checks
+        if settings.small_model:
+            small = watched(connect(replace(settings, model=settings.small_model)))
     except ModelError as err:
         raise fail(str(err)) from err
 
@@ -490,13 +550,18 @@ def extract_command(
     for file in files:
         ledger = Ledger(client)  # the calls for this file, still logged if one fails
         read = None
+        work = routed = None
         try:
             if file.suffix.lower() == ".pdf":
                 read = read_document(file, ledger, tesseract, wanted).pages
                 text = pages_text(read)
             else:
                 text = file.read_text(encoding="utf-8")
-            result = extract(ledger, spec, text, effort=effort, repairs=repairs)
+            work = Extracting(spec, text, effort=effort, repairs=repairs)
+            routed = routing.attempt(work, ledger, small and Ledger(small, ledger.answers))
+            if routed.attempt.error:
+                raise routed.attempt.error
+            result = routed.attempt.reply
         except ExtractionError as err:
             failed += 1
             typer.secho(f"{file.name}: {err}", fg=typer.colors.RED, err=True)
@@ -514,6 +579,8 @@ def extract_command(
             typer.echo(json.dumps(values, default=str, ensure_ascii=False))
         for answer in ledger.answers:  # the pages read from pictures, and the extraction
             record(answer, stats)
+        if work and routed:  # after the values have been given, as vardex answer does
+            shadow(settings, pack, work, routed.attempt, input=document or file.name)
     if failed:
         raise fail(f"{failed} of {len(files)} documents failed.")
 
@@ -750,6 +817,8 @@ def answer_command(
     no_input: Annotated[
         bool, typer.Option("--no-input", help="Never wait for an answer to a question back.")
     ] = False,
+    small_model: SmallModelOption = None,
+    shadow_model: ShadowModelOption = None,
     as_json: JsonOption = False,
     stats: StatsOption = False,
 ) -> None:
@@ -757,12 +826,16 @@ def answer_command(
     When the model asks a question back, answer it at the keyboard; without a keyboard, or
     with --no-input, the question is printed and the exit code is 2."""
     settings = settings_for(model)
+    settings = replace(
+        settings,
+        small_model=small_model or settings.small_model,
+        shadow_model=shadow_model or settings.shadow_model,
+    )
     try:
         knowledge = load_knowledge(pack)
         connection = connect_warehouse(warehouse, pack, settings)
     except (PackError, QueryError) as err:
         raise (fail_json(err) if as_json else fail(str(err))) from err
-    spent: list[Answer] = []  # the calls for the question in hand, still logged if one fails
     current().set(QUESTION, question)  # the first question: what a candidate case would ask
     try:
         if show_prompt:
@@ -778,23 +851,28 @@ def answer_command(
             typer.echo(f"=== system ===\n{system}\n\n=== user ===\n{question}")
             return
         client = watched(connect(settings))
+        small = None  # the small model first, this one when its answer fails
+        if settings.small_model:
+            small = watched(connect(replace(settings, model=settings.small_model)))
         embedder = connect_embedder(settings)
         earlier: list[Message] = []
         while True:
-            spent.clear()
-            reply = text_to_sql.answer(
-                Ledger(client, spent),
+            work = Answering(
                 connection,
                 knowledge,
                 question,
                 effort=effort,
                 repairs=repairs,
                 max_rows=max_rows,
-                earlier=earlier,
+                earlier=list(earlier),
                 embedder=embedder,
             )
-            for call in reply.answers:
+            routed = routing.attempt(work, client, small)
+            for call in routed.answers:
                 record(call, stats)
+            if routed.attempt.error:
+                raise routed.attempt.error
+            reply: text_to_sql.Reply = routed.attempt.reply
             asked_back = len(earlier) // 2
             if reply.kind != "clarify" or no_input or as_json or asked_back == MAX_ASKED_BACK:
                 break
@@ -804,13 +882,10 @@ def answer_command(
             earlier += [Message("user", question), Message("assistant", reply.answers[-1].text)]
             question = typer.prompt(">", prompt_suffix=" ")
     except (ModelError, QueryError) as err:
-        for call in spent:
-            record(call, stats)
         raise (fail_json(err) if as_json else fail(str(err))) from err
     except AnswerError as err:
-        for call in err.answers:
-            record(call, stats)
         current().update({OUTCOME: "error", SQL: err.result.sql if err.result else None})
+        shadow(settings, pack, work, routed.attempt, warehouse)
         if as_json:
             raise fail_json(
                 err,
@@ -829,8 +904,54 @@ def answer_command(
             SQL: reply.result.sql if reply.result else None,
             "vardex.asked_back": len(earlier) // 2,
             "vardex.warnings": len(reply.warnings),
+            "vardex.escalated": routed.escalated or None,
         }
     )
+    try:
+        show_reply(pack, reply, as_json)
+    finally:
+        # After the answer has been given, never before: the person does not wait for it
+        shadow(settings, pack, work, routed.attempt, warehouse)
+
+
+def shadow(
+    settings: Settings,
+    pack: Path,
+    work: Capability,
+    live: Attempt,
+    url: str | None = None,
+    input: str | None = None,
+) -> None:
+    """Give the shadow model the work the live one did, when there is one, and keep both
+    results. Nothing it does reaches the person, an error included. Work that reads the
+    warehouse reads it through a connection of its own: the live one is closed by now."""
+    if not settings.shadow_model:
+        return
+    try:
+        candidate = watched(connect(replace(settings, model=settings.shadow_model)))
+        warehouse = None
+        if isinstance(work, Answering):
+            warehouse = connect_warehouse(url, pack, settings)  # the one the live answer read
+            work = replace(work, warehouse=warehouse)
+    except (ModelError, QueryError, PackError) as err:
+        typer.secho(f"(no shadow: {err})", fg="bright_black", err=True)
+        return
+    try:
+        entry = run_shadow(
+            candidate,
+            work,
+            live,
+            input=input or getattr(work, "question", ""),
+            trace_id=current().trace_id,
+        )
+    finally:
+        if warehouse is not None:
+            warehouse.close()
+    ShadowLog(shadow_path(settings.data_dir, load_pack(pack).name)).add(entry)
+
+
+def show_reply(pack: Path, reply: text_to_sql.Reply, as_json: bool) -> None:
+    """The answer, its assumptions and its sources; or the question back, which exits 2."""
     if as_json:
         # A question back is the one outcome that is not an answer, and it already exits 2.
         if reply.kind == "clarify":
@@ -1085,6 +1206,7 @@ def cite_command(
             filters,
             reranker=connect_reranker(settings, rerank),
             passages=passages,
+            scales=Scales(load_pack(pack).scale_words),
         )
     except (ModelError, SearchError) as err:
         raise (fail_json(err) if as_json else fail(str(err))) from err
@@ -1122,6 +1244,7 @@ class EvalConnections:
     the suite's capability needs is there."""
 
     client: ModelClient | None = None
+    small: ModelClient | None = None  # the model tried first, when the work is routed
     warehouse: Warehouse | None = None
     embedder: Embedder | None = None
     index: Index | None = None
@@ -1153,16 +1276,26 @@ def eval_connections(
     url: str | None,
     record: bool,
     replay: bool,
+    path: Path | None = None,
+    reuse: list[Recording] | None = None,
 ) -> EvalConnections:
     """The connections a suite runs on: live, live and recorded, or replayed."""
     needs = NEEDS[type(suite)]
-    path = evals.recording_path(pack, name)
+    path = path or evals.recording_path(pack, name)
+    # A small model to route through, for the capabilities that route
+    routes = isinstance(suite, evals.Suite | evals.ExtractionSuite)
+    small = settings.small_model if routes else None
     if replay:
         if not path.is_file():
             raise PackError(f"No recording at {path}. Make one with --record.")
         recording = Recording.load(path)
         return EvalConnections(
             client=watched(ReplayClient(recording), log=False) if "model" in needs else None,
+            small=(
+                watched(ReplayClient(recording, plugins.split_model(small)[1]), log=False)
+                if small
+                else None
+            ),
             warehouse=ReplayWarehouse(recording) if "warehouse" in needs else None,
             embedder=ReplayEmbedder(recording) if "embedder" in needs else None,
             index=ReplayIndex(recording) if "index" in needs else None,
@@ -1181,6 +1314,11 @@ def eval_connections(
             live.reranker = connect_reranker(settings)
         if "model" in needs:
             live.client = watched(connect(settings))
+            if small:
+                live.small = watched(connect(replace(settings, model=small)))
+            if reuse:  # outside the hooks: a reused answer is neither a call nor a cost now
+                live.client = ReusingClient(live.client, reuse)
+                live.small = ReusingClient(live.small, reuse) if live.small else None
     except (PackError, QueryError, SearchError, ModelError):
         live.close()
         raise
@@ -1194,6 +1332,7 @@ def eval_connections(
     )
     return EvalConnections(
         client=RecordingClient(live.client, recording) if live.client else None,
+        small=RecordingClient(live.small, recording) if live.small else None,
         warehouse=RecordingWarehouse(live.warehouse, recording) if live.warehouse else None,
         embedder=RecordingEmbedder(live.embedder, recording) if live.embedder else None,
         index=RecordingIndex(live.index, recording) if live.index else None,
@@ -1202,8 +1341,107 @@ def eval_connections(
     )
 
 
+def reused_calls(client: ModelClient | None) -> int:
+    """How many calls a client answered from earlier recordings: it may be a ReusingClient
+    itself, or hold one, as a RecordingClient does when a reused run is recorded."""
+    while client is not None and not isinstance(client, ReusingClient):
+        client = getattr(client, "client", None)
+    return client.reused if client else 0
+
+
+def connect_judge(
+    settings: Settings,
+    reference: str,
+    suite: evals.AnySuite,
+    *,
+    record: Recording | None = None,
+    replay: Recording | None = None,
+    reuse: list[Recording] | None = None,
+) -> evals.Grader:
+    """The judge for a suite, by its name: a model, as provider/model, or a judge plug-in,
+    which is any grader at all, such as a decision model that is not a chat model.
+
+    A model judge is recorded and replayed with the rest of the suite. A plug-in is not: it
+    is called live, so a replayed suite cannot use one."""
+    capability = "answer" if isinstance(suite, evals.Suite) else "cite"
+    provider, model = plugins.split_model(reference)
+    if provider in plugins.available("judges"):
+        if replay is not None:
+            raise PackError(f"the judge {reference} is a plug-in, and a plug-in is not recorded")
+        try:
+            grade = plugins.load("judges", provider)(settings, model, capability)
+        except plugins.PluginError as err:
+            raise PackError(str(err)) from err
+
+        def answers_only(
+            case: evals.AnyCase, outcome: evals.Outcome, reference: Result | None
+        ) -> evals.Grade | None:
+            # A judge decides whether an answer is right, as the model judges do: a refusal
+            # or a question back is the behaviour grader's to judge
+            return grade(case, outcome, reference) if outcome.kind == "answer" else None
+
+        return answers_only
+    if replay is not None:
+        client: ModelClient = watched(ReplayClient(replay, model), log=False)
+    else:
+        client = watched(connect(replace(settings, model=reference)))
+        if reuse:
+            client = ReusingClient(client, reuse)
+        if record is not None:
+            client = RecordingClient(client, record)
+    return evals.Judge(client) if capability == "answer" else evals.FaithfulnessJudge(client)
+
+
+def judge_against_labels(
+    pack: Path,
+    name: str,
+    suite: evals.AnySuite,
+    settings: Settings,
+    judge: str | None,
+    url: str | None,
+    replay: bool,
+) -> None:
+    """Run a suite's judge on the answers a person labelled by hand, and print how often the
+    two agree. The judge runs live; with --replay, the reference rows come from the recording,
+    so only the judge's own calls cost anything."""
+    if not isinstance(suite, evals.Suite):
+        typer.secho(f"{name}: only an answer suite's judge can be checked.", fg="yellow", err=True)
+        return
+    labels = evals.load_labels(pack, name)
+    if not labels:
+        raise fail(f"No labels for {name}: make some with vardex label {pack} {name}")
+    reference = judge or suite.judge or settings.model
+    try:
+        grader = connect_judge(settings, reference, suite)
+        if replay:
+            warehouse: Warehouse = ReplayWarehouse(Recording.load(evals.recording_path(pack, name)))
+        else:
+            warehouse = connect_warehouse(url, pack, settings)
+        knowledge = load_knowledge(pack)
+    except (PackError, ModelError, QueryError) as err:
+        raise fail(str(err)) from err
+    try:
+        result = evals.check_judge(grader, suite, labels, warehouse, knowledge.questions.dialect)
+    except (PackError, QueryError, ModelError, NotRecorded) as err:
+        raise fail(f"{name}: {err}") from err
+    finally:
+        warehouse.close()
+    typer.echo(f"\n{name}: the judge {reference}\n")
+    typer.echo(evals.format_judge_check(result))
+    spent = [a.cost_usd for a in result.answers]
+    cost = format_usd(sum(spent, Decimal(0))) if None not in spent else "cost unknown"
+    typer.secho(f"\n{len(result.answers)} model calls · {cost}", fg="bright_black", err=True)
+
+
 def check_suite_for(pack: Path, suite: evals.AnySuite, knowledge: Knowledge | None) -> list[str]:
     """Everything that makes a suite unfit to measure with, for its kind of suite."""
+    problems = evals.check_languages(suite, load_pack(pack).languages)
+    return problems + check_kind_of_suite(pack, suite, knowledge)
+
+
+def check_kind_of_suite(
+    pack: Path, suite: evals.AnySuite, knowledge: Knowledge | None
+) -> list[str]:
     if isinstance(suite, evals.ExtractionSuite):
         return evals.check_extraction_suite(suite, load_extraction(pack, suite.extraction), pack)
     if isinstance(suite, evals.SearchSuite | evals.CiteSuite):
@@ -1228,6 +1466,9 @@ def eval_suite(
     details: bool,
     repeat: int = 1,
     baseline: Path | None = None,
+    judge: str | None = None,
+    recording_file: Path | None = None,
+    reuse: list[Path] | None = None,
 ) -> bool:
     """Run one suite and print its report. True when it fails its gate."""
     try:
@@ -1237,16 +1478,38 @@ def eval_suite(
     if problems:
         raise fail(f"Suite {name} cannot be used:\n" + "\n".join(f"  {p}" for p in problems))
     try:
-        c = eval_connections(pack, name, suite, settings, warehouse, record_run, replay_run)
+        earlier = [Recording.load(path) for path in reuse or []]
+        c = eval_connections(
+            pack, name, suite, settings, warehouse, record_run, replay_run, recording_file, earlier
+        )
     except (PackError, QueryError, ModelError, SearchError) as err:
         raise fail(str(err)) from err
     graders: list[evals.Grader] = []
-    if isinstance(suite, evals.Suite) and c.client:
-        graders = [evals.grade_behaviour, evals.grade_rows, evals.Judge(c.client)]
+    if isinstance(suite, evals.Suite | evals.CiteSuite) and c.client:
+        judge = judge or suite.judge or settings.model
+        if plugins.split_model(judge)[1] == c.client.model:
+            typer.secho(
+                f"Warning: {name} is judged by the model under test, which favours its own "
+                "answers. Name another in the suite's judge:, or with --judge.",
+                fg="yellow",
+                err=True,
+            )
+        try:
+            judged = connect_judge(
+                settings,
+                judge,
+                suite,
+                record=c.recording if record_run else None,
+                replay=c.recording if replay_run else None,
+                reuse=earlier,
+            )
+        except (PackError, ModelError) as err:
+            c.close()
+            raise fail(str(err)) from err
+        first = evals.grade_rows if isinstance(suite, evals.Suite) else evals.grade_citations
+        graders = [evals.grade_behaviour, first, judged]
     elif isinstance(suite, evals.ExtractionSuite):
         graders = [evals.grade_behaviour, evals.grade_fields]
-    elif isinstance(suite, evals.CiteSuite) and c.client:
-        graders = [evals.grade_behaviour, evals.grade_citations, evals.FaithfulnessJudge(c.client)]
     elif isinstance(suite, evals.AgentSuite):
         # Every grader here is code: whether it answered, which tools it used, what the
         # answer says and how many steps it took. A run costs model calls; grading it does not.
@@ -1281,11 +1544,20 @@ def eval_suite(
         started.append(case.id)
         if isinstance(case, evals.ExtractionCase) and isinstance(suite, evals.ExtractionSuite):
             spec = load_extraction(pack, suite.extraction)
-            return evals.extract_case(c.client, pack, spec, case, graders)  # type: ignore[arg-type]
+            return evals.extract_case(c.client, pack, spec, case, graders, small=c.small)  # type: ignore[arg-type]
         if isinstance(case, evals.SearchCase) and isinstance(suite, evals.SearchSuite):
             return evals.search_case(c.index, c.embedder, c.reranker, suite, case)  # type: ignore[arg-type]
         if isinstance(case, evals.CiteCase):
-            return evals.cite_case(c.client, c.index, c.embedder, c.reranker, case, graders)  # type: ignore[arg-type]
+            scales = Scales(load_pack(pack).scale_words)
+            return evals.cite_case(
+                c.client,  # type: ignore[arg-type]
+                c.index,  # type: ignore[arg-type]
+                c.embedder,  # type: ignore[arg-type]
+                c.reranker,
+                case,
+                graders,
+                scales=scales,
+            )
         if isinstance(case, evals.AgentCase):
             return evals.agent_case(c.client, agent_toolbox, case, graders)  # type: ignore[arg-type]
         return evals.answer_case(
@@ -1297,6 +1569,7 @@ def eval_suite(
             graders,  # type: ignore[arg-type]
             effort=effort,
             embedder=c.embedder,
+            small=c.small,
         )
 
     def show(result: evals.CaseResult) -> None:
@@ -1322,11 +1595,12 @@ def eval_suite(
         c.close()
     if record_run and recording:
         recording.verdicts = evals.verdicts(report)
-        recording.save(evals.recording_path(pack, name))
+        recording.save(recording_file or evals.recording_path(pack, name))
 
     source = f", replayed from the recording of {recording.recorded_on}" if replay_run else ""
     times = f", {repeat} runs each" if repeat > 1 else ""
-    typer.echo(f"\n{name}: {len(report.cases)} cases{times} on {report.model}{source}\n")
+    on = f"{c.small.model} first, then {report.model}" if c.small else report.model
+    typer.echo(f"\n{name}: {len(report.cases)} cases{times} on {on}{source}\n")
     typer.echo(evals.format_report(report, details))
     if baseline:
         before = Recording.load(baseline).verdicts
@@ -1335,6 +1609,9 @@ def eval_suite(
         verdicts = {case: verdict["passed"] for case, verdict in before.items()}
         typer.echo("\n" + evals.format_comparison(evals.compare_runs(verdicts, report)))
     calls = sum(len(result.answers) for result in report.results)
+    reused = sum(reused_calls(client) for client in (c.client, c.small))
+    if reused:
+        typer.secho(f"{reused} calls answered from earlier recordings", fg="bright_black", err=True)
     cost = format_usd(report.cost_usd) if report.cost_usd is not None else "cost unknown"
     paid = " when it was recorded" if replay_run else ""
     typer.secho(f"\n{calls} model calls · {cost}{paid}", fg="bright_black", err=True)
@@ -1363,6 +1640,7 @@ def eval_command(
     ] = None,
     warehouse: WarehouseOption = None,
     model: ModelOption = None,
+    small_model: SmallModelOption = None,
     effort: Annotated[
         Effort, typer.Option(help="How much work the model puts into the SQL.")
     ] = "medium",
@@ -1386,12 +1664,42 @@ def eval_command(
         Path | None,
         typer.Option(help="A recording to compare with, case by case.", exists=True),
     ] = None,
+    judge: Annotated[
+        str | None,
+        typer.Option(help="Judge with this model, or judge plug-in, instead of the suite's."),
+    ] = None,
+    recording_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--recording",
+            help="Record to, or replay from, this file instead of the suite's own. One suite.",
+        ),
+    ] = None,
+    reuse: Annotated[
+        list[Path] | None,
+        typer.Option(
+            help="Answer from this recording where it holds the exact request; call the "
+            "model only for the rest. Repeat for more.",
+            exists=True,
+        ),
+    ] = None,
+    check_judge: Annotated[
+        bool,
+        typer.Option(
+            "--check-judge",
+            help="Run only the judge, on the answers a person labelled, and report how often "
+            "it agrees with them.",
+        ),
+    ] = False,
 ) -> None:
     """Run the pack's golden sets and report how often Vardex gets them right. Exits with 1
     when a suite falls below its threshold or a critical case fails."""
     if record_run and (replay_run or case):
         raise fail("--record records whole suites, live: leave out --replay and --case.")
+    if reuse and replay_run:
+        raise fail("--reuse calls the model for what is not recorded: leave out --replay.")
     settings = settings_for(model)
+    settings = replace(settings, small_model=small_model or settings.small_model)
     try:
         found = evals.load_suites(pack)
     except PackError as err:
@@ -1401,6 +1709,12 @@ def eval_command(
     if unknown or not names:
         known = ", ".join(found) or "none"
         raise fail(f"No suite {', '.join(unknown)} in {pack}. Known: {known}")
+    if recording_file and len(names) > 1:
+        raise fail("--recording names one file: name one suite to go with it.")
+    if check_judge:
+        for name in names:
+            judge_against_labels(pack, name, found[name], settings, judge, warehouse, replay_run)
+        return
     try:
         # Only text-to-SQL needs the semantic layer: a pack of documents alone has none
         sql = any(isinstance(found[name], evals.Suite) for name in names)
@@ -1422,6 +1736,9 @@ def eval_command(
             details=details,
             repeat=repeat,
             baseline=baseline,
+            judge=judge,
+            recording_file=recording_file,
+            reuse=reuse,
         )
         for name in names
     ]
@@ -2965,3 +3282,306 @@ def dismiss_command(
     except (PackError, FeedbackError) as err:
         raise fail(str(err)) from err
     typer.secho(f"Dismissed {candidate.id}.", fg=typer.colors.GREEN)
+
+
+# Other models: a candidate in shadow beside the live one
+@app.command(name="shadow")
+def shadow_command(
+    pack: PackArgument,
+    days: Annotated[float, typer.Option(min=0, help="Look back this many days.")] = 30,
+    model: Annotated[
+        str | None, typer.Option(help="Only this shadow model, by its own name.")
+    ] = None,
+    capability: Annotated[
+        str | None, typer.Option(help="Only this capability, such as answer or extract.")
+    ] = None,
+) -> None:
+    """Compare the shadow model's work with the live model's: how often they agree, what each
+    did, what each cost and took, and every piece of work on which they differ."""
+    settings = load_settings()
+    try:
+        log = ShadowLog(shadow_path(settings.data_dir, load_pack(pack).name))
+    except PackError as err:
+        raise fail(str(err)) from err
+    typer.echo("\n".join(shadow_summary(log.read(since(days), model, capability))))
+
+
+@app.command(name="label")
+def label_command(
+    pack: PackArgument,
+    suite: Annotated[str, typer.Argument(help="An answer suite, such as answer.")],
+    recording_file: Annotated[
+        Path | None,
+        typer.Option("--recording", help="Label the answers in this recording.", exists=True),
+    ] = None,
+    by: ByOption = None,
+) -> None:
+    """Read the answers in a suite's recording, one at a time, and say whether each is right.
+    Your verdicts are what vardex eval --check-judge checks the judge against."""
+    settings = load_settings()
+    try:
+        found = evals.load_suites(pack)
+        chosen = found[suite]
+        knowledge = load_knowledge(pack)
+        done = {(label.case, label.answer) for label in evals.load_labels(pack, suite)}
+        c = eval_connections(pack, suite, chosen, settings, None, False, True, recording_file)
+    except KeyError as err:
+        raise fail(f"No suite {suite} in {pack}") from err
+    except PackError as err:
+        raise fail(str(err)) from err
+    if not isinstance(chosen, evals.Suite):
+        raise fail(f"{suite} is not an answer suite.")
+    client, warehouse = c.client, c.warehouse
+    if client is None or warehouse is None:
+        raise fail(f"{suite}: the recording holds no answers to label.")
+    try:
+        for case in chosen.cases:
+            if case.sql is None:
+                continue
+            outcome = evals.answer_case(
+                client, warehouse, knowledge, chosen, case, [], embedder=c.embedder
+            ).outcome
+            if outcome.kind != "answer" or (case.id, outcome.text) in done:
+                continue
+            sql = transpile(case.sql, knowledge.questions.dialect, warehouse.dialect)
+            reference = warehouse.run(sql, max_rows=100)
+            typer.echo(f"\n{case.id}: {case.question}\n")
+            typer.echo(format_table(reference))
+            typer.echo(f"\n{outcome.text}\n")
+            choice = typer.prompt("Right? [y]es, [n]o, [s]kip, [q]uit", default="s").lower()
+            if choice.startswith("q"):
+                break
+            if choice[:1] not in ("y", "n"):
+                continue
+            note = typer.prompt("Why (optional)", default="", show_default=False)
+            label = evals.Label(
+                case=case.id,
+                answer=outcome.text,
+                passed=choice.startswith("y"),
+                by=by or getpass.getuser(),
+                note=note,
+            )
+            evals.add_label(pack, suite, label)
+    except NotRecorded as err:
+        raise fail(f"{suite}: {err}. Record it again with --record.") from err
+    finally:
+        c.close()
+
+
+@app.command(name="optimise")
+@traced("optimise")
+def optimise_command(
+    pack: PackArgument,
+    suite: Annotated[
+        str, typer.Argument(help="The suite to optimise on: an answer or extraction suite.")
+    ] = "answer",
+    model: Annotated[
+        str | None,
+        typer.Option(help="The model to optimise for. Default: VARDEX_SMALL_MODEL."),
+    ] = None,
+    teacher: Annotated[
+        str | None,
+        typer.Option(help="The model that rewrites the instructions. Default: VARDEX_MODEL."),
+    ] = None,
+    rounds: Annotated[int, typer.Option(min=1, max=10, help="Rewrites to try.")] = ROUNDS,
+    batch: Annotated[int, typer.Option(min=1, help="Cases each rewrite is tried on.")] = BATCH,
+    warehouse: WarehouseOption = None,
+    reuse: Annotated[
+        list[Path] | None,
+        typer.Option(help="Answer from this recording where it holds the request.", exists=True),
+    ] = None,
+) -> None:
+    """Rewrite the file that instructs a capability for a smaller model, on half the suite,
+    and keep the rewrite only if it does better on the other half: questions.yaml for an
+    answer suite, the extraction's own file for an extraction suite. It changes the file and
+    nothing else: read the diff, and open a pull request for it as for any other change."""
+    settings = load_settings()
+    student_model = model or settings.small_model
+    if not student_model:
+        raise fail("Name the model to optimise for with --model, or set VARDEX_SMALL_MODEL.")
+    connection = None
+    try:
+        chosen = evals.load_suites(pack).get(suite)
+        student: ModelClient = watched(connect(replace(settings, model=student_model)))
+        if reuse:  # the instructions as they are now were followed already: read them back
+            student = ReusingClient(student, [Recording.load(path) for path in reuse])
+        teaching = watched(connect(replace(settings, model=teacher or settings.model)))
+        if isinstance(chosen, evals.Suite):
+            instructions: Instructions = QuestionsFile(load_knowledge(pack))
+            connection = connect_warehouse(warehouse, pack, settings)
+            run_case = answering(student, connection, chosen, connect_embedder(settings))
+        elif isinstance(chosen, evals.ExtractionSuite):
+            folder = pack / "evals" / "documents"
+            documents = {
+                case.document: (folder / case.document).read_text(encoding="utf-8")
+                for case in chosen.cases
+            }
+            instructions = ExtractionFile(chosen.extraction, documents)
+            run_case = extracting(student, pack)
+        else:
+            raise PackError(f"No answer or extraction suite {suite} in {pack}")
+    except (PackError, ModelError, QueryError) as err:
+        raise fail(str(err)) from err
+    path = pack / instructions.name
+
+    def run_cases(version: Any, cases: list[evals.AnyCase]) -> list[evals.CaseResult]:
+        results = []
+        for case in cases:
+            result = run_case(version, case)
+            mark, colour = ("ok", "green") if result.passed else ("FAIL", "red")
+            typer.secho(f"  {mark:<5}{case.id}", fg=colour, err=True)
+            results.append(result)
+        return results
+
+    try:
+        found = optimise(
+            teaching,
+            instructions,
+            path.read_text(encoding="utf-8"),
+            chosen.cases,
+            run_cases,
+            rounds=rounds,
+            size=batch,
+            say=lambda line: typer.echo(line, err=True),
+        )
+    except (ModelError, QueryError, ValidationError) as err:
+        raise fail(str(err)) from err
+    finally:
+        if connection is not None:
+            connection.close()
+    (start, after), (before, then) = found.train, found.held
+    trained = len(halves(chosen.cases)[0])
+    typer.echo(f"\nOn the {trained} cases optimised on: {start} → {after} passed")
+    if found.text != path.read_text(encoding="utf-8"):
+        typer.echo(
+            f"Held out ({found.held_cases} cases): {before} → {then}, "
+            f"fixed {len(found.fixed)}, broke {len(found.broken)}, McNemar p = {found.p_value:.2g}"
+        )
+        for number, step in enumerate(found.rounds, 1):
+            if step.kept:
+                typer.echo(f"Round {number}:")
+                typer.echo("\n".join(f"  - {change}" for change in step.changes))
+    if not found.confirmed:
+        typer.secho(f"Not confirmed on the held-out half: {path} is unchanged.", fg="yellow")
+        return
+    path.write_text(found.text, encoding="utf-8")
+    typer.secho(
+        f"Wrote {path}. Read the diff (git diff {path}), and if it says what the pack means, "
+        "open a pull request for it; then record the suites again.",
+        fg="green",
+    )
+
+
+def answering(
+    student: ModelClient, warehouse: Warehouse, suite: evals.Suite, embedder: Embedder | None
+) -> Callable[[Knowledge, evals.AnyCase], evals.CaseResult]:
+    """Run an answer case with one version of the knowledge, graded by code alone."""
+    graders: list[evals.Grader] = [evals.grade_behaviour, evals.grade_rows]
+
+    def run_case(version: Knowledge, case: evals.AnyCase) -> evals.CaseResult:
+        return evals.answer_case(
+            student,
+            warehouse,
+            version,
+            suite,
+            case,
+            graders,
+            embedder=embedder,  # type: ignore[arg-type]
+        )
+
+    return run_case
+
+
+def extracting(
+    student: ModelClient, pack: Path
+) -> Callable[[ExtractionSpec, evals.AnyCase], evals.CaseResult]:
+    """Run an extraction case with one version of the extraction, graded by code alone."""
+    graders: list[evals.Grader] = [evals.grade_behaviour, evals.grade_fields]
+
+    def run_case(version: ExtractionSpec, case: evals.AnyCase) -> evals.CaseResult:
+        return evals.extract_case(student, pack, version, case, graders)  # type: ignore[arg-type]
+
+    return run_case
+
+
+@app.command(name="train")
+@traced("train")
+def train_command(
+    pack: PackArgument,
+    base: Annotated[
+        str,
+        typer.Option(help="The open-weight model to fine-tune, as its trainer names it."),
+    ] = "mlx-community/gemma-4-e4b-it-4bit",
+    extraction: Annotated[
+        str | None,
+        typer.Option(help="Train for this extraction instead of the SQL writer."),
+    ] = None,
+    trainer: Annotated[str, typer.Option(help="The trainer plug-in to train with.")] = "mlx",
+    iterations: Annotated[int, typer.Option("--iters", min=1, help="Training steps.")] = 300,
+    dataset_only: Annotated[
+        bool, typer.Option("--dataset-only", help="Build the dataset, and train nothing.")
+    ] = False,
+    warehouse: WarehouseOption = None,
+) -> None:
+    """Build a fine-tuning dataset, from work people approved and the pack's own examples,
+    every golden case left out: for the SQL writer, or with --extraction for an extraction.
+    Then train an adapter for an open-weight model on it with LoRA. The adapter ships only if
+    the evals say so."""
+    settings = load_settings()
+    connection = None
+    try:
+        manifest = load_pack(pack)
+        suites = evals.load_suites(pack)
+        if extraction:
+            documents = golden_documents(suites, extraction, pack / "evals" / "documents")
+            lesson: Lesson = ExtractionLesson(load_extraction(pack, extraction), documents)
+        else:
+            golden = [case for suite in suites.values() for case in suite.cases]
+            connection = connect_warehouse(warehouse, pack, settings)
+            lesson = SqlLesson(
+                load_knowledge(pack), connection, golden, date.today(), connect_embedder(settings)
+            )
+    except (PackError, QueryError) as err:
+        raise fail(str(err)) from err
+    folder = training_path(settings.data_dir, manifest.name) / datetime.now(UTC).strftime(
+        "%Y-%m-%dT%H%M%SZ"
+    )
+    try:
+        store = connect_traces(settings, pack)
+        verdicts = FeedbackLog(feedback_path(settings.data_dir, manifest.name)).verdicts()
+        liked = list(approved(lesson, store, verdicts))
+        dataset = build_dataset(lesson, approved_pairs=liked, say=typer.echo)
+        if not dataset.pairs:
+            raise fail("No pairs to train on.")
+        train, valid = write_dataset(dataset, lesson, folder)
+    except (TraceError, FeedbackError, QueryError) as err:
+        raise fail(str(err)) from err
+    finally:
+        if connection is not None:
+            connection.close()
+    typer.echo(f"Wrote {train} pairs to train on and {valid} to validate with, in {folder}")
+    for given, why in dataset.left_out:
+        typer.secho(f"  left out: {given} ({why})", fg="bright_black", err=True)
+    if dataset_only:
+        return
+    try:
+        chosen = plugins.load("trainers", trainer)(settings)
+        trained = chosen.train(
+            base, folder, folder / "adapter", iterations=iterations, say=typer.echo
+        )
+    except (plugins.PluginError, TrainError) as err:
+        raise fail(str(err)) from err
+    typer.secho(
+        f"\nAdapter in {trained.adapter} (train loss {trained.train_loss}, "
+        f"valid loss {trained.valid_loss}).",
+        fg="green",
+    )
+    typer.echo(
+        "It ships only if it beats the prompted model on the golden set. Serve both and "
+        "compare, case by case:\n"
+        f"  mlx_lm.server --model {base} --adapter-path {trained.adapter}\n"
+        f"  OPENAI_BASE_URL=http://localhost:8080/v1 OPENAI_API_KEY=local vardex eval {pack} "
+        "--model openai/default_model --baseline <the prompted model's recording>\n"
+        "Ask for default_model: mlx-lm's server loads a model asked for by name afresh, "
+        "without the adapter."
+    )

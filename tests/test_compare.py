@@ -4,8 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from vardex.evals import compare, normalise
-from vardex.sql import Result
+from vardex.sql import Result, compare, normalise
 
 
 def result(columns: list[str], rows: list[tuple]) -> Result:
