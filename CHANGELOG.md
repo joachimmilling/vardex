@@ -6,6 +6,8 @@ All notable changes to Vardex are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-18
+
 ### Added
 
 - `VARDEX_PRICE_PER_HOUR` prices a local model's answers at their share of the machine's hour
