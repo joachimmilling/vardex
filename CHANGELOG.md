@@ -11,6 +11,8 @@ All notable changes to Vardex are recorded here. The format follows
 - `VARDEX_PRICE_PER_HOUR` prices a local model's answers at their share of the machine's hour
   (its rent, or its price over its life, and its power), so a report compares a local model's
   cost with a hosted one's instead of showing $0.
+- `VARDEX_FALLBACK_MODEL` sends a call to a second model when the first cannot be reached (a
+  refused connection, an overload, a server error), and only then.
 
 ## [0.11.0] - 2026-11-18
 
